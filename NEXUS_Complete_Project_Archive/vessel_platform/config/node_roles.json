@@ -1,0 +1,351 @@
+{
+  "_comment": "ESP32 Node Role Definitions — Complete role registry for the VesselNode firmware framework",
+  "_version": "1.0.0",
+  "_schema": "node_roles",
+  "_source_briefs": ["ESDD-VN-001 (Brief 10)"],
+  "_firmware_platform": "ESP32-S3 WROOM-1-N8R8",
+  "_rtos": "FreeRTOS 10.5.1 / ESP-IDF v5.2+",
+
+  "roles": [
+    {
+      "id": 0x01,
+      "name": "autopilot",
+      "enum_key": "ROLE_AUTOPILOT",
+      "description": "PID heading control with hydraulic rudder drive. Primary safety-critical node. Holds heading, tracks GPS course, and manages rudder solenoids (PORT/STBD/CLUTCH). Dual-ESP32 redundancy required.",
+      "critical": true,
+      "redundancy_required": true,
+      "default_firmware_version": "2.1.0",
+      "required_sensors": [
+        {"name": "bno085_compass", "type": "i2c", "address": "0x28", "description": "9-DOF IMU for heading and rate of turn"},
+        {"name": "as5048a_rudder", "type": "i2c", "address": "0x40", "description": "14-bit magnetic rudder angle encoder"},
+        {"name": "ssd1306_display", "type": "i2c", "address": "0x3C", "description": "128x64 OLED status display"},
+        {"name": "acs712_drive_current", "type": "i2c_adc", "address": "0x48", "description": "Drive solenoid current sensor"},
+        {"name": "acs712_clutch_current", "type": "i2c_adc", "address": "0x48", "description": "Clutch solenoid current sensor"}
+      ],
+      "required_actuators": [
+        {"name": "solenoid_port", "gpio": 13, "description": "Port hydraulic solenoid (rudder left)"},
+        {"name": "solenoid_starboard", "gpio": 5, "description": "Starboard hydraulic solenoid (rudder right)"},
+        {"name": "solenoid_clutch", "gpio": 3, "description": "Clutch solenoid (engage autopilot drive)"},
+        {"name": "buzzer", "gpio": 4, "description": "Piezo alarm buzzer via NPN driver"}
+      ],
+      "commands": [
+        {"cmd": "set_heading", "description": "Set target heading in degrees (0-360)", "params": ["heading_deg", "engage_bool"], "source": "jetson_mcp"},
+        {"cmd": "engage", "description": "Engage autopilot in specified mode", "params": ["mode"], "source": "jetson_mcp"},
+        {"cmd": "standby", "description": "Disengage autopilot, release clutch", "params": [], "source": "jetson_mcp"},
+        {"cmd": "set_mode", "description": "Switch operating mode (auto/track/wind)", "params": ["mode"], "source": "jetson_mcp"},
+        {"cmd": "set_pid_gains", "description": "Modify PID controller gains", "params": ["P","I","D","DD","PR","FF"], "source": "jetson_mcp"},
+        {"cmd": "calibrate", "description": "Start/stop/check sensor calibration", "params": ["type", "action"], "source": "jetson_mcp"},
+        {"cmd": "get_compass", "description": "Get detailed compass data", "params": [], "source": "jetson_mcp"},
+        {"cmd": "get_rudder", "description": "Get rudder position data", "params": [], "source": "jetson_mcp"}
+      ],
+      "standalone_behavior": {
+        "description": "Autopilot continues heading hold using onboard compass and buttons. PID loop runs independently. OLED displays heading, mode, and rudder angle. No Jetson needed for core steering function.",
+        "jetson_lost_fallback": "hold_current_heading",
+        "in_track_mode_fallback": "switch_to_auto_hold_current_heading",
+        "manual_controls": "6 physical buttons (AUTO/STBY, PORT ±1/±10, STBD ±1/±10, MODE)"
+      },
+      "calibration_steps": [
+        {"step": 1, "name": "vessel_config", "description": "Set vessel type, length, displacement, propulsion", "dockside": true},
+        {"step": 2, "name": "compass_calibration", "description": "Swing ship 360° for hard/soft iron correction", "dockside": true},
+        {"step": 3, "name": "rudder_center", "description": "Capture rudder amidships reference", "dockside": true},
+        {"step": 4, "name": "rudder_limits", "description": "Capture port and starboard mechanical stops", "dockside": true},
+        {"step": 5, "name": "yaw_damping", "description": "Tune D gain to eliminate yaw oscillation", "dockside": false},
+        {"step": 6, "name": "response_speed", "description": "Tune P gain for transient response", "dockside": false},
+        {"step": 7, "name": "circle_test", "description": "Full 360° verification of compass linearity", "dockside": false},
+        {"step": 8, "name": "alarm_tests", "description": "Kill switch, power cycle, off-course alarm", "dockside": false}
+      ],
+      "role_specific_tasks": [
+        {"name": "task_pid_control", "priority": 25, "stack_bytes": 2048, "period_ms": 10, "core": 0},
+        {"name": "task_nmea_parser", "priority": 20, "stack_bytes": 4096, "trigger": "event", "core": 0},
+        {"name": "task_compass_reader", "priority": 18, "stack_bytes": 2048, "period_ms": 100, "core": 0},
+        {"name": "task_rudder_feedback", "priority": 18, "stack_bytes": 1024, "period_ms": 20, "core": 0},
+        {"name": "task_current_monitor", "priority": 17, "stack_bytes": 1024, "period_ms": 50, "core": 0}
+      ]
+    },
+    {
+      "id": 0x02,
+      "name": "lighting_controller",
+      "enum_key": "ROLE_LIGHTING_CONTROLLER",
+      "description": "Deck, cabin, and navigation lighting channel control. Manages multiple PWM dimmer channels and scene presets. Supports dusk-to-dawn automatic mode.",
+      "critical": false,
+      "redundancy_required": false,
+      "default_firmware_version": "2.1.0",
+      "required_sensors": [
+        {"name": "bh1750_light", "type": "i2c", "address": "0x23", "description": "Ambient light sensor for auto-dimming"},
+        {"name": "ssd1306_display", "type": "i2c", "address": "0x3C", "description": "Status display (optional)"}
+      ],
+      "required_actuators": [
+        {"name": "pwm_channels", "description": "Up to 8 PWM channels via MOSFET drivers for lighting control"}
+      ],
+      "commands": [
+        {"cmd": "set_channel", "description": "Set individual channel brightness (0-100%)", "params": ["channel_id", "brightness_pct"]},
+        {"cmd": "set_scene", "description": "Activate named lighting scene preset", "params": ["scene_name"]},
+        {"cmd": "set_brightness", "description": "Set master brightness level", "params": ["brightness_pct"]},
+        {"cmd": "set_mode", "description": "Set mode: manual/auto/off", "params": ["mode"]}
+      ],
+      "standalone_behavior": {
+        "description": "Lighting continues with last-known settings. Auto-dimming uses ambient light sensor. Scene buttons work locally.",
+        "jetson_lost_fallback": "maintain_last_settings",
+        "manual_controls": "Optional physical buttons for scene selection"
+      },
+      "calibration_steps": [
+        {"step": 1, "name": "channel_mapping", "description": "Assign physical channels to logical names", "dockside": true},
+        {"step": 2, "name": "brightness_curve", "description": "Calibrate PWM-to-perceived-brightness curve", "dockside": true},
+        {"step": 3, "name": "light_sensor_offset", "description": "Zero ambient light sensor reading", "dockside": true}
+      ],
+      "role_specific_tasks": [
+        {"name": "task_lighting_control", "priority": 15, "stack_bytes": 2048, "period_ms": 100, "core": 0},
+        {"name": "task_light_sensor", "priority": 14, "stack_bytes": 1024, "period_ms": 1000, "core": 0}
+      ]
+    },
+    {
+      "id": 0x03,
+      "name": "engine_monitor",
+      "enum_key": "ROLE_ENGINE_MONITOR",
+      "description": "Engine room monitoring: RPM, oil pressure, coolant temperature, exhaust temperature, fuel flow, alternator voltage. Critical safety role with alarm capability. Dual-ESP32 redundancy required.",
+      "critical": true,
+      "redundancy_required": true,
+      "default_firmware_version": "2.1.0",
+      "required_sensors": [
+        {"name": "ads1115_analog", "type": "i2c", "address": "0x48", "description": "4-channel 16-bit ADC for analog gauges"},
+        {"name": "max31855_temp", "type": "spi", "description": "Thermocouple amplifier for exhaust temp"},
+        {"name": "ina219_power", "type": "i2c", "address": "0x40", "description": "Voltage/current monitor for alternator"}
+      ],
+      "required_actuators": [
+        {"name": "buzzer", "gpio": 4, "description": "Engine alarm buzzer"},
+        {"name": "alarm_relay", "description": "External alarm relay (connected to wheelhouse)"}
+      ],
+      "commands": [
+        {"cmd": "get_readings", "description": "Get all current engine sensor readings", "params": []},
+        {"cmd": "set_alarm_threshold", "description": "Set alarm threshold for a parameter", "params": ["parameter", "threshold", "severity"]},
+        {"cmd": "clear_alarm", "description": "Acknowledge and clear an active alarm", "params": ["alarm_id"]}
+      ],
+      "standalone_behavior": {
+        "description": "Engine monitoring continues autonomously. Alarms sound locally via buzzer. Critical thresholds (over-temp, low oil pressure) trigger regardless of Jetson connectivity.",
+        "jetson_lost_fallback": "local_alarms_continue",
+        "manual_controls": "Alarm acknowledge button"
+      },
+      "calibration_steps": [
+        {"step": 1, "name": "adc_scaling", "description": "Calibrate ADC readings against known gauge values", "dockside": false},
+        {"step": 2, "name": "rpm_calibration", "description": "Set RPM sensor pulses-per-revolution", "dockside": false},
+        {"step": 3, "name": "alarm_thresholds", "description": "Set warning and critical thresholds per parameter", "dockside": true},
+        {"step": 4, "name": "temp_offset", "description": "Calibrate temperature sensor offsets", "dockside": true}
+      ],
+      "role_specific_tasks": [
+        {"name": "task_engine_sample", "priority": 16, "stack_bytes": 2048, "period_ms": 200, "core": 0},
+        {"name": "task_engine_alarm", "priority": 17, "stack_bytes": 1024, "period_ms": 500, "core": 0}
+      ]
+    },
+    {
+      "id": 0x04,
+      "name": "deck_equipment",
+      "enum_key": "ROLE_DECK_EQUIPMENT",
+      "description": "Deck equipment monitoring and control: winch tension, pot hauler status, crane position. Reads load cells and limit switches. Provides over-load protection alarms.",
+      "critical": false,
+      "redundancy_required": false,
+      "default_firmware_version": "2.1.0",
+      "required_sensors": [
+        {"name": "hx711_load_cell", "type": "spi", "description": "Load cell amplifier for line tension (up to 4 channels)"},
+        {"name": "limit_switches", "type": "gpio", "description": "Limit switches for equipment position limits"}
+      ],
+      "required_actuators": [
+        {"name": "buzzer", "gpio": 4, "description": "Over-load alarm buzzer"}
+      ],
+      "commands": [
+        {"cmd": "get_equipment_status", "description": "Get all equipment status and readings", "params": []},
+        {"cmd": "command_equipment", "description": "Send command to equipment (start/stop/raise/lower)", "params": ["equipment_id", "command"]}
+      ],
+      "standalone_behavior": {
+        "description": "Load monitoring continues. Over-load alarms sound locally. Equipment status reported on OLED.",
+        "jetson_lost_fallback": "local_overload_alarms",
+        "manual_controls": "Equipment control buttons at deck station"
+      },
+      "calibration_steps": [
+        {"step": 1, "name": "load_cell_tare", "description": "Zero load cells with no load", "dockside": true},
+        {"step": 2, "name": "load_cell_calibration", "description": "Apply known weight for scaling factor", "dockside": true},
+        {"step": 3, "name": "tension_alarm_set", "description": "Set over-tension alarm thresholds", "dockside": true}
+      ],
+      "role_specific_tasks": [
+        {"name": "task_deck_monitor", "priority": 16, "stack_bytes": 2048, "period_ms": 100, "core": 0}
+      ]
+    },
+    {
+      "id": 0x05,
+      "name": "camera_interface",
+      "enum_key": "ROLE_CAMERA_INTERFACE",
+      "description": "Camera power control, PTZ (pan-tilt-zoom) motor control, and video streaming trigger. Interfaces with Jetson-Bravo DeepStream pipeline for vision processing.",
+      "critical": false,
+      "redundancy_required": false,
+      "default_firmware_version": "2.1.0",
+      "required_sensors": [
+        {"name": "ptz_feedback_pot", "type": "adc", "description": "PTZ position feedback potentiometers (pan/tilt)"},
+        {"name": "current_monitor", "type": "i2c_adc", "description": "Camera power current monitoring"}
+      ],
+      "required_actuators": [
+        {"name": "ptz_pan_motor", "description": "Pan servo/stepper motor driver"},
+        {"name": "ptz_tilt_motor", "description": "Tilt servo/stepper motor driver"},
+        {"name": "ptz_zoom_motor", "description": "Zoom servo motor driver"},
+        {"name": "camera_power_relay", "description": "Camera 12V power control relay"},
+        {"name": "ir_illuminator", "description": "IR illumination LED array control (PWM)"}
+      ],
+      "commands": [
+        {"cmd": "set_ptz", "description": "Set PTZ position (pan/tilt/zoom in degrees)", "params": ["pan_deg", "tilt_deg", "zoom_pct"]},
+        {"cmd": "capture_image", "description": "Trigger still image capture", "params": ["camera_id"]},
+        {"cmd": "start_stream", "description": "Start video stream to Jetson", "params": ["camera_id", "resolution"]},
+        {"cmd": "stop_stream", "description": "Stop video stream", "params": ["camera_id"]}
+      ],
+      "standalone_behavior": {
+        "description": "Camera maintains last PTZ position. No streaming without Jetson. PTZ can be controlled via physical joystick if connected.",
+        "jetson_lost_fallback": "hold_position_no_stream",
+        "manual_controls": "Optional PTZ joystick interface"
+      },
+      "calibration_steps": [
+        {"step": 1, "name": "ptz_center", "description": "Set PTZ home/center position", "dockside": true},
+        {"step": 2, "name": "ptz_limits", "description": "Capture pan/tilt mechanical limits", "dockside": true},
+        {"step": 3, "name": "camera_focus", "description": "Set autofocus trigger zones (if applicable)", "dockside": true}
+      ],
+      "role_specific_tasks": [
+        {"name": "task_ptz_control", "priority": 15, "stack_bytes": 2048, "period_ms": 50, "core": 0}
+      ]
+    },
+    {
+      "id": 0x06,
+      "name": "environmental_sensor",
+      "enum_key": "ROLE_ENVIRONMENTAL_SENSOR",
+      "description": "Wind speed/direction, barometric pressure, air temperature, humidity, water temperature. Provides real-time weather data to the cluster and autopilot wind mode.",
+      "critical": false,
+      "redundancy_required": false,
+      "default_firmware_version": "2.1.0",
+      "required_sensors": [
+        {"name": "bme280", "type": "i2c", "address": "0x76", "description": "Barometric pressure, temperature, humidity"},
+        {"name": "ds18b20_water", "type": "onewire", "description": "Water temperature probe (1-Wire)"},
+        {"name": "wind_anemometer", "type": "pulse_counter", "description": "Wind speed pulse counter (cup anemometer)"},
+        {"name": "wind_vane", "type": "adc", "description": "Wind direction potentiometer vane"}
+      ],
+      "required_actuators": [],
+      "commands": [
+        {"cmd": "get_readings", "description": "Get all environmental sensor readings", "params": []},
+        {"cmd": "set_sampling_rate", "description": "Set sensor sampling rate", "params": ["rate_hz"]}
+      ],
+      "standalone_behavior": {
+        "description": "Environmental sensors continue sampling. Data available locally via OLED. Wind data available to autopilot via NMEA MWV sentences.",
+        "jetson_lost_fallback": "continue_sampling",
+        "manual_controls": "None required"
+      },
+      "calibration_steps": [
+        {"step": 1, "name": "baro_offset", "description": "Set barometric pressure to local altimeter setting", "dockside": true},
+        {"step": 2, "name": "wind_direction_zero", "description": "Align wind vane to bow reference", "dockside": true},
+        {"step": 3, "name": "wind_speed_factor", "description": "Calibrate anemometer pulse-to-speed factor", "dockside": true}
+      ],
+      "role_specific_tasks": [
+        {"name": "task_env_sample", "priority": 14, "stack_bytes": 2048, "period_ms": 500, "core": 0},
+        {"name": "task_wind_sample", "priority": 14, "stack_bytes": 1024, "period_ms": 200, "core": 0}
+      ]
+    },
+    {
+      "id": 0x07,
+      "name": "bilge_monitor",
+      "enum_key": "ROLE_BILGE_MONITOR",
+      "description": "Bilge water level monitoring, automatic pump control, and flood alarm. Critical safety function — prevents vessel sinking from undetected flooding.",
+      "critical": false,
+      "redundancy_required": false,
+      "default_firmware_version": "2.1.0",
+      "required_sensors": [
+        {"name": "bilge_level_floats", "type": "gpio", "description": "Bilge level float switches (low/medium/high) per compartment"},
+        {"name": "bilge_level_analog", "type": "adc", "description": "Continuous bilge level sensor (optional, resistive tape)"}
+      ],
+      "required_actuators": [
+        {"name": "bilge_pump_relay", "description": "Bilge pump motor relay (12V, high current)"},
+        {"name": "flood_alarm_buzzer", "description": "High-decibel flood alarm"},
+        {"name": "alarm_relay", "description": "Remote alarm relay to wheelhouse"}
+      ],
+      "commands": [
+        {"cmd": "get_level", "description": "Get current bilge levels for all compartments", "params": []},
+        {"cmd": "set_pump_mode", "description": "Set pump mode: auto/manual/off", "params": ["compartment_id", "mode"]},
+        {"cmd": "test_pump", "description": "Run pump test cycle (3 second run)", "params": ["compartment_id"]}
+      ],
+      "standalone_behavior": {
+        "description": "Bilge monitoring and pump control continue autonomously. Pump activates on high water regardless of Jetson. Flood alarm sounds locally and remotely.",
+        "jetson_lost_fallback": "autonomous_pump_and_alarm",
+        "manual_controls": "Pump override toggle at each bilge access point"
+      },
+      "calibration_steps": [
+        {"step": 1, "name": "float_switch_test", "description": "Verify float switch operation per compartment", "dockside": true},
+        {"step": 2, "name": "pump_run_test", "description": "Test pump activation and flow", "dockside": true},
+        {"step": 3, "name": "alarm_levels", "description": "Set alarm thresholds per compartment", "dockside": true}
+      ],
+      "role_specific_tasks": [
+        {"name": "task_bilge_monitor", "priority": 16, "stack_bytes": 1024, "period_ms": 500, "core": 0},
+        {"name": "task_bilge_pump", "priority": 15, "stack_bytes": 1024, "period_ms": 1000, "core": 0}
+      ]
+    },
+    {
+      "id": 0x08,
+      "name": "navigation_aid",
+      "enum_key": "ROLE_NAVIGATION_AID",
+      "description": "Navigation light controller, AIS data relay, masthead light, anchor light, steaming light, all-round light. COLREGS-compliant light patterns with automatic dusk-to-dawn switching.",
+      "critical": false,
+      "redundancy_required": false,
+      "default_firmware_version": "2.1.0",
+      "required_sensors": [
+        {"name": "bh1750_light", "type": "i2c", "address": "0x23", "description": "Ambient light sensor for dusk-to-dawn switching"},
+        {"name": "gps_puck", "type": "nmea_uart", "description": "GPS receiver for anchor watch drift detection (optional)"}
+      ],
+      "required_actuators": [
+        {"name": "nav_light_port", "description": "Port (red) navigation light relay"},
+        {"name": "nav_light_stbd", "description": "Starboard (green) navigation light relay"},
+        {"name": "nav_light_stern", "description": "Stern (white) light relay"},
+        {"name": "nav_light_masthead", "description": "Masthead (forward white) light relay"},
+        {"name": "nav_light_anchor", "description": "Anchor (all-round white) light relay"},
+        {"name": "nav_light_special", "description": "Special flashing lights (fishing, towing) relay"}
+      ],
+      "commands": [
+        {"cmd": "set_light_mode", "description": "Set lighting mode: underway/anchored/fishing/off", "params": ["mode"]},
+        {"cmd": "get_ais_data", "description": "Get latest AIS target data", "params": []},
+        {"cmd": "set_pattern", "description": "Set special light flash pattern", "params": ["pattern_id", "rate_hz"]}
+      ],
+      "standalone_behavior": {
+        "description": "Navigation lights switch automatically based on ambient light and vessel mode. Manual override via physical switch at helm. COLREGS compliance maintained without Jetson.",
+        "jetson_lost_fallback": "auto_lights_with_manual_override",
+        "manual_controls": "Physical nav light switch panel at helm station"
+      },
+      "calibration_steps": [
+        {"step": 1, "name": "light_threshold", "description": "Set ambient light threshold for auto-switching", "dockside": true},
+        {"step": 2, "name": "light_test", "description": "Verify all navigation light circuits", "dockside": true},
+        {"step": 3, "name": "anchor_watch_radius", "description": "Set anchor watch GPS drift radius", "dockside": false}
+      ],
+      "role_specific_tasks": [
+        {"name": "task_nav_lights", "priority": 14, "stack_bytes": 1024, "period_ms": 250, "core": 0},
+        {"name": "task_anchor_watch", "priority": 12, "stack_bytes": 2048, "period_ms": 5000, "core": 0}
+      ]
+    }
+  ],
+
+  "_comment_common_tasks": "These tasks run on ALL VesselNode instances regardless of role",
+  "common_tasks": [
+    {"name": "task_watchdog_heartbeat", "priority": 24, "stack_bytes": 1024, "period_ms": 100, "description": "Monitor all task heartbeats, kick external WDT, monitor voltage"},
+    {"name": "task_serial_jetson_rx", "priority": 23, "stack_bytes": 4096, "trigger": "event", "description": "Receive and parse commands from Jetson over RS-422"},
+    {"name": "task_serial_jetson_tx", "priority": 22, "stack_bytes": 2048, "trigger": "event", "description": "Transmit telemetry to Jetson over RS-422"},
+    {"name": "task_protocol_dispatch", "priority": 21, "stack_bytes": 4096, "trigger": "event", "description": "Parse JSON and dispatch to command handlers"},
+    {"name": "task_ota_handler", "priority": 19, "stack_bytes": 4096, "trigger": "event", "description": "Handle OTA firmware chunk reception"},
+    {"name": "task_button_handler", "priority": 15, "stack_bytes": 1024, "trigger": "event", "description": "Debounce physical buttons, execute actions"},
+    {"name": "task_display_oled", "priority": 12, "stack_bytes": 4096, "period_ms": 200, "description": "Update SSD1306 OLED display at 5Hz"},
+    {"name": "task_led_status", "priority": 10, "stack_bytes": 1024, "period_ms": 250, "description": "Update status LEDs (green/amber/red/blue)"}
+  ],
+
+  "_comment_common_commands": "These commands are handled by the base framework for all roles",
+  "common_commands": [
+    "ping",
+    "identify",
+    "get_status",
+    "get_config",
+    "set_config",
+    "ota_update",
+    "factory_reset",
+    "heartbeat",
+    "heartbeat_ack"
+  ],
+
+  "_comment_provisioning": "Provisioning timeout for unprovisioned nodes waiting for Jetson response",
+  "provisioning_timeout_seconds": 30
+}

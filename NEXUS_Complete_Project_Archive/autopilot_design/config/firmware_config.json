@@ -1,0 +1,307 @@
+{
+  "_comment": "ESP32 Marine Autopilot Firmware Configuration \u2014 All configurable parameters",
+  "_version": "1.1.0",
+  "_schema": "firmware_config",
+  "pid": {
+    "_comment": "Extended PID gains (from pypilot proven design). All gains positive. Direction implicit in error sign.",
+    "gains": {
+      "P": {
+        "value": 0.003,
+        "min": 0.0,
+        "max": 0.03,
+        "unit": "rudder_fraction_per_deg_error",
+        "description": "Proportional \u2014 linear heading error response"
+      },
+      "I": {
+        "value": 0.0,
+        "min": 0.0,
+        "max": 0.05,
+        "unit": "rudder_fraction_per_deg_sec",
+        "description": "Integral \u2014 accumulated error for weather helm (OFF by default)"
+      },
+      "D": {
+        "value": 0.09,
+        "min": 0.0,
+        "max": 0.24,
+        "unit": "rudder_fraction_per_deg_per_sec",
+        "description": "Derivative \u2014 rate of turn damping (PRIMARY gain, gyro-derived)"
+      },
+      "DD": {
+        "value": 0.075,
+        "min": 0.0,
+        "max": 0.24,
+        "unit": "rudder_fraction_per_deg_per_sec2",
+        "description": "Derivative' \u2014 rate of rate of turn (improves reaction time)"
+      },
+      "PR": {
+        "value": 0.005,
+        "min": 0.0,
+        "max": 0.02,
+        "unit": "rudder_fraction",
+        "description": "Proportional Root \u2014 sqrt(|error|)*sign, reduces overshoot"
+      },
+      "FF": {
+        "value": 0.6,
+        "min": 0.0,
+        "max": 2.4,
+        "unit": "rudder_fraction_per_deg_change",
+        "description": "Feed Forward \u2014 response to heading command changes"
+      }
+    },
+    "anti_windup": {
+      "heading_error_clamp_deg": 60.0,
+      "integral_accum_max_deg_sec": 1500.0,
+      "integral_enable_threshold_deg": 15.0,
+      "integral_engage_lockout_sec": 5.0,
+      "integral_decay_rate": 0.001,
+      "reset_on_mode_change": true,
+      "reset_on_engage": true,
+      "_comment_integral_limit": "Fix M-02: Raised from 5.0 to 1500.0 deg\u00b7s. Simulation shows 5\u00b0 wind disturbance requires ~477 deg\u00b7s of integral for compensation. At \u00b15 deg\u00b7s the integral was useless for weather helm. \u00b11500 provides adequate headroom."
+    },
+    "derivative": {
+      "on_measurement": true,
+      "filter_type": "lowpass_first_order",
+      "filter_cutoff_hz": 0.3,
+      "dd_filter_cutoff_hz": 0.15
+    },
+    "simulation_gain_mapping": {
+      "_comment": "Fix M-02: Documents the relationship between simulation standard PID gains and firmware pypilot extended PID gains. These are DIFFERENT controller structures \u2014 gains are NOT directly interchangeable.",
+      "simulation_form": {
+        "type": "standard_pid",
+        "formula": "u = Kp*e + Ki*integral(e) + Kd*de/dt",
+        "proven_moderate_gains": {
+          "Kp": 1.5,
+          "Ki": 0.03,
+          "Kd": 0.4
+        }
+      },
+      "firmware_form": {
+        "type": "pypilot_extended_pid",
+        "formula": "u = P*e + I*integral(e) + D*(-dh/dt) + DD*(d\u00b2h/dt\u00b2) + PR*sqrt(|e|)*sign(e) + FF*d(heading_cmd)/dt",
+        "default_gains": {
+          "P": 0.003,
+          "I": 0.0,
+          "D": 0.09,
+          "DD": 0.075,
+          "PR": 0.005,
+          "FF": 0.6
+        },
+        "notes": [
+          "D term acts on derivative-of-measurement (not error) \u2014 different behavior than simulation's derivative-on-error",
+          "DD, PR, FF terms have no simulation equivalent",
+          "Simulation results CANNOT directly validate firmware gains",
+          "RE-RUN simulation with exact firmware gain structure for proper validation"
+        ]
+      }
+    }
+  },
+  "deadband": {
+    "type": "linear_ramp",
+    "inner_deg": 0.5,
+    "outer_deg": 2.0,
+    "integral_reduction_factor": 0.25
+  },
+  "sample_rates": {
+    "pid_hz": 10,
+    "compass_hz": 10,
+    "rudder_feedback_hz": 50,
+    "current_monitor_hz": 50,
+    "watchdog_hz": 10,
+    "display_hz": 5,
+    "mqtt_hz": 1
+  },
+  "rate_limiter": {
+    "heading_command_max_deg_per_sec": 5.0,
+    "rudder_command_max_deg_per_sec": 6.0,
+    "solenoid_min_pulse_ms": 100,
+    "solenoid_min_off_ms": 200,
+    "clutch_engage_delay_ms": 500,
+    "_comment_clutch_ramp": "Fix C-10: Clutch engagement creates rudder jerk. Solenoid output is ramped over this period to prevent mechanical jerk when transitioning from manual to autopilot control. During this period, display 'HANDS OFF HELM' and beep warning."
+  },
+  "rudder": {
+    "max_angle_deg": 33.0,
+    "mechanical_stop_deg": 35.0,
+    "center_adc": 2048,
+    "type": "as5048a",
+    "pot_adc_channel": "ADC1_CH5",
+    "pot_gpio": 6,
+    "pot_voltage_divider_top_kohm": 10.0,
+    "pot_voltage_divider_bottom_kohm": 20.0,
+    "pot_filter_alpha": 0.15
+  },
+  "compass": {
+    "type": "bno085",
+    "i2c_address": "0x28",
+    "i2c_bus": 0,
+    "filter_alpha": 0.3,
+    "max_rate_of_change_deg_per_sec": 60.0,
+    "variation_deg": 0.0,
+    "heading_offset_deg": 0.0
+  },
+  "gain_scheduling": {
+    "enabled": true,
+    "reference_speed_kts": 5.0,
+    "min_speed_kts": 1.0,
+    "max_speed_kts": 20.0,
+    "schedule_P": true,
+    "schedule_D": true,
+    "schedule_PR": true,
+    "schedule_I": false,
+    "schedule_DD": false,
+    "schedule_FF": false
+  },
+  "serial": {
+    "jetson": {
+      "uart_num": 2,
+      "baud_rate": 115200,
+      "data_bits": 8,
+      "parity": "none",
+      "stop_bits": 1,
+      "rx_buffer_size": 1024,
+      "tx_buffer_size": 1024,
+      "heartbeat_timeout_ms": 2000
+    },
+    "nmea": {
+      "uart_num": 1,
+      "baud_rate": 4800,
+      "data_bits": 8,
+      "parity": "none",
+      "stop_bits": 1,
+      "rx_buffer_size": 512,
+      "tx_buffer_size": 256,
+      "talker_id": "AG"
+    }
+  },
+  "safety": {
+    "watchdog_timeout_ms": 50,
+    "compass_timeout_ms": 500,
+    "rudder_timeout_ms": 200,
+    "max_solenoid_on_ms": 15000,
+    "solenoid_cooldown_ms": 500,
+    "overcurrent_drive_ma": 4000,
+    "overcurrent_clutch_ma": 3000,
+    "clutch_min_engaged_ma": 500,
+    "heading_error_warning_deg": 20.0,
+    "heading_error_disengage_deg": 60.0,
+    "undervoltage_v": 10.0,
+    "overvoltage_v": 16.0,
+    "voltage_warning_low_v": 11.0,
+    "voltage_warning_high_v": 15.0
+  },
+  "display": {
+    "type": "ssd1306",
+    "i2c_address": "0x3C",
+    "width": 128,
+    "height": 64,
+    "contrast": 255,
+    "pages": [
+      "status",
+      "detailed",
+      "calibration",
+      "system"
+    ]
+  },
+  "buttons": {
+    "debounce_ms": 50,
+    "long_press_ms": 1000,
+    "repeat_delay_ms": 500,
+    "auto_stby": {
+      "gpio": 35,
+      "active": "low",
+      "label": "AUTO/STBY"
+    },
+    "port_1": {
+      "gpio": 36,
+      "active": "low",
+      "label": "PORT -1"
+    },
+    "port_10": {
+      "gpio": 37,
+      "active": "low",
+      "label": "PORT -10"
+    },
+    "stbd_1": {
+      "gpio": 38,
+      "active": "low",
+      "label": "STBD +1"
+    },
+    "stbd_10": {
+      "gpio": 39,
+      "active": "low",
+      "label": "STBD +10"
+    },
+    "mode": {
+      "gpio": 40,
+      "active": "low",
+      "label": "MODE"
+    }
+  },
+  "leds": {
+    "green": {
+      "gpio": 45,
+      "active": "low",
+      "description": "System OK / Engaged"
+    },
+    "amber": {
+      "gpio": 46,
+      "active": "low",
+      "description": "Warning"
+    },
+    "red": {
+      "gpio": 47,
+      "active": "low",
+      "description": "Critical Alarm"
+    },
+    "blue": {
+      "gpio": 48,
+      "active": "low",
+      "description": "Jetson Link Active"
+    }
+  },
+  "mqtt": {
+    "enabled": false,
+    "broker_url": "mqtt://boat.local:1883",
+    "username": "",
+    "password": "",
+    "telemetry_topic": "autopilot/telemetry",
+    "alarm_topic": "autopilot/alarms",
+    "command_topic": "autopilot/commands",
+    "commands_enabled": false,
+    "wifi_ssid": "",
+    "wifi_password": "",
+    "retry_interval_sec": 30
+  },
+  "profiles": {
+    "_comment": "Named gain presets selectable via MODE button long-press",
+    "default": "calm",
+    "presets": {
+      "calm": {
+        "P": 0.003,
+        "I": 0.0,
+        "D": 0.09,
+        "DD": 0.075,
+        "PR": 0.005,
+        "FF": 0.6,
+        "description": "Light winds, calm seas"
+      },
+      "rough": {
+        "P": 0.005,
+        "I": 0.01,
+        "D": 0.12,
+        "DD": 0.1,
+        "PR": 0.008,
+        "FF": 0.4,
+        "description": "Strong winds, heavy seas"
+      },
+      "light": {
+        "P": 0.002,
+        "I": 0.0,
+        "D": 0.06,
+        "DD": 0.05,
+        "PR": 0.003,
+        "FF": 0.8,
+        "description": "Light air, drifting"
+      }
+    }
+  }
+}

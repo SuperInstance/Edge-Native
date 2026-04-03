@@ -1,0 +1,2409 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "_comment": "NEXUS I/O Driver Registry - Production Catalog v2.0.0",
+  "registry_version": "2.0.0",
+  "abi_version": 2,
+  "drivers": [
+    {
+      "name": "hmc5883l",
+      "version": "1.2.0",
+      "protocol": "I2C",
+      "description": "Honeywell HMC5883L 3-axis digital compass",
+      "addresses": [
+        30
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 400000,
+        "gpio_type": "any",
+        "notes": "Requires 3.3V supply; I2C pull-ups to 3.3V."
+      },
+      "power_consumption": {
+        "typical_ua": 100,
+        "sleep_ua": 1,
+        "peak_ua": 150,
+        "supply_v_min_mv": 2700,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "reg": 2,
+          "value": 0,
+          "desc": "Continuous measurement mode (8 Hz default)"
+        },
+        {
+          "reg": 1,
+          "value": 32,
+          "desc": "Set gain to +/-1.3 Ga (CN=001, GN=000)"
+        },
+        {
+          "reg": 0,
+          "value": 112,
+          "desc": "8 samples averaged, 15 Hz output, normal measurement"
+        },
+        {
+          "reg": 2,
+          "value": 0,
+          "desc": "Confirm continuous mode"
+        }
+      ],
+      "read_procedure": {
+        "register": 3,
+        "bytes": 6,
+        "order": "big-endian",
+        "conversion": {
+          "x": "int16_le(reg03, reg04) * 0.92",
+          "y": "int16_le(reg05, reg06) * 0.92",
+          "z": "int16_le(reg07, reg08) * 0.92"
+        },
+        "gain_table": [
+          {
+            "gain_register": 1,
+            "value": 0,
+            "gauss_range": 0.88,
+            "lsb_per_gauss": 1370.0
+          },
+          {
+            "gain_register": 1,
+            "value": 32,
+            "gauss_range": 1.3,
+            "lsb_per_gauss": 1090.0
+          },
+          {
+            "gain_register": 1,
+            "value": 64,
+            "gauss_range": 1.9,
+            "lsb_per_gauss": 820.0
+          },
+          {
+            "gain_register": 1,
+            "value": 96,
+            "gauss_range": 2.5,
+            "lsb_per_gauss": 660.0
+          },
+          {
+            "gain_register": 1,
+            "value": 128,
+            "gauss_range": 4.0,
+            "lsb_per_gauss": 440.0
+          },
+          {
+            "gain_register": 1,
+            "value": 160,
+            "gauss_range": 4.7,
+            "lsb_per_gauss": 390.0
+          },
+          {
+            "gain_register": 1,
+            "value": 192,
+            "gauss_range": 5.6,
+            "lsb_per_gauss": 330.0
+          },
+          {
+            "gain_register": 1,
+            "value": 224,
+            "gauss_range": 8.1,
+            "lsb_per_gauss": 230.0
+          }
+        ],
+        "status_register": 9,
+        "data_ready_bit": 1
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read ID registers A, B, C (0x0A-0x0C)",
+          "expected": "0x48, 0x34, 0x33",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Set positive bias (reg0=0x71, reg1=0xA0, reg2=0x01)",
+          "expected": "self-test current on",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Read X/Y/Z data",
+          "expected": "X:+250..+700, Y:-700..-250, Z:-500..-100",
+          "severity": "FAIL"
+        },
+        {
+          "step": 4,
+          "action": "Set negative bias (reg0=0x72, reg1=0xA0, reg2=0x01)",
+          "expected": "self-test current neg",
+          "severity": "FAIL"
+        },
+        {
+          "step": 5,
+          "action": "Read X/Y/Z data",
+          "expected": "X:-700..-250, Y:+250..+700, Z:+100..+500",
+          "severity": "FAIL"
+        },
+        {
+          "step": 6,
+          "action": "Restore normal config",
+          "expected": "N/A",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "3-axis magnetic field in microtesla",
+        "struct_size": 12,
+        "sample_rate_hz": 75,
+        "fields": [
+          {
+            "name": "mag_x",
+            "type": "NX_DATA_INT16",
+            "offset": 0,
+            "size": 2,
+            "scale": 0.92,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 2.0
+          },
+          {
+            "name": "mag_y",
+            "type": "NX_DATA_INT16",
+            "offset": 2,
+            "size": 2,
+            "scale": 0.92,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 2.0
+          },
+          {
+            "name": "mag_z",
+            "type": "NX_DATA_INT16",
+            "offset": 4,
+            "size": 2,
+            "scale": 0.92,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 2.0
+          },
+          {
+            "name": "heading",
+            "type": "NX_DATA_FLOAT",
+            "offset": 8,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DEGREE",
+            "accuracy": 3.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Must not be exposed to magnetic fields > 3 Gauss or permanent damage may occur",
+        "Self-test consumes extra current and changes gain; normal config must be restored",
+        "Data may latch if I2C communication is interrupted mid-read; read all 6 bytes atomically",
+        "Temperature drift: +/- 0.3% per degree C from 25C"
+      ],
+      "workarounds": [
+        "Use set/reset pulse sequence (write 0x10 then 0x11 to reg0) after strong field exposure",
+        "If data latches, perform full re-initialization",
+        "Apply soft-iron calibration matrix stored in NVS"
+      ]
+    },
+    {
+      "name": "hmc5883l_l",
+      "version": "1.1.0",
+      "protocol": "I2C",
+      "description": "HMC5883L low-noise variant with averaging and set/reset stabilization",
+      "addresses": [
+        30
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 400000,
+        "gpio_type": "any",
+        "notes": "Same pinout as hmc5883l. Adds periodic set/reset for noise reduction."
+      },
+      "power_consumption": {
+        "typical_ua": 110,
+        "sleep_ua": 1,
+        "peak_ua": 200,
+        "supply_v_min_mv": 2700,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "reg": 2,
+          "value": 0,
+          "desc": "Continuous measurement mode"
+        },
+        {
+          "reg": 1,
+          "value": 96,
+          "desc": "Gain +/-2.5 Ga for wider dynamic range"
+        },
+        {
+          "reg": 0,
+          "value": 116,
+          "desc": "8 samples averaged, 30 Hz output, normal measurement"
+        },
+        {
+          "reg": 2,
+          "value": 0,
+          "desc": "Confirm continuous mode"
+        },
+        {
+          "reg": 0,
+          "value": 16,
+          "desc": "Positive set pulse"
+        },
+        {
+          "reg": 0,
+          "value": 116,
+          "desc": "Resume normal operation after set"
+        }
+      ],
+      "read_procedure": {
+        "register": 3,
+        "bytes": 6,
+        "order": "big-endian",
+        "conversion": {
+          "x": "int16_le(reg03, reg04) * 0.66",
+          "y": "int16_le(reg05, reg06) * 0.66",
+          "z": "int16_le(reg07, reg08) * 0.66"
+        },
+        "status_register": 9,
+        "data_ready_bit": 1
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read ID registers A, B, C",
+          "expected": "0x48, 0x34, 0x33",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Run set/reset cycle and verify non-zero readings",
+          "expected": "any axis |val| > 50",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Measure noise floor (50 samples, compute std dev)",
+          "expected": "std_dev < 3 LSB",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "3-axis magnetic field, low-noise variant, microtesla",
+        "struct_size": 12,
+        "sample_rate_hz": 30,
+        "fields": [
+          {
+            "name": "mag_x",
+            "type": "NX_DATA_INT16",
+            "offset": 0,
+            "size": 2,
+            "scale": 0.66,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.5
+          },
+          {
+            "name": "mag_y",
+            "type": "NX_DATA_INT16",
+            "offset": 2,
+            "size": 2,
+            "scale": 0.66,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.5
+          },
+          {
+            "name": "mag_z",
+            "type": "NX_DATA_INT16",
+            "offset": 4,
+            "size": 2,
+            "scale": 0.66,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.5
+          },
+          {
+            "name": "heading",
+            "type": "NX_DATA_FLOAT",
+            "offset": 8,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DEGREE",
+            "accuracy": 2.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Lower sample rate (30 Hz) due to 8-sample averaging",
+        "Set/reset cycle adds ~6ms latency to periodic reads",
+        "Same field exposure limit as standard HMC5883L"
+      ],
+      "workarounds": [
+        "Set/reset every N reads (configurable, default N=100)",
+        "Store calibration data per-device in NVS"
+      ]
+    },
+    {
+      "name": "ist8310",
+      "version": "1.0.1",
+      "protocol": "I2C",
+      "description": "IST8310 3-axis magnetometer (TDK/InvenSense, lower power alternative to HMC5883L)",
+      "addresses": [
+        14,
+        12
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 400000,
+        "gpio_type": "any",
+        "notes": "Requires INT pin for DRDY; optional for polled operation."
+      },
+      "power_consumption": {
+        "typical_ua": 70,
+        "sleep_ua": 1,
+        "peak_ua": 100,
+        "supply_v_min_mv": 1700,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "reg": 65,
+          "value": 2,
+          "desc": "Soft reset (self-clearing)"
+        },
+        {
+          "reg": 10,
+          "value": 0,
+          "desc": "Wait > 5ms, then read 0x07"
+        },
+        {
+          "reg": 10,
+          "value": 0,
+          "desc": "Average = 16x for noise reduction"
+        },
+        {
+          "reg": 11,
+          "value": 8,
+          "desc": "X/Y range = +/- 1.5 Gauss"
+        },
+        {
+          "reg": 12,
+          "value": 0,
+          "desc": "Z range = +/- 1.5 Gauss"
+        },
+        {
+          "reg": 13,
+          "value": 0,
+          "desc": "Continuous measurement enable"
+        }
+      ],
+      "read_procedure": {
+        "register": 3,
+        "bytes": 6,
+        "order": "little-endian",
+        "conversion": {
+          "x": "int16_le(reg03, reg04) * 0.3",
+          "y": "int16_le(reg05, reg06) * 0.3",
+          "z": "int16_le(reg07, reg08) * 0.3"
+        },
+        "status_register": 2,
+        "data_ready_bit": 0
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read WHO_AM_I (reg0x07)",
+          "expected": "0x10 (16)",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Self-test: write 64 to reg27, wait 5ms, read data",
+          "expected": "X:+100..+300, Y:-300..-100, Z:+50..+200",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Read 100 samples, check standard deviation",
+          "expected": "std_dev < 5 LSB",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "3-axis magnetic field, microtesla",
+        "struct_size": 12,
+        "sample_rate_hz": 100,
+        "fields": [
+          {
+            "name": "mag_x",
+            "type": "NX_DATA_INT16",
+            "offset": 0,
+            "size": 2,
+            "scale": 0.3,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.2
+          },
+          {
+            "name": "mag_y",
+            "type": "NX_DATA_INT16",
+            "offset": 2,
+            "size": 2,
+            "scale": 0.3,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.2
+          },
+          {
+            "name": "mag_z",
+            "type": "NX_DATA_INT16",
+            "offset": 4,
+            "size": 2,
+            "scale": 0.3,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.2
+          },
+          {
+            "name": "heading",
+            "type": "NX_DATA_FLOAT",
+            "offset": 8,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DEGREE",
+            "accuracy": 2.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "I2C address can be 14 (0x0E) or 12 (0x0C) depending on PCB strap",
+        "Must wait > 5ms after soft reset before any register access",
+        "Sensitivity drifts with temperature: ~0.05%/C"
+      ],
+      "workarounds": [
+        "Probe both addresses during init; accept first that responds",
+        "Apply temperature compensation from on-die temp sensor (reg28/29)"
+      ]
+    },
+    {
+      "name": "mpu6050",
+      "version": "1.3.0",
+      "protocol": "I2C",
+      "description": "InvenSense MPU6050 6-axis IMU (3-axis accelerometer + 3-axis gyroscope)",
+      "addresses": [
+        104,
+        105
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 400000,
+        "gpio_type": "any",
+        "notes": "AD0 pin high = 105 (0x69), low = 104 (0x68). INT pin recommended."
+      },
+      "power_consumption": {
+        "typical_ua": 3800,
+        "sleep_ua": 8,
+        "peak_ua": 3900,
+        "supply_v_min_mv": 2500,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "reg": 107,
+          "value": 0,
+          "desc": "Wake up, set internal clock to PLL with X gyro ref"
+        },
+        {
+          "reg": 26,
+          "value": 2,
+          "desc": "DLPF: 98Hz accelerometer, 98Hz gyro low-pass filter"
+        },
+        {
+          "reg": 25,
+          "value": 7,
+          "desc": "Sample rate divider = 8 => 1kHz/(1+8) = 100Hz"
+        },
+        {
+          "reg": 27,
+          "value": 24,
+          "desc": "Gyro full scale = +/-2000 dps (16 = 0x18)"
+        },
+        {
+          "reg": 28,
+          "value": 8,
+          "desc": "Accel full scale = +/-4g (08 = 0x08)"
+        },
+        {
+          "reg": 56,
+          "value": 1,
+          "desc": "Enable data ready interrupt on INT pin"
+        },
+        {
+          "reg": 55,
+          "value": 16,
+          "desc": "INT pin active-low, open-drain, latched until cleared"
+        }
+      ],
+      "read_procedure": {
+        "register": 59,
+        "bytes": 14,
+        "order": "big-endian",
+        "conversion": {
+          "accel_x": "int16_be(reg59, reg60) * 0.00012207",
+          "accel_y": "int16_be(reg61, reg62) * 0.00012207",
+          "accel_z": "int16_be(reg63, reg64) * 0.00012207",
+          "temp": "int16_be(reg65, reg66) * 0.00294118 + 36.53",
+          "gyro_x": "int16_be(reg67, reg68) * 0.06103516",
+          "gyro_y": "int16_be(reg69, reg70) * 0.06103516",
+          "gyro_z": "int16_be(reg71, reg72) * 0.06103516"
+        },
+        "status_register": 58,
+        "data_ready_bit": 0
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read WHO_AM_I (reg0x75)",
+          "expected": "104 (0x68)",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Enable self-test: reg27=224, reg28=240, reg25=0",
+          "expected": "N/A",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Read accel X/Y self-test (200 samples avg)",
+          "expected": "X:+0.14..+0.28g, Y:-0.28..-0.14g, Z:+0.85..+1.15g",
+          "severity": "FAIL"
+        },
+        {
+          "step": 4,
+          "action": "Read gyro self-test (200 samples avg, subtract idle)",
+          "expected": "X/Y/Z: 10..100 dps per axis",
+          "severity": "FAIL"
+        },
+        {
+          "step": 5,
+          "action": "Restore normal configuration",
+          "expected": "N/A",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "6-axis IMU data: 3-axis accel (g), temperature (C), 3-axis gyro (dps)",
+        "struct_size": 28,
+        "sample_rate_hz": 100,
+        "fields": [
+          {
+            "name": "accel_x",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_G",
+            "accuracy": 0.02
+          },
+          {
+            "name": "accel_y",
+            "type": "NX_DATA_FLOAT",
+            "offset": 4,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_G",
+            "accuracy": 0.02
+          },
+          {
+            "name": "accel_z",
+            "type": "NX_DATA_FLOAT",
+            "offset": 8,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_G",
+            "accuracy": 0.02
+          },
+          {
+            "name": "temperature",
+            "type": "NX_DATA_FLOAT",
+            "offset": 12,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_CELSIUS",
+            "accuracy": 3.0
+          },
+          {
+            "name": "gyro_x",
+            "type": "NX_DATA_FLOAT",
+            "offset": 16,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DPS",
+            "accuracy": 0.5
+          },
+          {
+            "name": "gyro_y",
+            "type": "NX_DATA_FLOAT",
+            "offset": 20,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DPS",
+            "accuracy": 0.5
+          },
+          {
+            "name": "gyro_z",
+            "type": "NX_DATA_FLOAT",
+            "offset": 24,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DPS",
+            "accuracy": 0.5
+          }
+        ]
+      },
+      "known_limitations": [
+        "Gyroscope zero-rate offset (ZRO) can be +/- 20 dps; factory trim not always accurate",
+        "Accelerometer cross-axis sensitivity: ~2-3%",
+        "Temperature sensor accuracy is only +/- 3C; not suitable for precise measurement",
+        "I2C clock stretching not supported; keep SCL frequency below 400kHz"
+      ],
+      "workarounds": [
+        "Run gyro calibration (N samples at rest) and store offsets in NVS",
+        "Use complementary/Kalman filter for sensor fusion (see Reflex examples)",
+        "For magnetometer: chain with HMC5883L via auxiliary I2C passthrough"
+      ]
+    },
+    {
+      "name": "icm20948",
+      "version": "1.1.0",
+      "protocol": "I2C",
+      "description": "TDK InvenSense ICM20948 9-axis IMU (accel + gyro + magnetometer)",
+      "addresses": [
+        104,
+        105
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 400000,
+        "gpio_type": "any",
+        "notes": "Uses I2C-to-SPI bridge to internal AK09916 magnetometer. User bank switching required."
+      },
+      "power_consumption": {
+        "typical_ua": 5500,
+        "sleep_ua": 8,
+        "peak_ua": 7000,
+        "supply_v_min_mv": 1700,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "reg": 6,
+          "bank": 0,
+          "value": 0,
+          "desc": "PWR_MGMT_1: auto-select clock, wake up"
+        },
+        {
+          "reg": 6,
+          "bank": 0,
+          "value": 128,
+          "desc": "PWR_MGMT_1: reset (self-clearing), wait 1ms"
+        },
+        {
+          "reg": 6,
+          "bank": 0,
+          "value": 1,
+          "desc": "PWR_MGMT_1: auto clock, sleep off"
+        },
+        {
+          "reg": 7,
+          "bank": 0,
+          "value": 0,
+          "desc": "PWR_MGMT_2: enable all axes"
+        },
+        {
+          "reg": 20,
+          "bank": 2,
+          "value": 48,
+          "desc": "GYRO_CONFIG_1: 2000dps, DLPF on"
+        },
+        {
+          "reg": 21,
+          "bank": 2,
+          "value": 56,
+          "desc": "GYRO_CONFIG_2: 3600Hz, 6x avg"
+        },
+        {
+          "reg": 22,
+          "bank": 2,
+          "value": 24,
+          "desc": "ACCEL_CONFIG: 16g full scale"
+        },
+        {
+          "reg": 23,
+          "bank": 2,
+          "value": 48,
+          "desc": "ACCEL_CONFIG_2: 16x avg, ODR 125Hz"
+        },
+        {
+          "reg": 3,
+          "bank": 0,
+          "value": 128,
+          "desc": "INT_PIN_CFG: bypass enable (direct mag access)"
+        },
+        {
+          "reg": 12,
+          "bank": 3,
+          "value": 9,
+          "desc": "I2C_MST_CTRL: 400kHz to mag, multicast disabled"
+        },
+        {
+          "reg": 3,
+          "bank": 0,
+          "value": 73,
+          "desc": "INT_PIN_CFG: latched INT, bypass enabled, clear on read"
+        },
+        {
+          "reg": 15,
+          "bank": 0,
+          "value": 48,
+          "desc": "INT_ENABLE: data ready INT enable"
+        }
+      ],
+      "read_procedure": {
+        "accel_gyro": {
+          "register_bank": 0,
+          "register": 45,
+          "bytes": 14,
+          "order": "little-endian",
+          "conversion": {
+            "accel_x": "int16_le * 0.000488281",
+            "accel_y": "int16_le * 0.000488281",
+            "accel_z": "int16_le * 0.000488281",
+            "gyro_x": "int16_le * 0.06103516",
+            "gyro_y": "int16_le * 0.06103516",
+            "gyro_z": "int16_le * 0.06103516"
+          }
+        },
+        "magnetometer": {
+          "register": 18,
+          "bytes": 8,
+          "order": "little-endian",
+          "conversion": {
+            "mag_x": "int16_le * 0.15",
+            "mag_y": "int16_le * 0.15",
+            "mag_z": "int16_le * 0.15"
+          },
+          "status_register": 18,
+          "data_ready_bit": 0
+        }
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read WHO_AM_I bank0 (reg0x00)",
+          "expected": "234 (0xEA)",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Access AK09916 via bypass, read WIA1/WIA2",
+          "expected": "72 (0x48), 12 (0x0C)",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Gyro self-test: bank2 reg03=28, reg04=128, reg01=4",
+          "expected": "all axes |X_test - X_idle| > 70 d/s",
+          "severity": "FAIL"
+        },
+        {
+          "step": 4,
+          "action": "Accel self-test: bank2 reg03=12, reg04=128, reg01=4",
+          "expected": "all axes |X_test| > 0.225g",
+          "severity": "FAIL"
+        },
+        {
+          "step": 5,
+          "action": "Mag self-test via AK09916 self-test (reg0x10=50), wait 1ms",
+          "expected": "X:+50..+200, Y:-200..-50, Z:-200..-50",
+          "severity": "WARN"
+        },
+        {
+          "step": 6,
+          "action": "Restore normal config",
+          "expected": "N/A",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "9-axis IMU: accel (g), gyro (dps), mag (uT)",
+        "struct_size": 40,
+        "sample_rate_hz": 50,
+        "fields": [
+          {
+            "name": "accel_x",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_G",
+            "accuracy": 0.01
+          },
+          {
+            "name": "accel_y",
+            "type": "NX_DATA_FLOAT",
+            "offset": 4,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_G",
+            "accuracy": 0.01
+          },
+          {
+            "name": "accel_z",
+            "type": "NX_DATA_FLOAT",
+            "offset": 8,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_G",
+            "accuracy": 0.01
+          },
+          {
+            "name": "gyro_x",
+            "type": "NX_DATA_FLOAT",
+            "offset": 12,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DPS",
+            "accuracy": 0.3
+          },
+          {
+            "name": "gyro_y",
+            "type": "NX_DATA_FLOAT",
+            "offset": 16,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DPS",
+            "accuracy": 0.3
+          },
+          {
+            "name": "gyro_z",
+            "type": "NX_DATA_FLOAT",
+            "offset": 20,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DPS",
+            "accuracy": 0.3
+          },
+          {
+            "name": "mag_x",
+            "type": "NX_DATA_FLOAT",
+            "offset": 24,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.0
+          },
+          {
+            "name": "mag_y",
+            "type": "NX_DATA_FLOAT",
+            "offset": 28,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.0
+          },
+          {
+            "name": "mag_z",
+            "type": "NX_DATA_FLOAT",
+            "offset": 32,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROTESLA",
+            "accuracy": 1.0
+          },
+          {
+            "name": "temperature",
+            "type": "NX_DATA_FLOAT",
+            "offset": 36,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_CELSIUS",
+            "accuracy": 2.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Bank switching adds complexity; I2C transactions must set bank before every register access",
+        "Magnetometer accessed via internal I2C bridge; max combined sample rate ~50 Hz",
+        "AK09916 magnetometer saturates above ~1500 uT",
+        "High power consumption; sleep mode recommended when not sampling"
+      ],
+      "workarounds": [
+        "Cache bank register and batch same-bank accesses",
+        "For higher mag rate, use SPI interface (ICM20948 supports 8MHz SPI)",
+        "Enable low-power mode between samples for battery-powered applications"
+      ]
+    },
+    {
+      "name": "vl53l0x",
+      "version": "1.2.1",
+      "protocol": "I2C",
+      "description": "STMicroelectronics VL53L0X ToF laser distance sensor, 2-200cm",
+      "addresses": [
+        41
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 400000,
+        "gpio_type": "any",
+        "notes": "Optional XSHUT pin for multi-sensor address reconfiguration."
+      },
+      "power_consumption": {
+        "typical_ua": 20000,
+        "sleep_ua": 5,
+        "peak_ua": 40000,
+        "supply_v_min_mv": 2700,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "reg": 136,
+          "value": 0,
+          "desc": "I2C fast mode Plus (400kHz)"
+        },
+        {
+          "reg": 128,
+          "value": 1,
+          "desc": "MSRC config: TCC = 0"
+        },
+        {
+          "reg": 255,
+          "value": 1,
+          "desc": "Select sequence step enable"
+        },
+        {
+          "reg": 0,
+          "value": 0,
+          "desc": "Disable TCC"
+        },
+        {
+          "reg": 255,
+          "value": 0,
+          "desc": "Back to default"
+        },
+        {
+          "reg": 145,
+          "value": 0,
+          "desc": "SPAD calibration: disable override"
+        },
+        {
+          "reg": 0,
+          "value": 1,
+          "desc": "SYSRANGE_START: back-to-back ranging"
+        },
+        {
+          "reg": 27,
+          "value": 9,
+          "desc": "System interrupt config: new sample ready"
+        },
+        {
+          "reg": 20,
+          "value": 7,
+          "desc": "Final range config: 6 spads, 24 MHz"
+        },
+        {
+          "reg": 13,
+          "value": 1,
+          "desc": "Limit check enable: sigma and signal"
+        }
+      ],
+      "read_procedure": {
+        "register": 30,
+        "bytes": 2,
+        "order": "little-endian",
+        "conversion": {
+          "distance_mm": "uint16_le(reg30, reg31)",
+          "status": "reg19 & 0x07"
+        },
+        "status_register": 19,
+        "data_ready_bit": 0
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read model ID (reg192) and revision (reg194)",
+          "expected": "238 (0xEE), 1 or 2",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Measure distance to known target at 100mm",
+          "expected": "90..110 mm",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Measure distance to known target at 500mm",
+          "expected": "480..520 mm",
+          "severity": "FAIL"
+        },
+        {
+          "step": 4,
+          "action": "Cover sensor, verify sigma fail or max range",
+          "expected": "status != 0 or dist > 2000mm",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "ToF distance measurement in millimeters",
+        "struct_size": 8,
+        "sample_rate_hz": 30,
+        "fields": [
+          {
+            "name": "distance_mm",
+            "type": "NX_DATA_UINT16",
+            "offset": 0,
+            "size": 2,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MILLIMETER",
+            "accuracy": 3.0
+          },
+          {
+            "name": "signal_rate",
+            "type": "NX_DATA_UINT16",
+            "offset": 2,
+            "size": 2,
+            "scale": 0.0078,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MEGAHERTZ",
+            "accuracy": 0.0
+          },
+          {
+            "name": "ambient_rate",
+            "type": "NX_DATA_UINT16",
+            "offset": 4,
+            "size": 2,
+            "scale": 0.0078,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MEGAHERTZ",
+            "accuracy": 0.0
+          },
+          {
+            "name": "status",
+            "type": "NX_DATA_UINT8",
+            "offset": 6,
+            "size": 1,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_NONE",
+            "accuracy": 0.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Effective range depends on target reflectance (white paper ~200cm, black felt ~50cm)",
+        "Crosstalk error at very short distances (<30mm); offset calibration needed",
+        "20ms typical ranging time limits max sample rate to ~50Hz",
+        "Multi-sensor: all share 0x29 default; requires XSHUT sequenced address change"
+      ],
+      "workarounds": [
+        "For multi-sensor: hold XSHUT low, release one at a time, assign 48-55 (0x30-0x37)",
+        "Run SPAD calibration during first boot; store in NVS",
+        "Use high-accuracy mode (increases ranging time to ~33ms but improves to +/-3%)"
+      ]
+    },
+    {
+      "name": "bme280",
+      "version": "1.1.0",
+      "protocol": "I2C",
+      "description": "Bosch BME280 temperature, humidity, and pressure sensor",
+      "addresses": [
+        118,
+        119
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 3400000,
+        "gpio_type": "any",
+        "notes": "Also supports SPI; see spi_device variant."
+      },
+      "power_consumption": {
+        "typical_ua": 3600,
+        "sleep_ua": 0.5,
+        "peak_ua": 4700,
+        "supply_v_min_mv": 1700,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "reg": 242,
+          "value": 1,
+          "desc": "CTRL_HUM: oversampling x1 (humidity)"
+        },
+        {
+          "reg": 244,
+          "value": 39,
+          "desc": "CTRL_MEAS: temp oversampling x2, pressure x16, forced mode"
+        },
+        {
+          "reg": 245,
+          "value": 160,
+          "desc": "CONFIG: IIR filter x16, standby 0.5ms (forced mode)"
+        },
+        {
+          "reg": 224,
+          "value": 182,
+          "desc": "RESET (self-clearing)"
+        },
+        {
+          "reg": 244,
+          "value": 39,
+          "desc": "CTRL_MEAS: re-apply after reset (forced mode)"
+        }
+      ],
+      "read_procedure": {
+        "compensation_registers": {
+          "temp": "reg136..reg141 (6 bytes)",
+          "pressure": "reg142..reg159 (18 bytes)",
+          "humidity": "reg161, reg160, reg162..reg170 (3+7 bytes)"
+        },
+        "data_register": 247,
+        "bytes": 8,
+        "conversion": {
+          "temperature": "apply_bme280_compensate_T(raw_adc)",
+          "pressure": "apply_bme280_compensate_P(raw_adc, T_fine)",
+          "humidity": "apply_bme280_compensate_H(raw_adc, T_fine)"
+        },
+        "notes": "See datasheet equations BME280_compensate_T_int32 / _P_int64 / _H_int32"
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read chip ID (reg208)",
+          "expected": "96 (0x60)",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Read and verify trim parameters are non-zero",
+          "expected": "at least 3 comp params != 0",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Take reading, verify temperature is in sane range",
+          "expected": "-40..+85 C",
+          "severity": "FAIL"
+        },
+        {
+          "step": 4,
+          "action": "Verify pressure near sea level if altitude known",
+          "expected": "900..1100 hPa (sea level)",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Temperature (C), pressure (hPa), humidity (%)",
+        "struct_size": 12,
+        "sample_rate_hz": 25,
+        "fields": [
+          {
+            "name": "temperature",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_CELSIUS",
+            "accuracy": 0.5
+          },
+          {
+            "name": "pressure",
+            "type": "NX_DATA_FLOAT",
+            "offset": 4,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_HECTOPASCAL",
+            "accuracy": 1.0
+          },
+          {
+            "name": "humidity",
+            "type": "NX_DATA_FLOAT",
+            "offset": 8,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_PERCENT",
+            "accuracy": 3.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Forced mode requires explicit trigger for each reading (~6ms conversion time)",
+        "Humidity sensor response time ~8s (63% of step change)",
+        "Pressure accuracy degrades at high altitude without local barometric reference"
+      ],
+      "workarounds": [
+        "Use normal mode for continuous sampling (configurable standby time)",
+        "Apply altitude compensation using known local barometric pressure",
+        "For SPI operation, set CS low during register access"
+      ]
+    },
+    {
+      "name": "sht40",
+      "version": "1.0.0",
+      "protocol": "I2C",
+      "description": "Sensirion SHT40-AD1B-R3 temperature and humidity sensor",
+      "addresses": [
+        68
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 1000000,
+        "gpio_type": "any",
+        "notes": "I2C clock stretching required. SHT40 stretches clock during measurement."
+      },
+      "power_consumption": {
+        "typical_ua": 500,
+        "sleep_ua": 0.2,
+        "peak_ua": 800,
+        "supply_v_min_mv": 1700,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "reg": 254,
+          "value": "null",
+          "desc": "Soft reset (command only, no data byte)"
+        },
+        {
+          "delay_ms": 1,
+          "desc": "Wait for reset"
+        }
+      ],
+      "read_procedure": {
+        "command": 253,
+        "delay_ms": 8,
+        "bytes": 6,
+        "order": "MSB first",
+        "conversion": {
+          "temperature": "-45.0 + 175.0 * (uint16_be(byte0, byte1) / 65535.0)",
+          "humidity": "-6.0 + 125.0 * (uint16_be(byte3, byte4) / 65535.0)"
+        },
+        "crc": "CRC-8 of bytes[0..1] and bytes[3..4]; polynomial 0x31, init 0xFF"
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read after soft reset, verify first sample valid",
+          "expected": "-40..+125 C, 0..100%",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Read serial number (command 137)",
+          "expected": "non-zero 4 bytes",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Take 10 samples, verify std_dev < 0.2C and < 0.5%RH",
+          "expected": "low noise",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Temperature (C) and humidity (%RH)",
+        "struct_size": 8,
+        "sample_rate_hz": 10,
+        "fields": [
+          {
+            "name": "temperature",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_CELSIUS",
+            "accuracy": 0.2
+          },
+          {
+            "name": "humidity",
+            "type": "NX_DATA_FLOAT",
+            "offset": 4,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_PERCENT",
+            "accuracy": 1.8
+          }
+        ]
+      },
+      "known_limitations": [
+        "I2C clock stretching is mandatory; some MCUs do not support it in HW",
+        "Max 1 MHz I2C but only 100 kHz recommended for noisy environments",
+        "Accuracy degrades near condensation (100% RH)"
+      ],
+      "workarounds": [
+        "Enable I2C clock stretching in driver (most HALs support it)",
+        "Heat the sensor briefly with heater command (48,50) to clear condensation",
+        "For ESP32: use I2C HW with I2C_ACK_FROM_ISR workaround"
+      ]
+    },
+    {
+      "name": "ina219",
+      "version": "1.1.0",
+      "protocol": "I2C",
+      "description": "Texas Instruments INA219 shunt and bus voltage/current/power monitor",
+      "addresses": [
+        64,
+        65,
+        66,
+        67,
+        68
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 3400000,
+        "gpio_type": "any",
+        "notes": "External shunt resistor required; typical 0.1 ohm 1% 2W."
+      },
+      "power_consumption": {
+        "typical_ua": 1000,
+        "sleep_ua": 100,
+        "peak_ua": 1400,
+        "supply_v_min_mv": 3000,
+        "supply_v_max_mv": 5500
+      },
+      "initialization_sequence": [
+        {
+          "reg": 0,
+          "value": 14751,
+          "desc": "Configuration: 16V bus, 320uV shunt, 12-bit ADC, continuous shunt+bus"
+        },
+        {
+          "reg": 5,
+          "value": 0,
+          "desc": "Calibration register (must be set based on shunt value)"
+        },
+        {
+          "delay_ms": 1,
+          "desc": "Wait for calibration to take effect"
+        },
+        {
+          "reg": 5,
+          "value": "computed",
+          "desc": "Calibration = trunc(0.04096 / (current_lsb * shunt_r)); current_lsb = max_expected_a / 32767"
+        }
+      ],
+      "read_procedure": {
+        "registers": {
+          "shunt_voltage": {
+            "reg": 1,
+            "bytes": 2,
+            "conversion": "int16_be * 0.01 (mV)"
+          },
+          "bus_voltage": {
+            "reg": 2,
+            "bytes": 2,
+            "conversion": "uint16_be >> 3 * 0.004 (V)"
+          },
+          "power": {
+            "reg": 3,
+            "bytes": 2,
+            "conversion": "uint16_be * 20 * current_lsb (W)"
+          },
+          "current": {
+            "reg": 4,
+            "bytes": 2,
+            "conversion": "int16_be * current_lsb (A)"
+          }
+        },
+        "order": "big-endian",
+        "conversion_notes": "current_lsb = calibration_register * shunt_resistance / 0.04096"
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read configuration register (reg0)",
+          "expected": "matches written config",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "With known load, verify shunt voltage sign and magnitude",
+          "expected": "within 5% of calculated V=IxR",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Verify bus voltage is near supply (no load)",
+          "expected": "within 2% of measured DMM",
+          "severity": "WARN"
+        },
+        {
+          "step": 4,
+          "action": "Check power register matches V_bus * I_shunt",
+          "expected": "within 10%",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Shunt voltage (mV), bus voltage (V), current (mA), power (mW)",
+        "struct_size": 16,
+        "sample_rate_hz": 60,
+        "fields": [
+          {
+            "name": "shunt_voltage_mv",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MILLIVOLT",
+            "accuracy": 0.1
+          },
+          {
+            "name": "bus_voltage_v",
+            "type": "NX_DATA_FLOAT",
+            "offset": 4,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MILLIVOLT",
+            "accuracy": 4.0
+          },
+          {
+            "name": "current_ma",
+            "type": "NX_DATA_FLOAT",
+            "offset": 8,
+            "size": 4,
+            "scale": 1000.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MILLIAMPERE",
+            "accuracy": 1.0
+          },
+          {
+            "name": "power_mw",
+            "type": "NX_DATA_FLOAT",
+            "offset": 12,
+            "size": 4,
+            "scale": 1000.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_WATT",
+            "accuracy": 2.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Max bus voltage 26V (with 16V FSR) or 32V (with 32V FSR)",
+        "Shunt voltage range limited to +/- 320mV; larger shunt drops require external divider",
+        "Power register has limited resolution (1 LSB = 20 * current_lsb watts)",
+        "Accuracy depends heavily on shunt resistor tolerance and thermal EMF"
+      ],
+      "workarounds": [
+        "Store actual shunt resistance in NVS for per-board calibration",
+        "Use 4-wire Kelvin connection to shunt for best accuracy",
+        "For > 3.2A: use 0.01 ohm shunt with higher calibration value"
+      ]
+    },
+    {
+      "name": "as5600",
+      "version": "1.0.1",
+      "protocol": "I2C",
+      "description": "ams OSRAM AS5600 magnetic rotary position encoder (12-bit, contactless)",
+      "addresses": [
+        54
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 400000,
+        "gpio_type": "any",
+        "notes": "Also supports PWM output on DIR/OUT pin; can be read via GPIO pulse."
+      },
+      "power_consumption": {
+        "typical_ua": 6500,
+        "sleep_ua": 0,
+        "peak_ua": 10000,
+        "supply_v_min_mv": 3300,
+        "supply_v_max_mv": 5000
+      },
+      "initialization_sequence": [
+        {
+          "reg": 7,
+          "value": 0,
+          "desc": "OTP zero position (burn if needed, write 0 to use default)"
+        },
+        {
+          "reg": 8,
+          "value": 255,
+          "desc": "Set slow filter: 16x, ~10ms response"
+        },
+        {
+          "reg": 9,
+          "value": 7,
+          "desc": "Set fast filter threshold: 6 LSB"
+        },
+        {
+          "reg": 10,
+          "value": 0,
+          "desc": "Watchdog: disable (enable = 1 for auto-catch errors)"
+        },
+        {
+          "reg": 53,
+          "value": 0,
+          "desc": "OTP access: unlock (required before writing OTP)"
+        },
+        {
+          "reg": 0,
+          "value": 0,
+          "desc": "CONF_ZMCO: hysteresis = off"
+        }
+      ],
+      "read_procedure": {
+        "angle_register": 14,
+        "bytes": 2,
+        "order": "big-endian",
+        "conversion": {
+          "angle_deg": "(uint16_be(reg14, reg15) >> 4) * (360.0 / 4096.0)",
+          "raw_angle": "uint16_be(reg14, reg15) >> 4",
+          "status": "reg11: bit3=magnet_present, bit4=AGC too low, bit5=AGC too high"
+        },
+        "magnet_status_register": 11,
+        "magnet_present_bit": 3
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read status register (reg11)",
+          "expected": "bit3=1 (magnet detected)",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Read AGC value (reg26)",
+          "expected": "32..128 (magnetic field in range)",
+          "severity": "WARN"
+        },
+        {
+          "step": 3,
+          "action": "Read magnitude (reg27, reg28)",
+          "expected": "> 1000 (strong enough field)",
+          "severity": "FAIL"
+        },
+        {
+          "step": 4,
+          "action": "Rotate magnet, verify angle changes through full range",
+          "expected": "0..360 deg sweep",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Rotary position angle in degrees",
+        "struct_size": 8,
+        "sample_rate_hz": 100,
+        "fields": [
+          {
+            "name": "angle_deg",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_DEGREE",
+            "accuracy": 0.5
+          },
+          {
+            "name": "raw_angle",
+            "type": "NX_DATA_UINT16",
+            "offset": 4,
+            "size": 2,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_NONE",
+            "accuracy": 0.0
+          },
+          {
+            "name": "status",
+            "type": "NX_DATA_UINT8",
+            "offset": 6,
+            "size": 1,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_NONE",
+            "accuracy": 0.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Requires diametrically magnetized magnet at correct distance (0.5-3mm gap)",
+        "AGC auto-adjusts gain; if AGC saturates, readings become unreliable",
+        "End-of-life detection: if magnitude drops below threshold, magnet may be damaged",
+        "12-bit resolution = 0.0879 degrees per LSB"
+      ],
+      "workarounds": [
+        "Monitor AGC register and flag when outside 32..128 range",
+        "Store zero position offset in NVS after mechanical alignment",
+        "For higher resolution: average multiple consecutive readings"
+      ]
+    },
+    {
+      "name": "pca9685",
+      "version": "1.0.0",
+      "protocol": "I2C",
+      "description": "NXP PCA9685 16-channel 12-bit PWM/Servo controller",
+      "addresses": [
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 1000000,
+        "gpio_type": "any",
+        "notes": "External oscillator input optional; default internal 25MHz."
+      },
+      "power_consumption": {
+        "typical_ua": 10000,
+        "sleep_ua": 0,
+        "peak_ua": 15000,
+        "supply_v_min_mv": 2000,
+        "supply_v_max_mv": 5250
+      },
+      "initialization_sequence": [
+        {
+          "reg": 0,
+          "value": 0,
+          "desc": "MODE1: normal mode, no auto-increment, no sleep"
+        },
+        {
+          "reg": 254,
+          "value": 121,
+          "desc": "PRE_SCALE: set PWM freq = 50Hz (servo default); 25MHz/(4096*50)-1 = 121"
+        },
+        {
+          "reg": 0,
+          "value": 128,
+          "desc": "MODE1: restart (set bit7=1 to restore oscillator)"
+        },
+        {
+          "delay_ms": 1,
+          "desc": "Wait for oscillator to stabilize"
+        },
+        {
+          "reg": 0,
+          "value": 160,
+          "desc": "MODE1: auto-increment enabled, normal mode"
+        },
+        {
+          "reg": 252,
+          "value": 16,
+          "desc": "MODE2: totem-pole outputs, outputs change on ACK, invert=0"
+        }
+      ],
+      "read_procedure": {
+        "notes": "PCA9685 is write-only for PWM values; read back is not supported.",
+        "read_fallback": "Driver maintains shadow registers and returns last written values."
+      },
+      "write_procedure": {
+        "channel_registers": {
+          "channel_N_on_L": 6,
+          "channel_N_on_H": 7,
+          "channel_N_off_L": 8,
+          "channel_N_off_H": 9
+        },
+        "channel_stride": 4,
+        "all_call_register": 250,
+        "conversion": {
+          "servo_pulse_us": "OFF_value = round((pulse_us / 20000) * 4096)",
+          "duty_percent": "OFF_value = round((duty / 100) * 4096)"
+        }
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read MODE1 register (reg0)",
+          "expected": "160 (auto-increment on, restart=1)",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Write channel 0 to 50% duty, measure with oscilloscope",
+          "expected": "~50% duty at configured freq",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Set all channels OFF, verify outputs are low",
+          "expected": "all outputs < 0.5V",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Shadow register readback of 16 PWM channel states",
+        "struct_size": 32,
+        "sample_rate_hz": 0,
+        "fields": [
+          {
+            "name": "channel_duty",
+            "type": "NX_DATA_UINT16",
+            "offset": 0,
+            "size": 2,
+            "scale": 100.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_PERCENT",
+            "accuracy": 0.0
+          },
+          {
+            "name": "frequency_hz",
+            "type": "NX_DATA_UINT16",
+            "offset": 2,
+            "size": 2,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_HERTZ",
+            "accuracy": 0.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "PWM frequency applies to ALL channels simultaneously",
+        "12-bit resolution: at 50Hz, one LSB = 0.0049ms (~4.9us)",
+        "Read-back of PWM registers is unreliable on some clones; shadow register required",
+        "Max output current per channel depends on V+ supply and external drivers"
+      ],
+      "workarounds": [
+        "For different frequencies: use two PCA9685 chips with independent PRE_SCALE",
+        "For servo: use 50Hz (PRE_SCALE=121 for 25MHz osc)",
+        "Chain up to 62 devices with All-Call address (112)"
+      ]
+    },
+    {
+      "name": "ms5611",
+      "version": "1.0.0",
+      "protocol": "I2C",
+      "description": "TE Connectivity MS5611-01BA03 barometric pressure sensor",
+      "addresses": [
+        119,
+        118
+      ],
+      "address_bits": 7,
+      "capabilities": [
+        "NX_CAP_I2C_SDA",
+        "NX_CAP_I2C_SCL"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 100000,
+        "max_clock_hz": 400000,
+        "gpio_type": "any",
+        "notes": "Also supports SPI; see spi_device variant. Datasheet commands are 24-bit."
+      },
+      "power_consumption": {
+        "typical_ua": 1200,
+        "sleep_ua": 1,
+        "peak_ua": 1400,
+        "supply_v_min_mv": 1800,
+        "supply_v_max_mv": 3600
+      },
+      "initialization_sequence": [
+        {
+          "cmd": 30,
+          "desc": "Reset command (must be sent before reading PROM)"
+        },
+        {
+          "delay_ms": 3,
+          "desc": "Wait for reset"
+        },
+        {
+          "prom_read": "Read 8x 16-bit words from PROM addresses 160-174",
+          "desc": "Factory calibration coefficients"
+        },
+        {
+          "verify_crc": "CRC4 of first 4 PROM words must match word 5 lower nibble"
+        }
+      ],
+      "read_procedure": {
+        "d1_command": 72,
+        "d2_command": 88,
+        "adc_read_command": 0,
+        "adc_bytes": 3,
+        "order": "big-endian",
+        "conversion": {
+          "d1_raw": "uint24_be(adc_result)",
+          "d2_raw": "uint24_be(adc_result)",
+          "temperature": "apply_ms5611_compensate_T(d2, prom)",
+          "pressure": "apply_ms5611_compensate_P(d1, d2, prom)"
+        },
+        "notes": "D1=pressure ADC, D2=temperature ADC. OSR=4096 (cmd 72/88) takes ~9ms."
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read PROM CRC and verify",
+          "expected": "CRC4 matches",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Read PROM coefficients; verify no word is 0 or 65535",
+          "expected": "all words valid",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Take temperature reading, verify reasonable",
+          "expected": "-40..+85 C",
+          "severity": "FAIL"
+        },
+        {
+          "step": 4,
+          "action": "Take pressure reading, verify reasonable",
+          "expected": "10..1200 mbar",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Temperature (C) and pressure (mbar/hPa)",
+        "struct_size": 8,
+        "sample_rate_hz": 100,
+        "fields": [
+          {
+            "name": "temperature",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_CELSIUS",
+            "accuracy": 0.8
+          },
+          {
+            "name": "pressure",
+            "type": "NX_DATA_FLOAT",
+            "offset": 4,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_HECTOPASCAL",
+            "accuracy": 1.5
+          }
+        ]
+      },
+      "known_limitations": [
+        "ADC conversion time depends on oversampling ratio: OSR256=0.5ms, OSR4096=9ms",
+        "I2C address is set by CSB pin; 118=low, 119=high",
+        "First reading after reset may be inaccurate; discard it"
+      ],
+      "workarounds": [
+        "Discard first reading after init or reset",
+        "For altitude: use pressure formula alt = 44330*(1-(P/P0)^0.1903)",
+        "For SPI: pull CSB high for I2C mode, or use CS for SPI addressing"
+      ]
+    },
+    {
+      "name": "generic_adc",
+      "version": "1.0.0",
+      "protocol": "ADC",
+      "description": "Generic ADC driver wrapping MCU internal ADC peripheral",
+      "addresses": [],
+      "capabilities": [
+        "NX_CAP_ADC"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 0,
+        "max_clock_hz": 0,
+        "gpio_type": "adc_capable",
+        "notes": "Requires at least one ADC channel. Number of channels depends on MCU."
+      },
+      "power_consumption": {
+        "typical_ua": 0,
+        "sleep_ua": 0,
+        "peak_ua": 2000,
+        "supply_v_min_mv": 0,
+        "supply_v_max_mv": 0
+      },
+      "initialization_sequence": [
+        {
+          "action": "Configure ADC channel with requested attenuation and bit width",
+          "desc": "HAL-specific ADC init"
+        },
+        {
+          "action": "Set ADC calibration (esp_adc_cal characterizes linearity)",
+          "desc": "Single-point calibration"
+        },
+        {
+          "action": "Configure sample rate timer if continuous mode requested",
+          "desc": "FreeRTOS timer"
+        }
+      ],
+      "read_procedure": {
+        "conversion": {
+          "voltage_mv": "raw_count * (vref_mv / (2^bit_width - 1))"
+        },
+        "notes": "On ESP32, ADC2 is unavailable when WiFi is active."
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Measure known voltage reference (if available)",
+          "expected": "within 5% of expected",
+          "severity": "WARN"
+        },
+        {
+          "step": 2,
+          "action": "Verify ADC calibration values are valid",
+          "expected": "calibration not error",
+          "severity": "WARN"
+        },
+        {
+          "step": 3,
+          "action": "Measure ground-connected channel",
+          "expected": "< 50 mV",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "ADC voltage reading in millivolts",
+        "struct_size": 4,
+        "sample_rate_hz": 8333,
+        "fields": [
+          {
+            "name": "voltage_mv",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MILLIVOLT",
+            "accuracy": 5.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "ESP32 ADC nonlinearity: up to +/- 6% uncalibrated",
+        "ESP32 ADC2 cannot be used when WiFi is active",
+        "Input impedance affects accuracy for high-impedance sources",
+        "Max sample rate varies by MCU and number of multiplexed channels"
+      ],
+      "workarounds": [
+        "Use esp_adc_cal_characterize() for ESP32 and store char curves",
+        "Add external buffer op-amp for high-impedance sources",
+        "Use ADC1 only when WiFi is needed",
+        "Average 4-16 samples for improved noise rejection"
+      ]
+    },
+    {
+      "name": "generic_pwm_servo",
+      "version": "1.0.0",
+      "protocol": "GPIO",
+      "description": "Generic PWM servo driver using MCU PWM peripheral",
+      "addresses": [],
+      "capabilities": [
+        "NX_CAP_GPIO",
+        "NX_CAP_PWM"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 0,
+        "max_clock_hz": 0,
+        "gpio_type": "pwm_capable",
+        "notes": "Requires at least one LEDC/MCPWM timer. ESP32-S3 has 8 LEDC channels."
+      },
+      "power_consumption": {
+        "typical_ua": 0,
+        "sleep_ua": 0,
+        "peak_ua": 500,
+        "supply_v_min_mv": 0,
+        "supply_v_max_mv": 0
+      },
+      "initialization_sequence": [
+        {
+          "action": "Configure PWM timer with requested frequency",
+          "desc": "LEDC/MCPWM init"
+        },
+        {
+          "action": "Attach GPIO to timer channel",
+          "desc": "GPIO mux routing"
+        },
+        {
+          "action": "Set initial duty cycle to 0",
+          "desc": "Servo safe position"
+        }
+      ],
+      "read_procedure": {
+        "notes": "Read returns current duty cycle from shadow register."
+      },
+      "write_procedure": {
+        "conversion": {
+          "servo_pulse_us_to_duty": "duty = (pulse_us / period_us) * (2^resolution - 1)",
+          "percent_to_duty": "duty = (percent / 100.0) * (2^resolution - 1)"
+        }
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Set 0% duty, verify output is low",
+          "expected": "< 0.1V avg",
+          "severity": "WARN"
+        },
+        {
+          "step": 2,
+          "action": "Set 100% duty, verify output is high",
+          "expected": "> Vcc - 0.3V",
+          "severity": "WARN"
+        },
+        {
+          "step": 3,
+          "action": "Set 50% duty, measure with oscilloscope",
+          "expected": "45..55% duty",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Current PWM duty percentage and pulse width",
+        "struct_size": 8,
+        "sample_rate_hz": 0,
+        "fields": [
+          {
+            "name": "duty_percent",
+            "type": "NX_DATA_FLOAT",
+            "offset": 0,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_PERCENT",
+            "accuracy": 0.0
+          },
+          {
+            "name": "pulse_us",
+            "type": "NX_DATA_FLOAT",
+            "offset": 4,
+            "size": 4,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_MICROSECONDS",
+            "accuracy": 0.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Max frequency depends on timer resolution and source clock",
+        "Servo standard: 50Hz, 1000-2000us pulse range",
+        "Shared timers limit number of independent frequencies",
+        "LEDC: max 13-bit resolution at 5kHz; resolution decreases as frequency increases"
+      ],
+      "workarounds": [
+        "For servos: use MCPWM for more precise timing than LEDC",
+        "For multi-frequency: allocate separate timers for each frequency group",
+        "Use DMA for smooth servo sweeps (ESP32-S3)"
+      ]
+    },
+    {
+      "name": "generic_digital_io",
+      "version": "1.0.0",
+      "protocol": "GPIO",
+      "description": "Generic digital input/output driver",
+      "addresses": [],
+      "capabilities": [
+        "NX_CAP_GPIO",
+        "NX_CAP_INTERRUPT"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 0,
+        "max_clock_hz": 0,
+        "gpio_type": "any",
+        "notes": "Any GPIO pin capable of digital I/O."
+      },
+      "power_consumption": {
+        "typical_ua": 0,
+        "sleep_ua": 0,
+        "peak_ua": 100,
+        "supply_v_min_mv": 0,
+        "supply_v_max_mv": 0
+      },
+      "initialization_sequence": [
+        {
+          "action": "Configure GPIO direction (input or output)",
+          "desc": "GPIO mode set"
+        },
+        {
+          "action": "Configure pull-up/pull-down if input",
+          "desc": "Pull mode set"
+        },
+        {
+          "action": "Configure interrupt if requested",
+          "desc": "EXTI attach"
+        }
+      ],
+      "read_procedure": {
+        "conversion": {
+          "level": "gpio_get_level(gpio_num) ? 1 : 0"
+        }
+      },
+      "write_procedure": {
+        "conversion": {
+          "set": "gpio_set_level(gpio_num, 1)",
+          "clear": "gpio_set_level(gpio_num, 0)",
+          "toggle": "gpio_set_level(gpio_num, !gpio_get_level(gpio_num))"
+        }
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "For output: set HIGH, read back, expect HIGH",
+          "expected": "level == 1",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "For output: set LOW, read back, expect LOW",
+          "expected": "level == 0",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "For input: verify pull-up reads HIGH with no external connection",
+          "expected": "level == 1 (if pull-up)",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Digital input level",
+        "struct_size": 1,
+        "sample_rate_hz": 1000,
+        "fields": [
+          {
+            "name": "level",
+            "type": "NX_DATA_BOOL",
+            "offset": 0,
+            "size": 1,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_NONE",
+            "accuracy": 0.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Input debouncing must be handled in software or external RC circuit",
+        "GPIO max current sourcing/sinking varies by MCU (typically 12-20mA per pin)",
+        "3.3V GPIO should not drive 5V peripherals without level shifter",
+        "Interrupt latency varies by MCU (typically 1-10us)"
+      ],
+      "workarounds": [
+        "Use gpio_set_direction for input with pull-up for open-drain detection",
+        "Add 100nF capacitor and 10K resistor for hardware debounce",
+        "Use bidirectional level shifter (BSS138) for 3.3V<->5V"
+      ]
+    },
+    {
+      "name": "generic_relay",
+      "version": "1.0.0",
+      "protocol": "GPIO",
+      "description": "Generic relay driver with safety interlock support",
+      "addresses": [],
+      "capabilities": [
+        "NX_CAP_GPIO"
+      ],
+      "mcu_requirements": {
+        "min_clock_hz": 0,
+        "max_clock_hz": 0,
+        "gpio_type": "any",
+        "notes": "Requires transistor/MOSFET driver between GPIO and relay coil."
+      },
+      "power_consumption": {
+        "typical_ua": 500,
+        "sleep_ua": 0,
+        "peak_ua": 5000,
+        "supply_v_min_mv": 0,
+        "supply_v_max_mv": 0
+      },
+      "initialization_sequence": [
+        {
+          "action": "Set GPIO to output, LOW (relay off = safe state)",
+          "desc": "Safe default"
+        },
+        {
+          "action": "Register overcurrent safety callback",
+          "desc": "Safety interlock"
+        },
+        {
+          "action": "Read NVS for last known state (if persistent)",
+          "desc": "State restore"
+        }
+      ],
+      "read_procedure": {
+        "conversion": {
+          "state": "current_state (1=on, 0=off)"
+        }
+      },
+      "write_procedure": {
+        "conversion": {
+          "on": "gpio_set_level(gpio_num, 1)",
+          "off": "gpio_set_level(gpio_num, 0)",
+          "notes": "If kill-switch is active, write is rejected with NX_ERR_SAFETY_VIOLATION"
+        }
+      },
+      "selftest_procedure": [
+        {
+          "step": 1,
+          "action": "Read back GPIO level, expect LOW (off)",
+          "expected": "level == 0",
+          "severity": "FAIL"
+        },
+        {
+          "step": 2,
+          "action": "Set ON, read back, expect HIGH",
+          "expected": "level == 1",
+          "severity": "FAIL"
+        },
+        {
+          "step": 3,
+          "action": "Set OFF, read back, expect LOW",
+          "expected": "level == 0",
+          "severity": "FAIL"
+        },
+        {
+          "step": 4,
+          "action": "Verify safety interlock rejects write during kill-switch",
+          "expected": "NX_ERR_SAFETY_VIOLATION",
+          "severity": "WARN"
+        }
+      ],
+      "output_schema": {
+        "description": "Relay state and safety status",
+        "struct_size": 4,
+        "sample_rate_hz": 0,
+        "fields": [
+          {
+            "name": "state",
+            "type": "NX_DATA_BOOL",
+            "offset": 0,
+            "size": 1,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_NONE",
+            "accuracy": 0.0
+          },
+          {
+            "name": "safety_locked",
+            "type": "NX_DATA_BOOL",
+            "offset": 1,
+            "size": 1,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_NONE",
+            "accuracy": 0.0
+          },
+          {
+            "name": "on_count",
+            "type": "NX_DATA_UINT16",
+            "offset": 2,
+            "size": 2,
+            "scale": 1.0,
+            "bias": 0.0,
+            "unit": "NX_UNIT_NONE",
+            "accuracy": 0.0
+          }
+        ]
+      },
+      "known_limitations": [
+        "Mechanical relay switching time: 5-15ms; solid-state relay: <1ms",
+        "Relay contacts have limited lifetime (typically 100K-10M cycles depending on load)",
+        "Coil inductance causes flyback; external flyback diode required",
+        "No hardware feedback from relay contacts (use separate GPIO for monitoring)"
+      ],
+      "workarounds": [
+        "Use optoisolator for galvanic isolation",
+        "Add flyback diode (1N4007) across relay coil",
+        "Track cycle count in NVS for predictive maintenance",
+        "For solid-state relays: use MOSFET driver with zero-crossing detection"
+      ]
+    }
+  ]
+}

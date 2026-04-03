@@ -1,0 +1,1766 @@
+================================================================================
+  HYDRAULIC STEERING CONTROL SYSTEM — TECHNICAL DESIGN BRIEF
+  ESP32-BASED MARINE AUTOPILOT
+================================================================================
+
+Document ID    : AP-03-HYD-001
+Revision       : 1.0
+Date           : 2025
+Classification : Engineering Design Document (Build Specification)
+Author         : Marine Systems Engineering Division
+Applicable     : Recreational & Commercial Vessels (25–60 ft LOA)
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1.  Hydraulic Steering System Types
+  2.  Solenoid Valve Control
+  3.  Clutch / Engagement Mechanism
+  4.  Rudder Feedback Sensor Design
+  5.  Rudder Rate Limiter
+  6.  Over-Current Protection
+  7.  Complete Wiring Diagram Description
+  8.  Environmental Protection
+  A.  Appendix — MOSFET Driver Schematic (ASCII)
+  B.  Appendix — Wiring Harness Bill of Materials
+  C.  Appendix — Voltage Drop Reference Tables
+
+================================================================================
+1. HYDRAULIC STEERING SYSTEM TYPES
+================================================================================
+
+1.1  OVERVIEW
+------------------------------------------------------------------------------
+Hydraulic steering replaces mechanical push-pull cable systems with hydraulic
+fluid pressure to actuate the rudder. The autopilot controls the hydraulic
+flow by energizing solenoid valves that direct pressurized fluid to one side
+or the other of a hydraulic cylinder, which in turn pushes or pulls the
+rudder stock via a tiller arm or quadrant.
+
+The autopilot does NOT create hydraulic pressure itself. A dedicated
+hydraulic pump (engine-driven, electric, or manual) maintains system
+pressure. The autopilot's solenoid valves CONTROL the direction of flow.
+
+1.2  SINGLE-CYLINDER HYDRAULIC RAM
+------------------------------------------------------------------------------
+Description  : One double-acting hydraulic cylinder mounted athwartships
+               (side to side) near the rudder stock.
+Vessel Size  : Most common on sailboats 25–45 ft LOA.
+Rudder Auth. : Adequate for vessels with balanced or semi-balanced
+               spade rudders. Typical ram stroke: 6–10 inches (150–250 mm).
+Cylinder Bore: 1.0–1.5 inches (25–38 mm) typical.
+
+Operation    :
+  - Fluid under pressure (from pump/reservoir) is always available at the
+    solenoid valve block.
+  - When PORT solenoid energizes → fluid flows to the port side of the
+    cylinder, starboard side vents to reservoir → rudder moves to PORT.
+  - When STARBOARD solenoid energizes → fluid flows to starboard side →
+    rudder moves to STARBOARD.
+  - Both de-energized → spring-centered valve blocks flow → rudder holds
+    position (hydraulic lock).
+
+Stroke-to-Angle Relationship:
+  For a tiller arm of length L (measured from rudder stock center to
+  cylinder pin center):
+    Angle (degrees) = arctan(stroke / (2 × L)) × (180/π)
+  Example: L = 100 mm, stroke = 150 mm
+    Max angle = arctan(150/200) = 36.87 degrees (each side)
+  This yields approximately ±37 degrees of rudder throw.
+
+1.3  DUAL-CYLINDER SYSTEM
+------------------------------------------------------------------------------
+Description  : Two hydraulic cylinders, one on each side of the rudder stock,
+               operating in push-pull configuration.
+Vessel Size  : Larger sailboats 45–65 ft and motor vessels requiring high
+               rudder authority (high displacement, large rudder area).
+Rudder Auth. : Significantly higher — dual cylinders can deliver nearly
+               double the force of a single cylinder system. Essential for
+               vessels operating in heavy weather or with high sail plans.
+Cylinder Bore: 1.5–2.0 inches (38–50 mm) typical per cylinder.
+
+Advantages   :
+  - Redundancy: system can often operate (reduced) on one cylinder
+  - Balanced loading on rudder stock
+  - Higher total force output
+Disadvantages :
+  - More complex plumbing
+  - Higher fluid volume = slower response (larger pump needed)
+  - More expensive
+
+Autopilot Control:
+  - Single solenoid valve block drives both cylinders simultaneously
+  - Same control logic as single-cylinder
+  - Higher current draw may require heavier wiring and higher-rated MOSFETs
+
+1.4  LINEAR HYDRAULIC DRIVE (CABLE REPLACEMENT)
+------------------------------------------------------------------------------
+Description  : A hydraulic cylinder that replaces the mechanical cable in a
+               pedestal steering system. The cylinder is mounted at the
+               quadrant and pushes/pulls the quadrant directly.
+Vessel Size  : Sailboats 30–50 ft with existing cable-steered pedestals.
+Rudder Auth. : Similar to single-cylinder ram; depends on quadrant radius
+               and cylinder bore.
+
+Operation    :
+  - Functions identically to a single-cylinder ram in terms of hydraulic
+    control
+  - The key difference is MOUNTING: it attaches to the steering quadrant
+    rather than having its own tiller arm
+  - Many linear drives are self-contained units with integrated solenoid
+    valves (e.g., Jabsco, Lewmar, Raymarine Type 1/2)
+
+Autopilot Integration:
+  - Self-contained units may have their own solenoid valves; the autopilot
+    provides +12V to the appropriate port/starboard solenoid lines
+  - Non-contained units require external solenoid valve blocks
+  - IMPORTANT: Many linear drives have a clutch solenoid; this must be
+    energized BEFORE driving the port/starboard solenoids
+
+1.5  ROTARY HYDRAULIC ACTUATOR
+------------------------------------------------------------------------------
+Description  : A hydraulic motor that drives the rudder stock through a
+               gear reduction or direct vane mechanism. Rotates the rudder
+               stock rather than pushing linearly.
+Vessel Size  : Motor vessels and large sailboats (50+ ft) with rotary
+               steering systems.
+Rudder Auth. : High torque output, suitable for large rudder areas and
+               high vessel displacements.
+
+Operation    :
+  - Hydraulic motor drives a reduction gear attached to the rudder stock
+  - Solenoid valve controls flow direction → controls rotation direction
+  - Speed is proportional to flow rate
+
+Autopilot Control:
+  - Same solenoid valve control scheme
+  - May include a bypass valve for manual steering override
+  - Rudder feedback is critical (absolute encoder preferred)
+
+1.6  RUDDER THROW ANGLES — REFERENCE TABLE
+------------------------------------------------------------------------------
+
+  System Type              | Min Throw | Max Throw | Typical       | Notes
+  -------------------------|-----------|-----------|---------------|------------------
+  Single-cylinder ram      | +/-30 deg | +/-45 deg | +/-35 deg     | Sailboats 25-45ft
+  Dual-cylinder            | +/-35 deg | +/-45 deg | +/-40 deg     | Larger vessels
+  Linear drive (cable rep) | +/-30 deg | +/-40 deg | +/-35 deg     | Pedestal steer
+  Rotary actuator          | +/-35 deg | +/-45 deg | +/-40 deg     | Motor vessels
+  Mechanical (reference)   | +/-35 deg | +/-45 deg | +/-40 deg     | Cable/chain
+
+CRITICAL DESIGN LIMIT:
+  The autopilot software MUST have configurable rudder limit angles.
+  Hard mechanical stops prevent over-travel, but software limits should be
+  set 2-3 degrees inside the mechanical stops to prevent hydraulic shock
+  and mechanical stress when the rudder hits the stop under power.
+
+  Recommended software limits: ±33 degrees (for ±35 degree mechanical)
+                               ±38 degrees (for ±40 degree mechanical)
+
+1.7  HYDRAULIC SYSTEM PRESSURES — REFERENCE TABLE
+------------------------------------------------------------------------------
+
+  System Type              | Min PSI | Max PSI | Typical PSI | Notes
+  -------------------------|---------|---------|-------------|---------------------
+  Small sailboat (<30ft)   |   500   |  1500   |   800-1000  | Light loads
+  Medium sailboat (30-45ft)|   800   |  2000   |  1200-1500  | Most common
+  Large sailboat (>45ft)   |  1000   |  3000   |  1500-2000  | Heavy loads
+  Motor vessel             |  1000   |  2500   |  1500-2000  | Continuous use
+  Commercial               |  1500   |  3000   |  2000-2500  | Class requirements
+
+The autopilot does NOT need to measure or regulate hydraulic pressure.
+However, the solenoid valve must be rated for the MAXIMUM system pressure
+with a safety margin of at least 1.5x. A system operating at 1500 PSI
+requires valves rated for 2250+ PSI minimum.
+
+Typical solenoid valve pressure ratings:
+  - standard: 2000 PSI (adequate for most recreational)
+  - high-pressure: 3000 PSI (commercial/large vessel)
+  - hydraulic shock rating: typically 1.5× working pressure
+
+================================================================================
+2. SOLENOID VALVE CONTROL
+================================================================================
+
+2.1  THREE-POSITION FOUR-WAY SOLENOID VALVE (3P4W)
+------------------------------------------------------------------------------
+
+This is the standard hydraulic directional control valve for autopilots.
+
+Configuration:
+  - Three positions: PORT  |  CENTER (neutral)  |  STARBOARD
+  - Four ports: P (pressure/pump), T (tank/reservoir), A (cylinder port side),
+    B (cylinder starboard side)
+  - Two solenoid coils: one for PORT, one for STARBOARD
+  - Center position: all ports blocked (closed center) or connected to tank
+    (open center)
+
+Position Mapping:
+  PORT solenoid energized:
+    P → A (pressure to port side of cylinder)
+    B → T (starboard side vents to tank)
+    Result: Rudder moves to PORT
+
+  STARBOARD solenoid energized:
+    P → B (pressure to starboard side)
+    A → T (port side vents to tank)
+    Result: Rudder moves to STARBOARD
+
+  BOTH DE-ENERGIZED (center):
+    A, B, P, T all blocked → hydraulic lock
+    Rudder holds current position (provided no external force exceeds
+    the relief valve setting)
+
+2.2  CENTER SPRING RETURN — FAIL-SAFE DESIGN
+------------------------------------------------------------------------------
+
+CRITICAL SAFETY FEATURE:
+
+The solenoid valve has a mechanical spring that returns the spool to the
+CENTER (neutral) position when BOTH solenoids are de-energized.
+
+Fail-Safe Behavior:
+  - Loss of power to ESP32 → both solenoids de-energize → valve returns
+    to center → rudder holds position
+  - Loss of power to MOSFET driver board → same result
+  - Firmware crash → GPIO pins default to LOW → MOSFETs off → same result
+  - ANY single failure that removes power from the solenoid coils results
+    in the valve centering
+
+This is the PRIMARY fail-safe mechanism for the hydraulic steering system.
+
+Design Implication:
+  - The MOSFET driver circuit MUST default to OUTPUT LOW (solenoid off)
+    when the ESP32 is booting, resetting, or powered off
+  - Use pull-down resistors on MOSFET gates (10KΩ to GND)
+  - ESP32 GPIO configuration: set pins LOW before enabling output mode
+  - Consider hardware watchdog on the MOSFET driver that cuts power if
+    no valid PWM/enable signal is received
+
+2.3  SOLENOID COIL CURRENT DRAW
+------------------------------------------------------------------------------
+
+Typical Specifications for 12V DC Hydraulic Solenoid Coils:
+
+  Parameter              | Value               | Notes
+  -----------------------|---------------------|--------------------------------
+  Coil resistance        | 6-12 ohms           | When cold; increases ~20% hot
+  Inrush current         | 2.0-3.5 A           | First 50-100ms (coil cold)
+  Holding current        | 1.0-2.0 A           | Steady state
+  Power per coil         | 12-36 W             | Holding
+  Total (both coils)     | 2.0-4.0 A           | Only ONE energized at a time
+  Clutch solenoid        | 1.0-2.5 A           | Separate, when engaged
+  TOTAL system max       | 6.5 A (worst case)  | Drive + clutch simultaneously
+
+CRITICAL: Both PORT and STARBOARD solenoids must NEVER be energized
+simultaneously. This would create a hydraulic dead-head condition
+(pressurizing both sides of the cylinder simultaneously), which:
+  - Wastes pump capacity
+  - Creates excessive heat
+  - May trigger the relief valve continuously
+  - Could damage the cylinder seals
+
+Software Interlock:
+  In the ESP32 firmware, implement a HARDWARE-LEVEL interlock:
+    if (port_solenoid_on) { starboard_solenoid = OFF; }
+    if (starboard_solenoid_on) { port_solenoid = OFF; }
+
+2.4  FLYBACK DIODE / FREEWHEELING DIODE CIRCUIT
+------------------------------------------------------------------------------
+
+THIS IS CRITICAL FOR ESP32 PROTECTION.
+
+When a solenoid coil is de-energized, the collapsing magnetic field
+generates a large voltage spike (back-EMF). This spike can easily reach
+100-200V and WILL destroy the MOSFET and potentially the ESP32.
+
+Solution: Flyback Diode (also called freewheeling diode or snubber diode)
+
+Placement:
+  - Cathode → solenoid positive (+12V) terminal
+  - Anode   → solenoid ground (drain of MOSFET) terminal
+  - The diode is in REVERSE bias during normal operation (no current flows)
+  - When the MOSFET turns OFF, the back-EMF current circulates through
+    the diode and decays exponentially
+
+Diode Specifications:
+  - Reverse voltage rating: minimum 2× supply voltage = 50V minimum
+  - Forward current rating: equal to solenoid holding current = 3A minimum
+  - Recovery time: fast recovery preferred (<500ns)
+
+Recommended Diodes:
+  1. 1N5408            — 3A, 1000V, general purpose (adequate, cheap)
+  2. UF4007            — 1A, 1000V, ultra-fast recovery (better EMI)
+  3. MUR820            — 8A, 200V, ultra-fast recovery (overkill but robust)
+  4. SS34 (Schottky)   — 3A, 40V, very fast, low Vf (good if voltage < 24V)
+
+SELECTION: For 12V systems with 3A solenoid coils, use UF4007.
+           For 24V systems or high-current solenoids, use MUR820.
+
+Placement Rule: One flyback diode PER solenoid coil. Three solenoids
+(port, starboard, clutch) = three flyback diodes minimum.
+
+Additional Protection:
+  - Place a 100nF (0.1μF) ceramic capacitor across the solenoid terminals
+    for additional EMI suppression
+  - Place a 100Ω-220Ω resistor in series with the flyback diode to
+    dampen the current decay (prevents ringing); this is OPTIONAL but
+    recommended for EMI-sensitive environments
+
+2.5  MOSFET vs RELAY — SWITCHING DEVICE COMPARISON
+------------------------------------------------------------------------------
+
+OPTION A: ELECTROMECHANICAL RELAY
+------------------------------------------------------------------------------
+
+Advantages:
+  - Simple to implement and understand
+  - Complete galvanic isolation between control and load circuits
+  - Can switch AC or DC
+  - No heatsink required
+  - Tolerant of voltage spikes (contact gap provides isolation)
+  - Easy to find marine-rated relay modules
+
+Disadvantages:
+  - Switching time: 5-15ms (slow by control system standards)
+  - Contact wear: limited life, typically 100K-1M cycles at rated load
+  - Contact bounce: 1-5ms of bouncing during switching (causes EMI)
+  - Coil power: relay coil itself draws 50-150mA
+  - Not suitable for high-frequency switching
+  - Contact arcing with inductive loads (shortens life)
+  - Solder joints to relay terminals can fatigue under vibration
+
+Suitable Relays for This Application:
+  - Omron G8V-1: SPDT, 12V coil, 2A contacts, automotive grade
+  - Panasonic TXS2: SPDT, 12V coil, 3A contacts, sealed
+  - Bosch-type automotive relay: SPDT, 12V/40A (overkill but robust)
+  - Songle SRD-05VDC-SL-C: common, cheap, 10A contacts (not marine-rated)
+
+Recommendation for Relay:
+  If using relays, use a dual SPDT relay module (two relays on one board).
+  The flyback diode protects the relay contacts from the solenoid's
+  inductive kickback. Add a snubber RC network (100Ω + 100nF) across
+  the relay contacts for additional protection.
+
+  Relay driving from ESP32:
+    ESP32 GPIO → 1KΩ resistor → Transistor base (2N2222 or BC547)
+    Transistor collector → Relay coil
+    Relay coil → +12V
+    Flyback diode across relay coil (1N4148 is adequate for relay coil)
+
+  Total components per channel: 1 relay + 1 NPN transistor + 2 resistors
+    + 1 diode (relay coil) + 1 diode (solenoid flyback)
+
+OPTION B: MOSFET (RECOMMENDED)
+------------------------------------------------------------------------------
+
+Advantages:
+  - Switching time: <1μs (effectively instant for autopilot purposes)
+  - No moving parts = infinite mechanical life
+  - No contact bounce = clean switching
+  - Very low on-resistance → minimal voltage drop and heat generation
+  - Silent operation (no clicking)
+  - Can be PWM-controlled (if proportional valves are used)
+  - Easy to parallel for higher current capacity
+
+Disadvantages:
+  - Vulnerable to overvoltage (back-EMF, ESD)
+  - Requires gate drive circuit for optimal performance
+  - Requires flyback diode for inductive loads (MANDATORY)
+  - Not galvanically isolated (control and load share ground)
+  - Sensitive to EMI on gate terminal
+
+Recommended MOSFETs:
+
+  1. IRLZ44N (Logic-Level, RECOMMENDED)
+     - Vgs(th) = 1-2V (fully on at 5V gate drive)
+     - Id(max) = 47A
+     - Rds(on) = 22mΩ at Vgs=5V
+     - Vds(max) = 55V
+     - Package: TO-220
+     - Cost: ~$1.50 each
+     - ADVANTAGE: Can be driven directly from ESP32 3.3V GPIO (partial
+       turn-on; fully on at 5V via logic level shifter or gate driver)
+
+  2. IRF540N (Standard-Level)
+     - Vgs(th) = 2-4V (needs 10V gate drive for full turn-on)
+     - Id(max) = 33A
+     - Rds(on) = 44mΩ at Vgs=10V
+     - Vds(max) = 100V
+     - Package: TO-220
+     - Cost: ~$0.75 each
+     - DISADVANTAGE: Cannot be fully driven from 3.3V or 5V alone;
+       requires gate driver circuit or bootstrap charge pump
+
+  3. IRL540N (Logic-Level variant of IRF540)
+     - Vgs(th) = 1-2V (fully on at 5V)
+     - Id(max) = 28A
+     - Rds(on) = 77mΩ at Vgs=5V
+     - DISADVANTAGE: Higher Rds(on) than IRLZ44N
+
+RECOMMENDATION: Use IRLZ44N. It is logic-level, handles the current
+easily, has very low Rds(on) at 5V gate drive, and is widely available.
+
+Gate Drive Considerations:
+  - ESP32 GPIO output: 3.3V
+  - IRLZ44N at 3.3V Vgs: Rds(on) ≈ 50-60mΩ (acceptable but not optimal)
+  - IRLZ44N at 5.0V Vgs: Rds(on) ≈ 22mΩ (much better)
+
+  Options:
+  a) Drive directly from 3.3V GPIO: Works but MOSFET runs slightly warmer
+     (at 2A load: P = I²R = 4 × 0.06 = 0.24W — negligible, no heatsink)
+  b) Level shifter to 5V: Optimal performance
+  c) Dedicated gate driver IC (TC4420, MCP1416): Best but more complex
+
+  For this application, option (a) is acceptable. The MOSFET dissipation
+  is negligible even at 3.3V gate drive for 2-3A solenoid loads.
+
+  HOWEVER, add a 10KΩ pull-down resistor from gate to source on each MOSFET
+  to ensure the MOSFET turns OFF when the ESP32 is booting or the GPIO
+  is in high-impedance state (input mode during boot).
+
+RECOMMENDED APPROACH FOR THIS BUILD: IRLZ44N MOSFET, driven from ESP32
+3.3V GPIO through a 100Ω series resistor (limits gate current spikes),
+with 10KΩ pull-down resistor, and UF4007 flyback diode on each solenoid.
+
+2.6  PWM FOR PROPORTIONAL VALVE CONTROL
+------------------------------------------------------------------------------
+
+Standard solenoid valves are ON/OFF (bang-bang) devices. They are either
+fully open or fully closed.
+
+Proportional valves allow VARIABLE flow, enabling smoother rudder movement
+and more precise control.
+
+PWM on Proportional Valves:
+  - PWM frequency: 100-500 Hz typical for hydraulic proportional valves
+  - Duty cycle: 0-100% controls flow rate
+  - The solenoid coil acts as an inductor; the PWM frequency must be high
+    enough that the coil current is continuous (doesn't drop to zero between
+    pulses) but low enough to avoid excessive switching losses
+
+  - For most proportional hydraulic valves:
+      Recommended PWM frequency: 200-300 Hz
+      - At 200 Hz, the 12V solenoid coil (6Ω, 30mH) will have a time
+        constant of τ = L/R = 30mH/6Ω = 5ms. Period = 1/200 = 5ms.
+        Current ripple will be approximately ±37% of average — this is
+        acceptable for proportional valve control.
+      - At 300 Hz, period = 3.33ms, current ripple ≈ ±25% — smoother.
+
+  - ESP32 has hardware LEDC PWM controllers capable of frequencies from
+    ~10 Hz to 40 MHz, making this easily achievable in software.
+
+  IMPORTANT — DITHER FREQUENCY:
+    Many proportional valves are designed with a built-in dither signal
+    (typically 50-200 Hz, 5-10% amplitude superimposed on the control signal)
+    to overcome static friction in the valve spool. If the valve datasheet
+    specifies dither requirements, implement them in firmware.
+
+⚠ WARNING — PWM ON NON-PROPORTIONAL VALVES:
+------------------------------------------------------------------------------
+NEVER apply PWM to standard (non-proportional) solenoid valves unless the
+valve manufacturer explicitly rates them for PWM operation.
+
+Reasons:
+  - Rapid switching causes the valve spool to chatter, wearing the spool
+    and body surfaces
+  - The coil's AC impedance at high PWM frequencies reduces effective
+    current, potentially preventing the valve from fully opening
+  - At certain frequencies, mechanical resonance can cause the spool to
+    oscillate destructively
+  - Eddy currents in the solenoid armature generate excessive heat
+  - The valve may not fully seat when PWM is applied, causing internal
+    leakage and loss of rudder holding ability
+
+If using standard ON/OFF solenoid valves (which is the case for most
+marine autopilot installations), drive them with a CLEAN DC signal —
+no PWM, no modulation.
+
+2.7  COMPLETE MOSFET DRIVER SCHEMATIC (ASCII)
+------------------------------------------------------------------------------
+
+See Appendix A for the full schematic. Summary of the circuit per channel:
+
+  ESP32 GPIO → [100Ω] → MOSFET Gate
+  MOSFET Gate → [10KΩ] → GND (pull-down)
+  MOSFET Drain → Solenoid (-) terminal
+  Solenoid (+) terminal → +12V (fused)
+  Flyback Diode: Cathode to Solenoid(+), Anode to Solenoid(-) / MOSFET Drain
+  Optional: 100nF cap across solenoid terminals
+
+  Three channels needed: PORT, STARBOARD, CLUTCH
+
+  Gate Resistor Selection:
+    - 100Ω series: Limits peak gate charge current from ESP32 GPIO
+      (ESP32 max source current ≈ 40mA per pin)
+      I_gate = (3.3V - Vgs_threshold) / 100Ω ≈ (3.3 - 2.0) / 100 ≈ 13mA
+      This is well within ESP32 limits.
+    - 10KΩ pull-down: Discharges gate capacitance when GPIO is floating.
+      Time constant = 10KΩ × ~1nF (gate capacitance) = 10μs. This means
+      the MOSFET turns off within ~30μs (3τ) of GPIO going floating.
+
+================================================================================
+3. CLUTCH / ENGAGEMENT MECHANISM
+================================================================================
+
+3.1  PURPOSE
+------------------------------------------------------------------------------
+
+The clutch mechanism disengages the autopilot's hydraulic drive from the
+rudder, allowing the helmsman to steer manually. When the clutch is
+disengaged, the hydraulic cylinder is bypassed or mechanically decoupled,
+and manual steering inputs (tiller or wheel) operate the rudder freely.
+
+3.2  TYPES OF CLUTCH MECHANISMS
+------------------------------------------------------------------------------
+
+Type 1: SOLENOID-OPERATED HYDRAULIC BYPASS
+  - A solenoid valve opens a bypass path in the hydraulic circuit
+  - Fluid can flow freely between both sides of the cylinder
+  - The rudder can be moved manually with minimal resistance
+  - Common on linear hydraulic drives (Lewmar, Jabsco)
+  - Clutch solenoid is typically a 2-way normally closed valve
+  - When energized (12V applied), bypass opens → freewheel mode
+  - When de-energized, bypass closes → autopilot engaged
+
+  NOTE: Some systems are INVERTED — energized = engaged. Always check
+  the specific drive unit's documentation.
+
+Type 2: MECHANICAL CLUTCH (LEVER-OPERATED)
+  - A mechanical lever physically disconnects the drive from the rudder
+  - No electrical involvement
+  - Autopilot cannot detect or control clutch state
+  - REQUIRES a manual interlock switch (limit switch on the lever)
+
+Type 3: MOTOR-DRIVEN CLUTCH
+  - An electric motor moves a mechanical clutch
+  - Takes longer to engage/disengage (1-3 seconds)
+  - Requires position feedback to confirm engagement
+
+3.3  AUTOPILOT CLUTCH CONTROL SEQUENCE
+------------------------------------------------------------------------------
+
+ENGAGING AUTOPILOT:
+  1. Helmsman presses AUTO button on the control head
+  2. ESP32 verifies compass data is valid (heading known)
+  3. ESP32 energizes clutch solenoid
+  4. Wait 500ms-1000ms for clutch to fully engage
+  5. Read rudder position (verify feedback sensor is responding)
+  6. Capture current heading as target heading
+  7. Enable PID control loop
+  8. Display "AUTO" on OLED
+
+DISENGAGING AUTOPILOT:
+  1. Helmsman presses STANDBY button
+  2. ESP32 disables PID control loop immediately
+  3. ESP32 sets both PORT and STARBOARD solenoids OFF
+  4. Wait 100ms for rudder to stabilize
+  5. ESP32 de-energizes clutch solenoid
+  6. Display "STANDBY" on OLED
+
+EMERGENCY DISENGAGE (any button, power loss, or watchdog timeout):
+  1. ALL solenoids OFF (port, starboard, clutch)
+  2. Clutch disengages → helm free for manual steering
+  3. Display "STANDBY" or flash warning
+
+3.4  CLUTCH ENGAGEMENT DETECTION — FEEDBACK SWITCH
+------------------------------------------------------------------------------
+
+IMPORTANT: Do NOT assume the clutch has engaged just because the solenoid
+was energized. The solenoid may be stuck, the hydraulic pressure may be
+insufficient, or there may be a wiring fault.
+
+Implementation Options:
+
+Option A: CLUTCH SOLENOID CURRENT MONITORING
+  - Measure current through clutch solenoid using ACS712 or current-sense
+    resistor
+  - Expected: 1.0-2.5A when engaged, 0A when disengaged
+  - If commanded ON but current is 0A → clutch fault → alarm, no autopilot
+  - Simple, no additional mechanical switch needed
+
+Option B: PRESSURE SWITCH ON BYPASS LINE
+  - A pressure switch on the bypass port detects when bypass is closed
+    (clutch engaged)
+  - Normally closed contact opens when bypass pressure rises
+  - Connect to ESP32 GPIO with pull-up resistor
+
+Option C: MECHANICAL LIMIT SWITCH
+  - A microswitch or Hall effect sensor detects the physical position of
+    the clutch mechanism
+  - Most reliable positive indication
+  - Requires mechanical installation on the drive unit
+
+RECOMMENDATION: Use Option A (current monitoring) as the primary detection
+method. It requires no additional mechanical installation and is implemented
+in the existing circuit. Add Option B or C if the installation allows.
+
+3.5  SAFETY INTERLOCKS
+------------------------------------------------------------------------------
+
+The firmware MUST enforce the following interlocks:
+
+  1. NEVER drive port or starboard solenoids unless clutch is confirmed
+     engaged (current > 0.5A measured on clutch circuit)
+  2. If clutch engagement is lost during autopilot operation (current drops
+     to zero), IMMEDIATELY deactivate port and starboard solenoids
+  3. If rudder feedback sensor is out of range or not responding, do not
+     engage autopilot
+  4. Provide audible and visual alarm for any clutch fault
+
+================================================================================
+4. RUDDER FEEDBACK SENSOR DESIGN
+================================================================================
+
+4.1  PURPOSE
+------------------------------------------------------------------------------
+
+The rudder feedback sensor provides the autopilot with the actual position
+of the rudder. This is essential for:
+  - Closed-loop PID control (the autopilot needs to know rudder position)
+  - Rate limiting (calculating how fast the rudder is moving)
+  - End-stop detection (software limits before mechanical stops)
+  - Fault detection (rudder not moving when solenoid is commanded)
+  - Display of rudder angle to the helmsman
+
+4.2  OPTION A: POTENTIOMETER (10K LINEAR TAPER)
+------------------------------------------------------------------------------
+
+Description:
+  A 10KΩ linear taper potentiometer mechanically linked to the rudder stock
+  via a linkage arm or directly mounted on the rudder stock.
+
+Specifications:
+  - Resistance: 10KΩ (linear taper)
+  - Travel: Typically 270°-300° of mechanical rotation for full resistance
+    travel
+  - Rudder throw: ±40° (80° total)
+  - Resistance used: (80/300) × 10KΩ = 2.67KΩ of the total 10KΩ range
+  - Mounting: Direct on rudder stock (preferred) or via bellcrank linkage
+
+Voltage Divider Circuit:
+                         +5V
+                          |
+                         [10K Potentiometer]
+                          |
+  ESP32 ADC ←────── wiper (middle terminal)
+                          |
+                         GND
+
+  Voltage range:
+    At amidships (center): V = 5V × (5K / 10K) = 2.5V
+    At full port:          V = 2.5V - 1.33V = ~1.17V (depends on mounting)
+    At full starboard:     V = 2.5V + 1.33V = ~3.83V
+
+  ESP32 ADC specifications:
+    - 12-bit ADC: 0-4095 counts over 0-3.3V (default attenuations)
+    - For 0-5V range, use voltage divider or set ADC attenuation to 11dB
+      (measures up to ~3.3V)
+    - RECOMMENDATION: Use a dedicated ADC with 5V capability, OR use a
+      voltage divider to scale 0-5V to 0-3.3V for the ESP32 ADC
+
+  Voltage Divider for ESP32 ADC:
+    Pot wiper → [6.8KΩ] → ESP32 ADC pin
+                        → [3.3KΩ] → GND
+    Ratio: 3.3 / (6.8 + 3.3) = 0.327 → 5V × 0.327 = 1.63V... NO.
+
+  CORRECTED Voltage Divider:
+    We want 5V → 3.3V. Ratio = 3.3/5.0 = 0.66
+    R_top = 6.8KΩ, R_bottom = 13.3KΩ → ratio = 13.3/(6.8+13.3) = 0.662 ✓
+
+    Or simpler: R_top = 10KΩ, R_bottom = 20KΩ → ratio = 20/(10+20) = 0.667 ✓
+    5V → 3.33V (within ESP32 range at 11dB attenuation)
+
+    RECOMMENDATION: 10KΩ + 20KΩ voltage divider before ESP32 ADC input.
+
+Low-Pass Filter for Noise Rejection:
+  Marine environments have significant electrical noise (engine alternator,
+  VHF radio, radar, etc.). The potentiometer wiper signal must be filtered.
+
+  RC Low-Pass Filter:
+    ESP32 ADC pin → [1KΩ] → Filtered Signal → [100nF] → GND
+    Cutoff frequency: f_c = 1 / (2π × R × C) = 1 / (2π × 1000 × 100e-9)
+                    = 1,592 Hz
+
+  This passes the rudder signal (which changes at <10 Hz) while rejecting
+  high-frequency noise from alternators and other sources.
+
+  For additional filtering, implement a software moving average or IIR
+  filter in the ESP32 firmware:
+    filtered_angle = 0.85 × filtered_angle + 0.15 × raw_angle
+    (time constant ≈ 6 samples at 50Hz sample rate = 120ms)
+
+Mounting Considerations:
+  - MUST survive continuous exposure to salt spray, humidity, UV, and
+    temperature cycling (-10°C to +60°C)
+  - IP67 rating minimum (immersion to 1m for 30 minutes)
+  - If the potentiometer itself is not IP67, mount it in a sealed enclosure
+    with a waterproof shaft seal (e.g., IP68-rated cable gland or rotary
+    seal)
+  - Use a stainless steel (316) linkage rod with spherical rod-end bearings
+    (Heim joints) to accommodate misalignment
+  - The potentiometer shaft must NOT support any side load — use a separate
+    support bearing on the rudder stock
+
+Recommended Potentiometers:
+  1. Bourns 6639 Series: Sealed, IP67, conductive plastic, 10K linear
+     - Excellent for marine use if properly mounted
+  2. ALPS Alpine RKJXK Series: Sealed, IP67, magnetic encoder option
+  3. Piher PC-16 Series: Sealed, IP68, conductive plastic
+  4. Honeywell 311 Series: Heavy-duty, sealed, IP68
+
+CALIBRATION PROCEDURE:
+  1. Physical Installation: Mount pot on rudder stock, set rudder to
+     amidships (center). Adjust pot mounting so wiper reads approximately
+     50% (center of resistance range).
+  2. Electrical Calibration (via ESP32 menu):
+     a. Set rudder to hard PORT stop (or known port angle, e.g., -35°)
+     b. Press "CAL PORT" button → ESP32 stores ADC value as PORT_LIMIT
+     c. Set rudder to hard STARBOARD stop (or known starboard angle, e.g., +35°)
+     d. Press "CAL STBD" button → ESP32 stores ADC value as STBD_LIMIT
+     e. Set rudder to amidships (center)
+     f. Press "CAL CENTER" button → ESP32 stores ADC value as CENTER
+  3. Software calculates linear mapping:
+       angle = CENTER_ANGLE + (adc_value - CENTER_ADC) ×
+               (ANGLE_RANGE / (STBD_ADC - PORT_ADC))
+  4. Verify: slowly move rudder from hard port to hard starboard, verify
+     displayed angle matches visual reference (protractor on rudder stock).
+  5. Store calibration values in ESP32 NVS (non-volatile storage) so they
+     persist across power cycles.
+
+4.3  OPTION B: ABSOLUTE ENCODER — AS5048A (I2C INTERFACE)
+------------------------------------------------------------------------------
+
+Description:
+  The AS5048A is a 14-bit magnetic rotary position sensor. It uses a magnet
+  mounted on the rudder stock and a sensor PCB mounted adjacent to it.
+  There is NO physical contact between the rotating and stationary parts.
+
+Specifications:
+  - Resolution: 14-bit = 16,384 counts per revolution
+  - Angle resolution: 360° / 16,384 = 0.02197° ≈ 0.022° per count
+  - Accuracy: ±0.05° (typical), ±0.1° (max over temperature)
+  - Interface: I2C or PWM (I2C preferred for noise immunity)
+  - Supply voltage: 3.3V or 5V (check specific variant)
+  - Maximum air gap: ~3mm between magnet and sensor IC
+  - Update rate: up to 14,545 Hz via I2C
+
+Advantages over Potentiometer:
+  - Non-contact: NO mechanical wear → infinite operational life
+  - Immune to contamination (salt, dirt, moisture on the magnet don't matter)
+  - No wiper noise or dead spots
+  - Higher resolution and accuracy
+  - True absolute position: reads correctly on power-up (no homing needed)
+  - No voltage divider needed for ADC (digital I2C output)
+
+Disadvantages:
+  - Higher cost: ~$15-25 per unit (vs. ~$5-10 for marine potentiometer)
+  - Requires I2C bus (2 wires + power + ground = 4 wires)
+  - Magnet must be precisely positioned (axial alignment critical)
+  - Requires PCB for the sensor IC and I2C pull-ups
+  - Less tolerant of large axial misalignment between magnet and sensor
+
+I2C Connection:
+  AS5048A SDA  → ESP32 GPIO 21 (default I2C SDA) + 4.7KΩ pull-up to 3.3V
+  AS5048A SCL  → ESP32 GPIO 22 (default I2C SCL) + 4.7KΩ pull-up to 3.3V
+  AS5048A VDD  → 3.3V (or 5V depending on variant)
+  AS5048A GND  → GND
+
+I2C Address: 0x40 (default, can be changed via A1/A2 pins)
+
+Software:
+  - Use ESP32 I2C hardware peripheral (not bit-banged)
+  - Read angle register (0xFE, 0xFF) — 14-bit value
+  - Convert to degrees: angle_degrees = raw_value × (360.0 / 16384.0)
+  - Apply offset calibration (magnet angular position vs. rudder amidships)
+
+Calibration Procedure:
+  1. Mount magnet on rudder stock (centered on rotation axis)
+  2. Mount sensor PCB with correct air gap (1-2mm from magnet face)
+  3. Power on, read raw angle at amidships → store as OFFSET
+  4. Rudder angle = (raw_angle - OFFSET), wrapped to ±180°
+  5. Move rudder to known port/starboard limits, verify angles match
+  6. Store OFFSET in NVS
+
+Marine Installation Notes:
+  - Pot the entire AS5048A PCB in marine-grade epoxy (except the sensing
+    face) for waterproofing
+  - Use a neodymium magnet (N42 grade or higher) with temperature rating
+    up to 80°C+
+  - Mount the sensor housing in 316 stainless steel with a non-magnetic
+    spacer (aluminum, brass, or Delrin)
+
+RECOMMENDATION:
+  For new builds or refits where reliability is paramount: Use AS5048A.
+  For budget-conscious builds or retrofits: Use sealed potentiometer.
+  For the Jetson-based autopilot with long-term reliability requirement:
+  USE AS5048A. The marginal cost is justified by eliminating the primary
+  failure mode (potentiometer wear).
+
+================================================================================
+5. RUDDER RATE LIMITER
+================================================================================
+
+5.1  PURPOSE
+------------------------------------------------------------------------------
+
+The rudder rate limiter is a CRITICAL SAFETY mechanism that limits how fast
+the autopilot can command the rudder to move. Even if the PID controller
+outputs a full hard-over command, the software ramps the rudder angle at
+a controlled rate.
+
+5.2  WHY RATE LIMITING IS ESSENTIAL
+------------------------------------------------------------------------------
+
+Mechanical Damage Prevention:
+  - Sudden hard-over rudder movement (e.g., full port to full starboard
+    in 1 second) generates enormous forces on the rudder stock, quadrant,
+    tiller arm, and hydraulic cylinder
+  - Repeated hard-over cycling causes fatigue cracking in rudder stock,
+    quadrant bolts, and cylinder mount brackets
+  - Hydraulic shock can damage seals in the cylinder and valve block
+
+Crew Safety:
+  - A rudder slam to hard-over on a sailing vessel at speed can cause
+    violent broaching (vessel turning broadside to waves)
+  - Crew below deck can be thrown against bulkheads
+  - Gear and equipment can be thrown from shelves and berths
+  - In extreme cases, broaching can lead to knockdown or capsize
+
+Vessel Stability:
+  - A sailboat's stability depends on the angle of heel relative to the
+    wind and wave conditions
+  - A sudden hard-over rudder movement can induce a roll that compounds
+    with wave action
+  - In following seas, this is particularly dangerous (broach / pitchpole)
+
+Hydraulic System Protection:
+  - Rapid cycling of the solenoid valves causes the hydraulic pump to
+    cycle at maximum capacity
+  - Continuous maximum pump operation generates heat → fluid overheating
+  → reduced fluid viscosity → increased internal leakage → loss of
+    rudder holding ability
+  - Most hydraulic pumps have a duty cycle rating (e.g., 30% at max
+    pressure); exceeding this causes premature pump failure
+
+5.3  TYPICAL RATE LIMITS
+------------------------------------------------------------------------------
+
+  Vessel Type          | Min Rate    | Max Rate    | Recommended  | Notes
+  ----------------------|-------------|-------------|--------------|------------------
+  Small sailboat <30ft  | 3 deg/sec   | 8 deg/sec   | 5 deg/sec    | Light rudder
+  Medium sailboat 30-45 | 3 deg/sec   | 10 deg/sec  | 6 deg/sec    | Standard
+  Large sailboat >45ft  | 2 deg/sec   | 8 deg/sec   | 5 deg/sec    | Heavy rudder
+  Motor vessel          | 3 deg/sec   | 12 deg/sec  | 8 deg/sec    | Fast response
+  Commercial            | 2 deg/sec   | 6 deg/sec   | 4 deg/sec    | Conservative
+
+  Rate limits should be CONFIGURABLE in the autopilot firmware (via menu
+  or serial command to Jetson).
+
+5.4  IMPLEMENTATION
+------------------------------------------------------------------------------
+
+Software Rate Limiter Algorithm (in ESP32 firmware):
+
+  // Parameters
+  float MAX_RUDDER_RATE = 6.0;  // degrees per second (configurable)
+  float CONTROL_LOOP_PERIOD = 0.02;  // 50 Hz = 20ms per loop iteration
+
+  float max_rudder_change_per_cycle = MAX_RUDDER_RATE * CONTROL_LOOP_PERIOD;
+  // = 6.0 * 0.02 = 0.12 degrees per 20ms cycle
+
+  // In PID control loop (called every 20ms):
+  float pid_output;      // PID calculated rudder angle (degrees)
+  float current_rudder;  // Current actual rudder position (from sensor)
+  float commanded_angle; // Angle sent to solenoid valve (rate-limited)
+
+  void apply_rate_limit(float target_angle) {
+      float delta = target_angle - commanded_angle;
+
+      if (abs(delta) > max_rudder_change_per_cycle) {
+          // Rate limit: only change by the maximum allowed amount
+          if (delta > 0) {
+              commanded_angle += max_rudder_change_per_cycle;
+          } else {
+              commanded_angle -= max_rudder_change_per_cycle;
+          }
+      } else {
+          // Within rate limit: go directly to target
+          commanded_angle = target_angle;
+      }
+
+      // Apply hard limits (software end-stops)
+      commanded_angle = constrain(commanded_angle, -MAX_RUDDER_ANGLE,
+                                   MAX_RUDDER_ANGLE);
+
+      // Drive solenoids based on commanded_angle vs current_rudder
+      drive_solenoids(commanded_angle, current_rudder);
+  }
+
+5.5  ADDITIONAL RATE-BASED SAFETY FEATURES
+------------------------------------------------------------------------------
+
+  1. RUDDER RATE MONITORING:
+     - Calculate actual rudder rate: (current_angle - prev_angle) / dt
+     - If actual rate EXCEEDS the rate limit (e.g., rudder moving faster
+       than commanded), this indicates:
+       a) External force on rudder (wave action, impact with debris)
+       b) Hydraulic system fault (valve stuck open)
+       c) Sensor fault (reading jumping)
+     - Log the event; if persistent, trigger alarm
+
+  2. DYNAMIC RATE ADJUSTMENT:
+     - Reduce rate limit based on vessel speed (from GPS or paddle wheel)
+     - At low speed (< 3 knots): allow faster rate (precise maneuvering)
+     - At high speed (> 10 knots): reduce rate (prevent broaching)
+     - Formula: effective_rate = base_rate × (1.0 - 0.5 × (speed / max_speed))
+       where max_speed is configurable (e.g., 10 knots)
+
+  3. HIGH-SEA-STATE RATE REDUCTION:
+     - If the compass heading deviation exceeds a threshold (e.g., ±30°)
+       for more than a few seconds, automatically reduce the rate limit
+     - This prevents the autopilot from "fighting" large waves, which
+       wastes hydraulic energy and can cause mechanical damage
+
+================================================================================
+6. OVER-CURRENT PROTECTION
+================================================================================
+
+6.1  PURPOSE
+------------------------------------------------------------------------------
+
+Over-current protection monitors the current flowing through each solenoid
+coil to detect faults:
+  - Solenoid stuck ON (valve mechanically jammed)
+  - Wiring short circuit (wire chafed, insulation failure)
+  - Solenoid coil failure (open circuit = no current when commanded)
+  - Connector corrosion (increased resistance, reduced current)
+
+6.2  OPTION A: CURRENT SENSE RESISTOR (SHUNT)
+------------------------------------------------------------------------------
+
+Description:
+  A low-value precision resistor placed in series with the solenoid's
+  ground path (between MOSFET source and ground). The voltage across the
+  resistor is proportional to the current through it: V = I × R.
+
+Circuit:
+  +12V → Solenoid (+) → Solenoid Coil → Solenoid (-) → MOSFET Drain
+  MOSFET Source → [R_shunt] → GND
+  Amplifier: V_shunt (across R_shunt) → differential amplifier → ESP32 ADC
+
+Resistor Value:
+  - For 3A maximum current, with desired 1V at full scale:
+    R_shunt = V / I = 1.0 / 3.0 = 0.333Ω
+  - Power dissipation: P = I²R = 9 × 0.333 = 3W
+  - Use a 5W rated resistor (2× margin)
+  - Standard value: 0.33Ω, 5W, 1% tolerance (wirewound or metal strip)
+
+Amplifier:
+  - The ESP32 ADC range is 0-3.3V
+  - V_shunt at 3A = 3A × 0.33Ω = 0.99V (within range, but barely)
+  - Use an op-amp with gain of 2-3 for better resolution:
+    V_out = V_shunt × gain = 0.99 × 2.5 = 2.48V (good range in 0-3.3V)
+  - Recommended op-amp: INA219 (I2C current/voltage sensor) or
+    MAX471 (current sense amplifier with built-in gain)
+  - Best choice: ACS712 module (see Option B) — simpler to implement
+
+Advantages:
+  - Very accurate
+  - Low cost
+  - No external power supply needed (passive component)
+
+Disadvantages:
+  - Requires precision amplifier circuit
+  - Voltage drop across shunt (0.99V at 3A) reduces voltage available to
+    solenoid (not significant for 12V system)
+  - Needs PCB space for amplifier circuit
+
+6.3  OPTION B: ACS712 HALL EFFECT CURRENT SENSOR (RECOMMENDED)
+------------------------------------------------------------------------------
+
+Description:
+  The ACS712 is a Hall effect-based linear current sensor IC. It provides
+  galvanic isolation between the current path and the output, and outputs
+  an analog voltage proportional to the current.
+
+Specifications:
+  - ACS712-05: ±5A range, 185mV/A sensitivity
+  - ACS712-20: ±20A range, 100mV/A sensitivity
+  - ACS712-30: ±30A range, 66mV/A sensitivity
+
+  RECOMMENDED: ACS712-05 (±5A) for solenoid monitoring. Best resolution
+  for the 0-3A expected range.
+
+Connection:
+  ACS712 VCC → 5V
+  ACS712 GND → GND
+  ACS712 OUT → ESP32 ADC pin (through 1KΩ + 100nF low-pass filter)
+  ACS712 IP+ → Solenoid (+) terminal (wire carrying current to measure)
+  ACS712 IP- → Solenoid other terminal (load side)
+
+Output Voltage:
+  - At 0A: V_out = VCC/2 = 2.5V
+  - At +3A: V_out = 2.5V + (3 × 0.185) = 3.055V
+  - At -3A: V_out = 2.5V - (3 × 0.185) = 1.945V
+
+  ESP32 ADC reading at 3.055V (with 11dB attenuation): ~3800 counts (out
+  of 4095). Resolution: 5A/4095 = 1.22mA per count. Adequate.
+
+Calibration:
+  - Read ADC value with solenoid OFF (0A): store as ZERO_CURRENT_ADC
+  - Calculate: current_A = (adc_reading - ZERO_CURRENT_ADC) × 5.0 / 4095 / 0.185
+
+Implementation — Per Channel:
+  - ONE ACS712 module per monitored channel (port, starboard, clutch)
+  - Total: 3 ACS712 modules
+  - Alternatively: monitor only the clutch solenoid for engagement
+    detection and monitor the total supply current to the valve block
+    for overcurrent detection (2 modules instead of 3)
+
+6.4  FAULT DETECTION LOGIC
+------------------------------------------------------------------------------
+
+Normal Operation Thresholds:
+  Event                     | Expected Current   | Tolerance
+  ---------------------------|--------------------|--------------------
+  Solenoid OFF (idle)        | 0.0 A              | ±0.2A (noise)
+  Solenoid ON (normal)       | 1.0-2.5 A          | Varies by unit
+  Solenoid ON (hot)          | 0.8-2.0 A          | Decreases ~20%
+  Clutch engaged             | 1.0-2.5 A          | Check datasheet
+  Clutch disengaged         | 0.0 A              | ±0.2A
+
+Fault Detection Rules:
+  1. SOLENOID STUCK / SHORT CIRCUIT:
+     If current > 4.0A for > 500ms when solenoid should be ON:
+       → De-energize that solenoid immediately
+       → Log fault: "PORT SOLENOID OVERCURRENT"
+       → Sound alarm (buzzer + OLED warning)
+       → Disengage clutch
+       → Set autopilot to STANDBY
+       → Send fault message to Jetson via serial
+
+  2. SOLENOID FAILED OPEN:
+     If current < 0.1A when solenoid is commanded ON for > 200ms:
+       → Solenoid is not drawing current (open circuit)
+       → Log fault: "PORT SOLENOID FAILED OPEN"
+       → Sound alarm
+       → Do NOT try to re-energize repeatedly (retries max 3, then lock out)
+
+  3. CLUTCH FAULT:
+     If clutch current < 0.1A when clutch is commanded ON:
+       → Clutch not engaging
+       → Do NOT allow port/starboard solenoids to activate
+       → Log fault: "CLUTCH ENGAGEMENT FAILED"
+       → Alarm
+
+  4. WIRING FAULT (PARTIAL SHORT / HIGH RESISTANCE):
+     If current is between 0.2A and 0.5A when solenoid should be ON:
+       → Possible corrosion in connectors or partially damaged wire
+       → Log warning: "HIGH RESISTANCE DETECTED — CHECK CONNECTIONS"
+       → Continue operation but flag for maintenance
+
+6.5  FUSING — HARDWARE OVERCURRENT PROTECTION
+------------------------------------------------------------------------------
+
+Software protection is NOT sufficient alone. Hardware fuses must protect
+against catastrophic failures.
+
+Fuse Placement:
+  1. BATTERY FUSE: 30A (at battery terminal, within 7" of battery post)
+     Protects the entire autopilot power feed
+  2. SOLENOID FUSE: 15A fast-blow (on the +12V wire feeding the solenoid
+     valve block)
+     Protects against short circuits in the solenoid wiring
+  3. ESP32 FUSE: 5A fast-blow (on the +5V output of the buck converter)
+     Protects the ESP32 and all low-voltage electronics
+  4. CLUTCH FUSE: 5A fast-blow (on the clutch solenoid circuit)
+     If clutch has a separate feed from the main solenoid circuit
+
+Fuse Types for Marine Use:
+  - ATO/ATC automotive blade fuses: cheap, readily available, adequate
+    for 5-30A
+  - MIDI or MEGA fuses: for higher current ratings, more robust terminals
+  - ANL or MRBF fuses: for battery connection (30A+), ignition-protected
+
+================================================================================
+7. COMPLETE WIRING DIAGRAM DESCRIPTION
+================================================================================
+
+7.1  SYSTEM OVERVIEW
+------------------------------------------------------------------------------
+
+The autopilot system consists of the following interconnected subsystems:
+
+  [BATTERY] → [FUSE] → [BUCK CONVERTER] → [ESP32 + PERIPHERALS]
+                                     ↓
+                              [5V RAIL]
+                              ├── ESP32 DevKit
+                              ├── OLED Display
+                              ├── Buttons
+                              ├── AS5048A Encoder (if used)
+                              └── ACS712 Current Sensors
+
+  [BATTERY] → [30A FUSE] → [15A FUSE] → [SOLENOID VALVE BLOCK]
+                                     ├── Port Solenoid ← MOSFET Driver
+                                     ├── Starboard Solenoid ← MOSFET Driver
+                                     └── (internal check valve)
+
+  [BATTERY] → [30A FUSE] → [5A FUSE] → [CLUTCH SOLENOID] ← MOSFET Driver
+
+  [ESP32] ↔ [JETSON] (Serial UART)
+  [ESP32] ↔ [COMPASS] (I2C)
+  [ESP32] ↔ [OLED] (I2C)
+  [ESP32] ↔ [BUTTONS] (GPIO)
+  [ESP32] ↔ [RUDDER FEEDBACK] (ADC or I2C)
+
+7.2  POWER DISTRIBUTION — DETAILED
+------------------------------------------------------------------------------
+
+Source: Ship's 12V DC battery bank (lead-acid or LiFePO4)
+  - Voltage range: 10.5V (discharged lead-acid) to 14.4V (charging)
+  - For LiFePO4: 11.0V (discharged) to 14.6V (charging)
+  - The buck converter must accept 10-16V input range
+
+Wiring from Battery:
+  1. Battery positive terminal → [30A ANL fuse, within 7" of terminal]
+  2. Fuse output → 10 AWG tinned marine wire → main distribution point
+     (at autopilot location)
+  3. At distribution point:
+     a. 18 AWG wire → 15A ATO fuse → solenoid valve block (+12V)
+     b. 18 AWG wire → 5A ATO fuse → clutch solenoid (+12V)
+     c. 16 AWG wire → buck converter input (+12V)
+  4. Battery negative terminal → 10 AWG wire → common ground bus
+     (at autopilot location)
+  5. All grounds connect to common ground bus
+
+Buck Converter:
+  - Input: 10-16V DC
+  - Output: 5V DC, 3A minimum (recommended 5A for headroom)
+  - Recommended: Traco Power TSR 1-2450 (5V, 1A), or Recom R-785.0-0.5
+    for ESP32 only, or a larger module (e.g., LM2596-based, 5V 3A) if
+    powering multiple peripherals
+  - Output → 5A ATO fuse → 5V rail (powers ESP32, OLED, encoder, sensors)
+
+ESP32 Power:
+  - ESP32 DevKit V1 has onboard 5V→3.3V LDO (AMS1117)
+  - Feed 5V to the ESP32's VIN pin (not 3.3V pin)
+  - ESP32 current draw: ~240mA (WiFi active) to ~50mA (deep sleep)
+  - OLED current: ~20-40mA
+  - AS5048A: ~10mA
+  - ACS712: ~10mA each × 3 = 30mA
+  - Total 5V load: ~350mA maximum (well within 3A supply)
+
+7.3  MOSFET DRIVER BOARD WIRING
+------------------------------------------------------------------------------
+
+The MOSFET driver board contains three MOSFET channels (PORT, STBD, CLUTCH)
+plus current monitoring.
+
+ESP32 → MOSFET Board:
+  Signal          | ESP32 Pin  | Wire  | Destination
+  ----------------|-----------|-------|--------------------------------
+  PORT_DRIVE      | GPIO 25   | 22AWG| MOSFET 1 Gate (via 100Ω)
+  STBD_DRIVE      | GPIO 26   | 22AWG| MOSFET 2 Gate (via 100Ω)
+  CLUTCH_DRIVE    | GPIO 27   | 22AWG| MOSFET 3 Gate (via 100Ω)
+  GND             | GND       | 22AWG| MOSFET Board GND (common)
+
+MOSFET Board → Solenoids:
+  Connection      | MOSFET    | Wire  | Destination
+  ----------------|-----------|-------|--------------------------------
+  PORT coil (-)   | Q1 Drain  | 18AWG| Solenoid valve PORT terminal
+  STBD coil (-)   | Q2 Drain  | 18AWG| Solenoid valve STBD terminal
+  CLUTCH coil (-) | Q3 Drain  | 18AWG| Clutch solenoid (-) terminal
+
+Solenoid Power (+12V):
+  Connection      | Wire      | Via
+  ----------------|-----------|----------------------------------------
+  Valve block +12V| 18AWG     | 15A fuse → solenoid common (+12V)
+  Clutch +12V     | 18AWG     | 5A fuse → clutch solenoid (+) terminal
+
+7.4  RUDDER FEEDBACK WIRING
+------------------------------------------------------------------------------
+
+Option A — Potentiometer:
+  Pot Terminal  | Wire  | Destination
+  -------------|-------|--------------------------------------------
+  VCC (end 1)  | 22AWG| +5V rail (fused at 5V)
+  Wiper (mid)  | 22AWG| ESP32 GPIO 34 (ADC1_CH6) via voltage divider
+  GND (end 3)  | 22AWG| GND (common ground bus)
+
+  Shielded cable recommended (Belden 9418 or equivalent) to minimize
+  noise pickup. Connect shield to ground at ONE END only (ESP32 side)
+  to prevent ground loops.
+
+Option B — AS5048A Encoder:
+  Encoder Pin  | Wire  | Destination
+  ------------|-------|--------------------------------------------
+  VDD         | 22AWG | 3.3V (from ESP32 3.3V pin or buck converter)
+  GND         | 22AWG | GND (common ground bus)
+  SDA         | 22AWG | ESP32 GPIO 21 (I2C SDA) + 4.7KΩ pull-up to 3.3V
+  SCL         | 22AWG | ESP32 GPIO 22 (I2C SCL) + 4.7KΩ pull-up to 3.3V
+
+  Use twisted pair cable (Cat5e or marine-grade twisted pair) for I2C
+  signals. Maximum cable length: ~3 meters (I2C limitation). Keep the
+  encoder close to the ESP32 if possible.
+
+7.5  COMPASS WIRING
+------------------------------------------------------------------------------
+
+Assuming a BNO055 or similar I2C compass module:
+
+  Compass Pin | Wire  | Destination
+  -----------|-------|--------------------------------------------
+  VIN        | 22AWG | +3.3V or +5V (check compass module spec)
+  GND        | 22AWG | GND (common ground bus)
+  SDA        | 22AWG | ESP32 GPIO 21 (shared I2C bus with encoder)
+  SCL        | 22AWG | ESP32 GPIO 22 (shared I2C bus)
+
+  NOTE: The compass and encoder share the same I2C bus. Ensure they have
+  different I2C addresses (BNO055 default: 0x28 or 0x29; AS5048A default:
+  0x40). These do not conflict.
+
+7.6  OLED DISPLAY WIRING
+------------------------------------------------------------------------------
+
+Assuming SSD1306 128x64 I2C OLED:
+
+  OLED Pin | Wire  | Destination
+  --------|-------|--------------------------------------------
+  VCC      | 22AWG | +3.3V
+  GND      | 22AWG | GND
+  SCL      | 22AWG | ESP32 GPIO 22 (shared I2C bus)
+  SDA      | 22AWG | ESP32 GPIO 21 (shared I2C bus)
+
+  The OLED display shares the I2C bus with the compass and encoder.
+  Three devices on one bus is well within I2C capabilities. Total bus
+  capacitance should be kept under 400pF for reliable operation at 100kHz.
+
+7.7  BUTTON WIRING
+------------------------------------------------------------------------------
+
+Buttons are active-low (pressed = connect to GND, pulled HIGH by internal
+ESP32 pull-up or external resistor).
+
+  Button         | Wire  | ESP32 Pin  | Notes
+  ---------------|-------|-----------|----------------------------------
+  AUTO           | 22AWG | GPIO 32   | Engages autopilot
+  STANDBY        | 22AWG | GPIO 33   | Disengages autopilot
+  PORT -1 DEG    | 22AWG | GPIO 13   | Adjust heading target -1 deg
+  STBD +1 DEG    | 22AWG | GPIO 14   | Adjust heading target +1 deg
+  PORT -10 DEG   | 22AWG | GPIO 15   | Adjust heading target -10 deg
+  STBD +10 DEG   | 22AWG | GPIO 16   | Adjust heading target +10 deg
+  MODE           | 22AWG | GPIO 17   | Cycle through modes (menu/cal)
+
+  All buttons: One side to GPIO, other side to GND.
+  Enable INPUT_PULLUP in ESP32 firmware for each button GPIO.
+  Software debounce: 50ms minimum (check button state, wait 50ms, check
+  again; only register if both reads are LOW).
+
+7.8  JETSON SERIAL CONNECTION
+------------------------------------------------------------------------------
+
+  ESP32 UART2 TX (GPIO 17*) → Jetson RX (via level shifter)
+  ESP32 UART2 RX (GPIO 16*) → Jetson TX (via level shifter)
+
+  * Note: GPIO 16/17 may conflict with button wiring. If buttons are on
+    these pins, move the UART to UART1 (GPIO 10/9) or use SoftwareSerial.
+    RECOMMENDATION: Use UART1 (GPIO 10=TX, GPIO 9=RX) for Jetson comms,
+    and keep GPIO 16/17 for buttons.
+
+  Level Shifter: ESP32 is 3.3V logic; Jetson may be 3.3V or 1.8V.
+    - If both are 3.3V: direct connection (with 100Ω series resistors)
+    - If Jetson is 1.8V: use a bidirectional level shifter (TXB0108 or
+      similar) or simple resistor divider (1KΩ + 2KΩ)
+
+  Baud Rate: 115200 or 460800 (negotiated during startup)
+  Protocol: Simple text-based commands (JSON or fixed format)
+  Cable: Shielded twisted pair, max 10 meters
+
+7.9  WIRE GAUGE RECOMMENDATIONS — SUMMARY TABLE
+------------------------------------------------------------------------------
+
+  Circuit                | Gauge  | Type              | Max Length | Notes
+  -----------------------|--------|-------------------|------------|--------------
+  Battery to main dist.  | 10 AWG | Tinned marine     | 15 ft      | 30A max
+  Main dist. to solenoid | 18 AWG | Tinned marine     | 25 ft      | 15A fuse
+  Main dist. to clutch   | 18 AWG | Tinned marine     | 25 ft      | 5A fuse
+  Buck conv. input       | 16 AWG | Tinned marine     | 15 ft      | 3-5A
+  Buck conv. output      | 22 AWG | Tinned marine     | 10 ft      | 5V rail
+  ESP32 to MOSFET gate   | 22 AWG | Stranded          | 6 ft       | Signal
+  Potentiometer signal   | 22 AWG | Shielded          | 15 ft      | Analog
+  I2C bus (SDA/SCL)      | 22 AWG | Twisted pair      | 10 ft      | Digital
+  Buttons                | 22 AWG | Stranded          | 10 ft      | Digital
+  Serial (UART)          | 22 AWG | Shielded TP       | 10 ft      | Digital
+  OLED display           | 22 AWG | Stranded          | 6 ft       | I2C
+
+7.10  VOLTAGE DROP CALCULATIONS
+------------------------------------------------------------------------------
+
+Formula: V_drop = I × L × (2 × R_per_ft)
+  Where I = current, L = one-way cable length, R_per_ft = resistance per foot,
+  2 = accounts for both supply and return conductors.
+
+  Example: Solenoid circuit, 25 ft cable run, 3A current
+  R_18AWG = 6.385 Ω / 1000 ft = 0.006385 Ω/ft
+  V_drop = 3.0 × 25 × (2 × 0.006385) = 3.0 × 25 × 0.01277 = 0.958V
+  V_at_solenoid = 12.0 - 0.958 = 11.04V  → 7.98% drop
+
+  This is ACCEPTABLE for solenoid operation (solenoids operate over 9-16V).
+  If the drop exceeds 10%, use 16 AWG wire instead.
+
+  Example: 5V sensor circuit, 10 ft cable run, 100mA current
+  R_22AWG = 16.14 Ω / 1000 ft = 0.01614 Ω/ft
+  V_drop = 0.1 × 10 × (2 × 0.01614) = 0.032V
+  V_at_sensor = 5.0 - 0.032 = 4.968V  → 0.64% drop — EXCELLENT
+
+  Voltage Drop Reference (18 AWG):
+    Length (ft) | Current (A) | Voltage Drop (V) | Drop (%)
+    -------------|-------------|------------------|--------
+    5            | 3.0         | 0.19             | 1.6%
+    10           | 3.0         | 0.38             | 3.2%
+    15           | 3.0         | 0.57             | 4.8%
+    20           | 3.0         | 0.77             | 6.4%
+    25           | 3.0         | 0.96             | 8.0%
+    30           | 3.0         | 1.15             | 9.6% ← LIMIT
+    35           | 3.0         | 1.34             | 11.2% ← TOO HIGH
+
+  RULE: Keep voltage drop under 3% for sensitive electronics (ESP32, sensors)
+        Keep voltage drop under 10% for power devices (solenoids, pumps)
+
+7.11  CONNECTOR TYPES — MARINE USE
+------------------------------------------------------------------------------
+
+All connectors in the autopilot wiring harness must be marine-grade:
+  - Corrosion-resistant (tinned contacts)
+  - Sealed against moisture (IP65+)
+  - Vibration-resistant (locking mechanism)
+  - Rated for the current and voltage of the circuit
+
+Recommended Connector Types:
+
+  For Power Circuits (solenoids, clutch):
+    1. DEUTSCH DT Series: 2-12 pin, IP67, rated to 13A per pin
+       - Industry standard in marine, automotive, and industrial
+       - Tinned brass contacts, silicone seals
+       - Part number example: DT06-2S (2-pin receptacle)
+       - Requires DT series crimp tool (or solder contacts)
+    2. AMPEHENOL AT Series: Similar to Deutsch DT, widely available
+       - IP67, 13A per pin
+    3. MARINCO / BEP Marine: Pre-made marine cable assemblies
+
+  For Signal Circuits (sensors, buttons, serial):
+    1. DEUTSCH DTM Series: Miniature version, IP67, 7.5A per pin
+       - Better suited for signal wiring
+    2. WATERPROOF M12 connectors: Industrial standard, IP67
+       - Available in 4, 5, 8 pin configurations
+       - Screw-locking, very robust
+       - Good for sensor connections
+    3. MIL-SPEC (MIL-DTL-38999): Overkill for recreational but standard
+       for commercial/military
+
+  For Internal PCB Connections:
+    1. Molex KK series: Low-cost, reliable, 2.54mm pitch
+       - NOT waterproof — use only inside sealed enclosure
+    2. JST PH series: Compact, 2.0mm pitch
+       - Good for low-current internal connections
+
+RECOMMENDATION:
+  - Use DEUTSCH DT series for all external connections (solenoid, clutch,
+    power)
+  - Use M12 connectors for sensor cables (compass, encoder)
+  - Use Molex KK for internal PCB-to-PCB connections
+  - Apply dielectric grease to all connector contacts during assembly
+
+================================================================================
+8. ENVIRONMENTAL PROTECTION
+================================================================================
+
+8.1  IP RATING REQUIREMENTS
+------------------------------------------------------------------------------
+
+The autopilot controller enclosure must meet a minimum of IP65:
+
+  IP65: Dust-tight, protected against water jets from any direction
+  IP66: Dust-tight, protected against powerful water jets
+  IP67: Dust-tight, protected against immersion to 1m for 30 minutes
+  IP68: Dust-tight, protected against continuous immersion
+
+RECOMMENDATION: IP67 minimum for the autopilot controller enclosure.
+
+Rationale:
+  - The enclosure may be located in a cockpit locker, lazarette, or
+    below-decks navigation station
+  - These locations are subject to:
+    - Occasional spray or drip (hatches, leaks)
+    - High humidity (condensation)
+    - Flooding (bilge water, hull breach)
+  - IP67 ensures the electronics survive even if the vessel takes water
+    into the enclosure area
+
+Location-Specific Recommendations:
+  - Cockpit installation: IP67 minimum (direct exposure to rain and spray)
+  - Below-decks (dry): IP65 acceptable
+  - Below-decks (potentially wet): IP67
+  - Engine room: IP67 + additional thermal management
+
+8.2  ENCLOSURE DESIGN
+------------------------------------------------------------------------------
+
+Material Options:
+  1. ABS plastic with gasket: Inexpensive, adequate for IP65
+  2. Polycarbonate: UV resistant, good for cockpit mounting
+  3. Fiberglass (GRP): Excellent for marine, strong, non-conductive
+  4. Aluminum (6061-T6, anodized): Strong, conductive (EMI shielding)
+  5. 316 Stainless steel: Maximum durability, heavy, expensive
+
+RECOMMENDATION: Polycarbonate or fiberglass enclosure with silicone gasket.
+
+Gasket Design:
+  - Silicone rubber gasket, 2-3mm thick
+  - Compressed 25-35% by enclosure lid bolts
+  - Gasket groove in either the lid or the body (not both)
+  - Use marine-grade silicone sealant on gasket during assembly
+
+Cable Entries:
+  - Cable glands (IP68 rated) for each cable entering the enclosure
+  - Size each gland for the cable diameter; use silicone sealant around
+    the cable inside the gland
+  - Alternative: pre-made Deutsch connector bulkhead mounts
+  - All cable entries must be at the BOTTOM of the enclosure (water
+    runs down, not up)
+
+Mounting:
+  - Mount enclosure with 316 stainless steel bolts and nyloc nuts
+  - Use rubber vibration isolators if mounted near engine or machinery
+  - Ensure enclosure is accessible for maintenance and fuse replacement
+
+8.3  PCB PROTECTION
+------------------------------------------------------------------------------
+
+Conformal Coating:
+  - Apply conformal coating to ALL PCBs in the autopilot system
+  - Types (in order of preference for marine):
+    1. Acrylic (AR): Easy to apply, easy to rework, good moisture barrier
+       - MG Chemicals 419B or similar
+       - Spray or brush application
+       - Reapply annually in tropical/saltwater environments
+    2. Silicone (SR): Excellent flexibility, good temperature range
+       - Superior for vibration environments
+       - Harder to rework
+    3. Polyurethane (UR): Best chemical resistance
+       - Excellent for fuel/engine room installations
+       - Very difficult to rework
+
+  Application Procedure:
+    1. Assemble and test PCB completely
+    2. Mask off connectors, switches, potentiometers, and any components
+       that should not be coated (LEDs, displays, adjustment screws)
+    3. Clean PCB with isopropyl alcohol to remove flux residues
+    4. Apply conformal coating per manufacturer instructions
+    5. Cure per spec (typically 24 hours at room temperature)
+    6. Inspect for coverage (UV inspection light for acrylic coatings)
+
+  PCB Material:
+    - FR-4 with 1oz copper minimum (standard for most PCB fabricators)
+    - Consider 2oz copper for high-current traces (solenoid MOSFET paths)
+    - Minimum trace width for solenoid drive: 50 mil (1.27mm) for 3A
+    - Minimum via size: 0.8mm (32 mil) for power traces
+    - Solder mask: LPI (Liquid Photoimageable) green
+    - Silkscreen: White, for component identification and installation marks
+
+8.4  HARDWARE MATERIALS
+------------------------------------------------------------------------------
+
+Fasteners:
+  - ALL external hardware: 316 stainless steel (A4 in metric notation)
+  - Internal hardware (inside sealed enclosure): 304 stainless acceptable
+  - NEVER use plain steel, zinc-plated steel, or brass where exposed to
+    saltwater atmosphere
+  - Nyloc nuts or thread-locking compound (Loctite 243) on all vibrating
+    connections
+
+Mounting Hardware:
+  - Standoffs: 316 SS or nylon (for PCB mounting inside enclosure)
+  - Washers: 316 SS, fender washers for cable strain relief
+  - Cable ties: UV-stabilized nylon (natural, not black — black absorbs
+    more UV and becomes brittle faster in marine environments)
+
+Heat Sinks:
+  - If MOSFET heatsink is needed (unlikely for this application):
+    Use anodized aluminum with thermal compound
+  - Anodizing provides corrosion resistance
+
+8.5  WIRING MATERIALS
+------------------------------------------------------------------------------
+
+Wire:
+  - MUST be tinned copper (not bare copper)
+  - Tinning prevents corrosion wicking under insulation
+  - Stranded wire (NOT solid) for vibration resistance
+  - Minimum strand count: 19 strands for 22 AWG, 65+ strands for 18 AWG
+  - Insulation: PVC (general purpose) or XLPE (high temperature, engine
+    room)
+  - Approved marine wire types:
+    - UL 1426 (Boat Cable) — standard for marine
+    - BC5W2 (tinned, multi-strand) — common designation
+    - MIL-W-22759 — military specification, excellent but expensive
+
+DO NOT USE:
+  - Automotive primary wire (GPT, SGT) — thinner insulation, not rated
+    for marine environment
+  - Speaker wire — not rated for marine, poor insulation
+  - Solid core wire — breaks under vibration
+  - Untinned copper wire — corrodes rapidly in marine atmosphere
+
+Terminals:
+  - Tinned copper ring terminals for all connections to studs/terminals
+  - Tinned copper spade terminals for quick-disconnect connections
+  - Adhesive-lined heat shrink tubing on ALL terminal connections
+    (e.g., 3M adhesive-lined heat shrink, or double-wall heat shrink)
+  - Heat shrink provides:
+    a) Mechanical strain relief (prevents wire fatigue at terminal)
+    b) Environmental seal (adhesive lining bonds to wire insulation)
+    c) Electrical insulation (covers any exposed conductor)
+
+Terminal Crimping:
+  - Use a proper ratcheting crimp tool (not pliers!)
+  - Recommended: Ancor marine crimp tool or equivalent
+  - Crimp tool must match the terminal size (red=22-16AWG, blue=16-14AWG,
+    yellow=12-10AWG)
+  - Pull-test every crimp: give a firm tug — the wire should NOT come out
+
+8.6  CORROSION PREVENTION
+------------------------------------------------------------------------------
+
+Dielectric Grease:
+  - Apply to ALL connector contacts during assembly
+  - Use marine-grade dielectric grease (not regular automotive grease)
+  - Prevents galvanic corrosion between dissimilar metals
+  - Repels moisture from contact surfaces
+  - Does NOT interfere with electrical conductivity
+  - Reapply annually during maintenance inspection
+
+Cathodic Protection:
+  - The autopilot enclosure should not significantly affect the vessel's
+    cathodic protection system
+  - If using an aluminum enclosure, ensure it is electrically isolated from
+    the vessel's bonding system (unless intentionally bonded)
+  - Do NOT create new ground paths through the autopilot wiring
+
+8.7  MAINTENANCE SCHEDULE
+------------------------------------------------------------------------------
+
+  Interval    | Task
+  -----------|---------------------------------------------------------------
+  Monthly     | Visual inspection of all external wiring and connectors
+  Quarterly   | Check connector tightness, clean any visible corrosion
+  Semi-annual | Inspect enclosure gasket, reseal if necessary
+  Annual      | Reapply dielectric grease to all connectors
+  Annual      | Inspect and reapply conformal coating if thin/damaged
+  Annual      | Test all fuses (replace any that have darkened)
+  2 years     | Replace solenoid valve seals (preventative maintenance)
+  5 years     | Replace potentiometer (if used) regardless of apparent condition
+  As needed   | Replace any wire showing signs of chafing, corrosion, or
+              | stiffening
+
+================================================================================
+APPENDIX A: COMPLETE MOSFET DRIVER SCHEMATIC (ASCII ART)
+================================================================================
+
+                        +12V (FUSED 15A)
+                            │
+         ┌──────────────────┼──────────────────┐
+         │                  │                  │
+     ┌───┴───┐          ┌───┴───┐          ┌───┴───┐
+     │ PORT  │          │ STBD  │          │CLUTCH │
+     │SOLENOID│         │SOLENOID│         │SOLENOID│
+     │ COIL  │          │ COIL  │          │ COIL  │
+     └───┬───┘          └───┬───┘          └───┬───┘
+         │                  │                  │
+         │                 UF4007             UF4007
+         │                 (flyback)          (flyback)
+         │                  │                  │
+         │    UF4007        │                  │
+         │    (flyback)     │                  │
+         │      │           │                  │
+         ├──(K)──┤     ├──(K)──┤          ├──(K)──┤
+         │      (A)     │      (A)          │      (A)
+         │      │       │      │           │      │
+         └──────┤───────┘──────┤───────────┘      │
+                │              │                  │
+             ┌──┴──┐       ┌──┴──┐            ┌──┴──┐
+             │IRLZ │       │IRLZ │            │IRLZ │
+             │44N  │       │44N  │            │44N  │
+             │ Q1  │       │ Q2  │            │ Q3  │
+             └──┬──┘       └──┬──┘            └──┬──┘
+           GATE│              │                  │GATE
+                │              │                  │
+              ┌─┴─┐          ┌─┴─┐              ┌─┴─┐
+              │100│          │100│              │100│
+              │ Ω │          │ Ω │              │ Ω │
+              └─┬─┘          └─┬─┘              └─┬─┘
+                │              │                  │
+   ESP32 GPIO 25│    ESP32 GPIO 26│    ESP32 GPIO 27│
+   (PORT_DRIVE) │    (STBD_DRIVE) │  (CLUTCH_DRIVE)│
+                │              │                  │
+              ┌─┴─┐          ┌─┴─┐              ┌─┴─┐
+              │10K │          │10K │              │10K │
+              │ Ω │          │ Ω │              │ Ω │
+              └─┬─┘          └─┬─┘              └─┬─┘
+                │              │                  │
+               GND            GND                GND
+                │              │                  │
+                └──────────────┴──────────────────┘
+                               │
+                              GND
+            (Common ground bus, connected to battery negative)
+
+
+LEGEND:
+  UF4007: Flyback/Free-wheeling diode
+  IRLZ44N: Logic-level N-channel MOSFET (TO-220)
+  100Ω: Series gate resistor (limits gate charge current)
+  10KΩ: Pull-down resistor (ensures MOSFET OFF when GPIO floating)
+  (K): Diode cathode (bar end)
+  (A): Diode anode
+
+
+CURRENT MONITORING (ACS712 MODULES):
+
+  Port solenoid (+12V wire) → ACS712-05 IP+ terminal
+  ACS712-05 IP- terminal → Port solenoid (other side of coil)
+  ACS712-05 VCC → 5V rail
+  ACS712-05 GND → GND
+  ACS712-05 OUT → ESP32 ADC (GPIO 36, ADC1_CH0) via:
+                    ┌─┐
+                    │ │ 1KΩ
+                    │ │
+                    └─┤
+                      ├──── ESP32 GPIO 36 (ADC)
+                      │
+                    ┌─┴─┐
+                    │   │ 100nF
+                    │   │ ceramic
+                    └─┬─┘
+                      │
+                     GND
+
+  (Repeat for Starboard on GPIO 39 and Clutch on GPIO 35)
+
+
+OPTIONAL: RUDDER POTENTIOMETER SIGNAL CONDITIONING
+
+  +5V (fused)
+   │
+  ┌─┴─┐
+  │   │ 10KΩ Linear Taper Potentiometer
+  │   │
+  └─┬─┘
+   │ (Wiper)
+   │
+  ┌─┴─┐
+  │   │ 10KΩ (R_top of voltage divider)
+  │   │
+  └─┬─┘
+   ├──── ESP32 ADC (GPIO 34)
+  ┌─┴─┐
+  │   │ 20KΩ (R_bottom of voltage divider)
+  │   │
+  └─┬─┘
+   │
+  ┌─┴─┐
+  │   │ 100nF (low-pass filter capacitor)
+  │   │
+  └─┬─┘
+   │
+  GND
+
+
+================================================================================
+APPENDIX B: WIRING HARNESS BILL OF MATERIALS
+================================================================================
+
+  Item                          | Qty | Spec                      | Source
+  ------------------------------|-----|---------------------------|--------------------
+  Tinned marine wire 18 AWG     | 30m | BC5W2, black + red        | Ancor / Defender
+  Tinned marine wire 22 AWG     | 20m | BC5W2, black + red + yellow| Ancor / Defender
+  Ring terminals 18 AWG         | 20  | Tinned copper, #10 stud   | Ancor
+  Ring terminals 22 AWG         | 15  | Tinned copper, #10 stud   | Ancor
+  Adhesive heat shrink 18 AWG   | 3m  | 3:1 ratio, adhesive-lined | 3M / Ancor
+  Adhesive heat shrink 22 AWG   | 2m  | 3:1 ratio, adhesive-lined | 3M / Ancor
+  Deutsch DT 2-pin connector    | 2   | DT06-2S receptacle + pins | Deutsch / Defender
+  Deutsch DT 4-pin connector    | 2   | DT06-4S receptacle + pins | Deutsch / Defender
+  Deutsch DT 6-pin connector    | 1   | DT06-6S receptacle + pins | Deutsch / Defender
+  IP68 cable glands             | 10  | PG7-PG16 sizes            | Various
+  ANL fuse 30A                  | 1   | For battery connection    | Blue Sea / Defender
+  ATO fuse 15A                  | 2   | For solenoid circuit      | Bussmann
+  ATO fuse 5A                   | 3   | For ESP32 + clutch        | Bussmann
+  ATO fuse holder               | 5   | Water-resistant           | Blue Sea
+  ANL fuse holder               | 1   | Marine-grade              | Blue Sea
+  Buck converter 12V→5V 5A      | 1   | LM2596 or similar         | Various
+  IRLZ44N MOSFET                | 3   | TO-220 package            | Mouser / Digikey
+  UF4007 flyback diode          | 3   | 1A, 1000V, ultra-fast    | Mouser / Digikey
+  100Ω resistor 1/4W            | 3   | Gate series resistor      | Any
+  10KΩ resistor 1/4W            | 3   | Gate pull-down resistor   | Any
+  4.7KΩ resistor 1/4W           | 2   | I2C bus pull-ups          | Any
+  100nF ceramic capacitor       | 6   | 50V, X7R dielectric       | Any
+  ACS712-05 current sensor      | 3   | ±5A range, Hall effect    | Various
+  AS5048A encoder module        | 1   | 14-bit, I2C interface     | Mouser / Digikey
+  or 10KΩ sealed potentiometer  | 1   | IP67 rated, linear taper  | Bourns / Piher
+  SS316 mounting hardware kit   | 1   | Bolts, nuts, washers      | Defender / McMaster
+  Dielectric grease tube        | 1   | Marine-grade, 50g         | Permatex / NGK
+  Polycarbonate enclosure IP67  | 1   | 200×150×80mm minimum      | Hammond / Bud
+  Silicone gasket material      | 1   | 2mm sheet                 | McMaster
+  Conformal coating spray       | 1   | MG Chemicals 419B         | MG Chemicals
+  Momentary push buttons        | 7   | IP67 rated, panel mount   | Carling / E-Switch
+  SSD1306 OLED 128x64 I2C      | 1   | 3.3V compatible           | Various
+  Neodymium magnet (for AS5048A)| 1   | N42, 6mm dia, 3mm thick   | Various
+
+================================================================================
+APPENDIX C: VOLTAGE DROP REFERENCE TABLES
+================================================================================
+
+VOLTAGE DROP PER 1000 FT (ROUND TRIP) AT VARIOUS CURRENT LEVELS:
+
+  AWG  | Ω/1000ft |  1A    |  3A    |  5A    | 10A   | 15A   | 20A
+  -----|----------|--------|--------|--------|-------|-------|-------
+  22   | 16.14    | 16.1V  | 48.4V  | 80.7V  | 161V  | 242V  | 323V
+  20   | 10.15    | 10.2V  | 30.5V  | 50.8V  | 101V  | 152V  | 203V
+  18   |  6.385   |  6.4V  | 19.2V  | 31.9V  | 63.9V | 95.8V | 128V
+  16   |  4.016   |  4.0V  | 12.0V  | 20.1V  | 40.2V | 60.2V | 80.3V
+  14   |  2.525   |  2.5V  |  7.6V  | 12.6V  | 25.3V | 37.9V | 50.5V
+  12   |  1.588   |  1.6V  |  4.8V  |  7.9V  | 15.9V | 23.8V | 31.8V
+  10   |  0.9989  |  1.0V  |  3.0V  |  5.0V  | 10.0V | 15.0V | 20.0V
+
+NOTE: Values shown are round-trip (both conductors).
+To find drop for your specific cable run, divide by (1000 / (2 × length_ft)).
+
+EXAMPLE CALCULATION:
+  Cable: 18 AWG, length: 20 ft one-way, current: 3A
+  Round trip length: 40 ft
+  V_drop = 3.0A × 6.385Ω/1000ft × 40ft/1000 × 1000 = 3.0 × 0.2554 = 0.766V
+  Percent drop (12V): 0.766/12.0 = 6.4% ← ACCEPTABLE for solenoids
+
+ACCEPTABLE VOLTAGE DROP GUIDELINES:
+  - Solenoid circuits (< 10V operating): max 10% drop acceptable
+  - ESP32 power (5V rail): max 3% drop
+  - Sensor signals (analog): max 1% drop
+  - I2C/UART digital signals: max 3% drop
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+Document Revision History:
+  Rev 1.0 — Initial release — Complete hydraulic steering control design brief
+
+Safety Disclaimer:
+  This document is provided for engineering reference purposes. The installer
+  must verify all specifications against the specific equipment installed.
+  All marine electrical installations should comply with ABYC E-11 (Electrical
+  Systems) or ISO 13297 standards. A qualified marine electrician should
+  review and approve the final installation.
+
+================================================================================

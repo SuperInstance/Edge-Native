@@ -1,0 +1,352 @@
+{
+  "_comment": "OTA Firmware Update & Hot-Swap Provisioning System — Firmware vault, OTA protocol, provisioning workflow, and spare parts inventory",
+  "_version": "1.0.0",
+  "_schema": "ota_provisioning_config",
+  "_source_briefs": ["ESDD-VN-001 (Brief 10)", "VRP-RF-2024-001 (Brief 15)"],
+
+  "firmware_vault": {
+    "root_path": "/opt/vessel/firmware_vault",
+    "_comment": "Directory structure on the Jetson hosting the provisioning server (Charlie primary, Alpha secondary)",
+    "directory_structure": {
+      "root": "/opt/vessel/firmware_vault",
+      "roles": [
+        {
+          "role": "autopilot",
+          "directory": "/opt/vessel/firmware_vault/autopilot",
+          "files": [
+            "autopilot_v2.1.0.bin",
+            "autopilot_v2.1.0.bin.sha256",
+            "autopilot_v2.1.0.manifest",
+            "autopilot_v2.0.3.bin",
+            "autopilot_v2.0.3.bin.sha256"
+          ]
+        },
+        {
+          "role": "engine_monitor",
+          "directory": "/opt/vessel/firmware_vault/engine_monitor",
+          "files": [
+            "engine_monitor_v2.1.0.bin",
+            "engine_monitor_v2.1.0.bin.sha256",
+            "engine_monitor_v2.1.0.manifest",
+            "engine_monitor_v2.0.2.bin",
+            "engine_monitor_v2.0.2.bin.sha256"
+          ]
+        },
+        {
+          "role": "lighting_controller",
+          "directory": "/opt/vessel/firmware_vault/lighting_controller",
+          "files": [
+            "lighting_controller_v2.1.0.bin",
+            "lighting_controller_v2.1.0.bin.sha256",
+            "lighting_controller_v2.1.0.manifest"
+          ]
+        },
+        {
+          "role": "deck_equipment",
+          "directory": "/opt/vessel/firmware_vault/deck_equipment",
+          "files": [
+            "deck_equipment_v2.1.0.bin",
+            "deck_equipment_v2.1.0.bin.sha256",
+            "deck_equipment_v2.1.0.manifest"
+          ]
+        },
+        {
+          "role": "camera_interface",
+          "directory": "/opt/vessel/firmware_vault/camera_interface",
+          "files": [
+            "camera_interface_v2.1.0.bin",
+            "camera_interface_v2.1.0.bin.sha256",
+            "camera_interface_v2.1.0.manifest"
+          ]
+        },
+        {
+          "role": "environmental_sensor",
+          "directory": "/opt/vessel/firmware_vault/environmental_sensor",
+          "files": [
+            "environmental_sensor_v2.1.0.bin",
+            "environmental_sensor_v2.1.0.bin.sha256",
+            "environmental_sensor_v2.1.0.manifest"
+          ]
+        },
+        {
+          "role": "bilge_monitor",
+          "directory": "/opt/vessel/firmware_vault/bilge_monitor",
+          "files": [
+            "bilge_monitor_v2.1.0.bin",
+            "bilge_monitor_v2.1.0.bin.sha256",
+            "bilge_monitor_v2.1.0.manifest"
+          ]
+        },
+        {
+          "role": "navigation_aid",
+          "directory": "/opt/vessel/firmware_vault/navigation_aid",
+          "files": [
+            "navigation_aid_v2.1.0.bin",
+            "navigation_aid_v2.1.0.bin.sha256",
+            "navigation_aid_v2.1.0.manifest"
+          ]
+        }
+      ],
+      "root_files": [
+        "node_database.json",
+        "vault_manifest.json",
+        "CHANGELOG.md"
+      ]
+    },
+    "naming_convention": {
+      "pattern": "{role}_v{major}.{minor}.{patch}.bin",
+      "sha256_pattern": "{role}_v{major}.{minor}.{patch}.bin.sha256",
+      "manifest_pattern": "{role}_v{major}.{minor}.{patch}.manifest",
+      "manifest_format": {
+        "description": "JSON manifest for each firmware binary",
+        "fields": ["role", "version", "size_bytes", "sha256", "build_timestamp", "git_commit", "changelog", "target_chip", "flash_partitions"]
+      },
+      "rollback_policy": "Keep previous 2 versions per role. Delete older."
+    },
+    "base_firmware": {
+      "_comment": "All spare ESP32 boards ship with this universal base firmware that can receive any role via OTA",
+      "filename": "vesselnod_base_v2.1.0.bin",
+      "description": "Universal VesselNode base firmware — knows how to receive any role-specific binary via OTA. Supports provisioning protocol, OTA chunk reception, but has NO role-specific behavior. Identifies as ROLE_UNKNOWN.",
+      "sha256": "PLACEHOLDER_BASE_FIRMWARE_SHA256",
+      "size_bytes": 1048576
+    }
+  },
+
+  "ota_protocol": {
+    "transport": "RS-422 serial (Jetson → ESP32)",
+    "chunk_size_bytes": 4096,
+    "baud_rate": 115200,
+    "frame_format": {
+      "description": "Each chunk is sent as a VesselLink JSON command with binary payload base64-encoded",
+      "command": "ota_chunk",
+      "fields": [
+        {"name": "offset", "type": "uint32", "description": "Byte offset of this chunk within the firmware image"},
+        {"name": "data", "type": "base64", "description": "Chunk payload base64-encoded"},
+        {"name": "crc16", "type": "string", "description": "CRC-16/CCITT-FALSE hex string of raw chunk data"}
+      ]
+    },
+    "timeout": {
+      "chunk_ack_timeout_ms": 5000,
+      "total_transfer_timeout_min": 15,
+      "verify_timeout_sec": 30
+    },
+    "retry": {
+      "max_retries_per_chunk": 3,
+      "retry_delay_ms": 500,
+      "on_max_retries": "abort_ota, send ota_failed, keep current partition"
+    },
+    "verification": {
+      "method": "SHA-256 of entire image",
+      "compare_with": "manifest sha256 value",
+      "on_match": "set OTA boot partition, send ota_complete to Jetson, reboot on next reset",
+      "on_mismatch": "keep current partition, send ota_failed to Jetson, do NOT reboot"
+    },
+    "rollback": {
+      "method": "ESP-IDF anti-rollback",
+      "description": "If new firmware fails to boot within 60 seconds (external watchdog timeout), ESP-IDF automatically reverts to previous partition",
+      "app_label": "vessel_node_app",
+      "max_partitions": 2,
+      "partition_scheme": "factory + ota_0 (4MB each)"
+    },
+    "transfer_time_estimate": {
+      "binary_size_mb": 1.5,
+      "baud_bps": 115200,
+      "overhead_factor": 1.3,
+      "estimated_seconds": 120,
+      "_comment": "1.5MB / (115200 bps / 10 bits/byte) * 1.3 overhead ≈ 2 minutes"
+    }
+  },
+
+  "node_database": {
+    "path": "/opt/vessel/firmware_vault/node_database.json",
+    "format": "JSON",
+    "schema": {
+      "description": "Maps ESP32 MAC addresses to node IDs, roles, firmware versions, and settings versions",
+      "primary_key": "mac_address",
+      "fields": [
+        {"name": "mac_address", "type": "string", "description": "ESP32-S3 BLE MAC from eFuse (AA:BB:CC:DD:EE:FF)"},
+        {"name": "node_id", "type": "string", "description": "Human-readable ID (e.g., AP-001, ENG-002)"},
+        {"name": "role", "type": "string", "description": "Current role assignment"},
+        {"name": "firmware_version", "type": "string", "description": "Current firmware version running on the node"},
+        {"name": "settings_version", "type": "integer", "description": "Monotonically increasing settings version number"},
+        {"name": "settings_crc", "type": "string", "description": "CRC-32 of all node settings (hex)"},
+        {"name": "board_revision", "type": "string", "description": "PCB revision from EEPROM"},
+        {"name": "eeprom_serial", "type": "string", "description": "Factory serial from AT24C256 EEPROM"},
+        {"name": "last_seen", "type": "integer", "description": "Unix timestamp of last heartbeat from node"},
+        {"name": "last_provisioned", "type": "integer", "description": "Unix timestamp of last provisioning event"},
+        {"name": "serial_port", "type": "string", "description": "Jetson serial port this node is wired to"},
+        {"name": "location", "type": "string", "description": "Physical location on vessel"},
+        {"name": "instance", "type": "string", "description": "primary or backup for redundant pairs"},
+        {"name": "redundancy_pair", "type": "string", "nullable": true, "description": "Node ID of paired backup/primary unit"}
+      ]
+    },
+    "sqlite_shadow": {
+      "path": "/opt/vessel/data/nodes.db",
+      "description": "SQLite backup of every node's settings with version history",
+      "tables": [
+        {
+          "name": "node_settings",
+          "columns": [
+            {"name": "node_id", "type": "TEXT PRIMARY KEY"},
+            {"name": "settings_version", "type": "INTEGER NOT NULL"},
+            {"name": "settings_crc", "type": "INTEGER NOT NULL"},
+            {"name": "raw_settings_json", "type": "TEXT NOT NULL"},
+            {"name": "timestamp", "type": "INTEGER NOT NULL"},
+            {"name": "sync_status", "type": "TEXT DEFAULT 'synced'"},
+            {"name": "vessel_name", "type": "TEXT"},
+            {"name": "last_seen", "type": "INTEGER"}
+          ]
+        },
+        {
+          "name": "settings_history",
+          "columns": [
+            {"name": "id", "type": "INTEGER PRIMARY KEY AUTOINCREMENT"},
+            {"name": "node_id", "type": "TEXT NOT NULL"},
+            {"name": "settings_version", "type": "INTEGER NOT NULL"},
+            {"name": "raw_settings_json", "type": "TEXT NOT NULL"},
+            {"name": "timestamp", "type": "INTEGER NOT NULL"},
+            {"name": "change_reason", "type": "TEXT"}
+          ],
+          "indexes": ["CREATE INDEX idx_settings_history_node ON settings_history(node_id, settings_version)"]
+        }
+      ],
+      "sync_interval_seconds": 30,
+      "sync_method": "VesselLink serial command (GET_SETTINGS / SETTINGS_PUSH)"
+    }
+  },
+
+  "provisioning_workflow": {
+    "_comment": "Complete provisioning state machine for zero-touch node setup",
+    "states": [
+      {"name": "BOOT", "description": "Read MAC/NVS/EEPROM, initialize identity", "timeout_ms": 100},
+      {"name": "CHECK_NVS", "description": "Check if role != UNKNOWN in NVS", "timeout_ms": 50},
+      {"name": "CONNECTED", "description": "Normal operation with Jetson (role found)", "timeout_ms": null},
+      {"name": "ANNOUNCE", "description": "Send 'announce' message with MAC and firmware version on serial", "timeout_ms": 100},
+      {"name": "WAIT_PROVISION", "description": "Wait for Jetson provision response", "timeout_ms": 30000},
+      {"name": "PROVISIONED", "description": "Write role and config to NVS, optionally enter OTA mode", "timeout_ms": 5000},
+      {"name": "REBOOT_INTO_ROLE", "description": "System reset to boot into assigned role", "timeout_ms": null},
+      {"name": "OTA_TRANSFER", "description": "Receiving firmware chunks via serial OTA protocol", "timeout_ms": 900000},
+      {"name": "STANDALONE", "description": "Operating with last-known settings, no Jetson communication", "timeout_ms": null}
+    ],
+    "transitions": [
+      {"from": "BOOT", "to": "CHECK_NVS", "condition": "always"},
+      {"from": "CHECK_NVS", "to": "CONNECTED", "condition": "role != UNKNOWN in NVS"},
+      {"from": "CHECK_NVS", "to": "ANNOUNCE", "condition": "role == UNKNOWN or role == 0xFF"},
+      {"from": "ANNOUNCE", "to": "WAIT_PROVISION", "condition": "always"},
+      {"from": "WAIT_PROVISION", "to": "PROVISIONED", "condition": "Jetson sends provision_existing or provision_new"},
+      {"from": "WAIT_PROVISION", "to": "STANDALONE", "condition": "30s timeout, no Jetson response"},
+      {"from": "PROVISIONED", "to": "OTA_TRANSFER", "condition": "needs_ota == true"},
+      {"from": "PROVISIONED", "to": "CONNECTED", "condition": "needs_ota == false, role applied"},
+      {"from": "OTA_TRANSFER", "to": "REBOOT_INTO_ROLE", "condition": "OTA complete, SHA-256 verified"},
+      {"from": "REBOOT_INTO_ROLE", "to": "CHECK_NVS", "condition": "after system reset"},
+      {"from": "STANDALONE", "to": "ANNOUNCE", "condition": "Jetson heartbeat detected on serial"}
+    ],
+    "auto_provision": {
+      "_comment": "Per-port role auto-assignment for zero-touch hot-swap",
+      "description": "Each serial port can be pre-configured to auto-assign a role to any unknown MAC. Eliminates touchscreen interaction during hot-swap.",
+      "ports": [
+        {"port": "/dev/ttyUSB0", "jetson": "alpha", "auto_role": "autopilot", "auto_node_id_prefix": "AP-"},
+        {"port": "/dev/ttyUSB1", "jetson": "alpha", "auto_role": "autopilot", "auto_node_id_prefix": "AP-"},
+        {"port": "/dev/ttyUSB0", "jetson": "charlie", "auto_role": "engine_monitor", "auto_node_id_prefix": "EM-"},
+        {"port": "/dev/ttyUSB1", "jetson": "charlie", "auto_role": "engine_monitor", "auto_node_id_prefix": "EM-"},
+        {"port": "/dev/ttyUSB0", "jetson": "bravo", "auto_role": "deck_equipment", "auto_node_id_prefix": "DE-"},
+        {"port": "/dev/ttyUSB1", "jetson": "bravo", "auto_role": "camera_interface", "auto_node_id_prefix": "CAM-"},
+        {"port": "/dev/ttyUSB2", "jetson": "bravo", "auto_role": "lighting_controller", "auto_node_id_prefix": "LT-"}
+      ],
+      "auto_assign_enabled": true,
+      "prompt_on_unknown": "Fallback if auto_assign is disabled: prompt on helm display for role selection"
+    },
+    "provision_new_requires_ota": true,
+    "_comment_ota_note": "New nodes ALWAYS require OTA because the base firmware has no role-specific code compiled in."
+  },
+
+  "spare_inventory": {
+    "_comment": "Waterproof spare parts kit for at-sea replacement. All spares are pre-programmed with VesselNode base firmware.",
+    "storage": "Waterproof Pelican case, labeled 'VESSEL SPARE PARTS KIT', stored in wheelhouse",
+    "inventory": [
+      {
+        "part": "ESP32-S3 Node Board",
+        "description": "Pre-programmed VesselNode base firmware on custom PCB with RS-422 transceiver, ADuM1201 isolation, voltage regulators",
+        "quantity": 4,
+        "criticality": "high",
+        "firmware": "vesselnod_base_v2.1.0.bin",
+        "replaces": "Any failed ESP32 node (universal — role assigned via OTA)"
+      },
+      {
+        "part": "BNO085 9-DOF IMU Module",
+        "description": "Compass/IMU with I2C ribbon cable, pre-calibrated",
+        "quantity": 2,
+        "criticality": "medium",
+        "replaces": "Failed compass on autopilot ESP32"
+      },
+      {
+        "part": "AS5048A Rudder Encoder",
+        "description": "14-bit magnetic rotary encoder with SPI/I2C adapter",
+        "quantity": 1,
+        "criticality": "medium",
+        "replaces": "Failed rudder angle encoder"
+      },
+      {
+        "part": "SSD1306 OLED Display Module",
+        "description": "128x64 I2C OLED with 4-pin connector",
+        "quantity": 2,
+        "criticality": "low",
+        "replaces": "Failed status display"
+      },
+      {
+        "part": "M12 8-Pin Cable Assembly (2m)",
+        "description": "Pre-terminated M12 cable with IP67 connectors, RS-422 + power",
+        "quantity": 6,
+        "criticality": "medium",
+        "replaces": "Damaged cable runs"
+      },
+      {
+        "part": "M12 8-Pin Cable Assembly (5m)",
+        "description": "Longer M12 cable for distant node locations",
+        "quantity": 4,
+        "criticality": "low",
+        "replaces": "Damaged cable runs"
+      },
+      {
+        "part": "5A ATO/ATC Blade Fuse (pack of 10)",
+        "description": "ESP32 node power fuse replacements",
+        "quantity": 3,
+        "criticality": "low",
+        "replaces": "Blown fuses"
+      },
+      {
+        "part": "FTDI FT4232H USB-RS422 Adapter",
+        "description": "Quad-port RS-422 USB adapter for Jetson serial ports",
+        "quantity": 1,
+        "criticality": "medium",
+        "replaces": "Failed USB-RS422 adapter"
+      },
+      {
+        "part": "SN75176BP RS-422 Transceiver (DIP-8)",
+        "description": "Differential serial transceiver IC for RS-422 bus",
+        "quantity": 4,
+        "criticality": "low",
+        "replaces": "Failed transceiver on ESP32 node board"
+      },
+      {
+        "part": "LM2596 DC-DC 12V→5V Buck Converter Module",
+        "description": "3A switching regulator, pre-configured for ESP32 power",
+        "quantity": 2,
+        "criticality": "medium",
+        "replaces": "Failed power converter on node board"
+      },
+      {
+        "part": "AMS1117-3.3 LDO Regulator (SOT-223)",
+        "description": "800mA 3.3V linear regulator",
+        "quantity": 2,
+        "criticality": "low",
+        "replaces": "Failed 3.3V LDO on node board"
+      }
+    ],
+    "minimum_recommended_spares": {
+      "ESP32_S3_boards": 4,
+      "M12_cables": 6,
+      "fuses": 30
+    }
+  }
+}

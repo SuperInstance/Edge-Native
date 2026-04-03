@@ -1,0 +1,2282 @@
+================================================================================
+  VESSELNODE: UNIFIED ESP32-S3 FIRMWARE FRAMEWORK FOR VESSEL-WIDE NODE SYSTEM
+  TECHNICAL BRIEF — EMBEDDED SYSTEMS DESIGN DOCUMENT (ESDD-VN-001)
+================================================================================
+  Project:       VesselNode Common Firmware Framework
+  Platform:      ESP32-S3 WROOM-1-N8R8 (512KB SRAM, 8MB PSRAM, 8MB Flash)
+  RTOS:          FreeRTOS 10.5.1 (bundled with ESP-IDF v5.2+)
+  Classification: Safety-Critical Marine Electronics (IEC 60945 Ed. 4 aware)
+  Author:        VesselNode Architecture Team
+  Revision:      1.0
+  Date:          2025-01
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+  1.  Overview and Design Philosophy
+  2.  Common Firmware Framework ("VesselNode")
+  3.  Node Identity and Hot-Swap Provisioning System
+  4.  Language and Toolchain Choices
+  5.  NVS Settings Persistence Architecture
+  6.  Standalone Operation and Degradation Planning
+  7.  Shared Communication Protocol (VesselLink JSON Protocol)
+  8.  OTA Firmware Update Architecture
+  9.  Module System and Role-Specific Code Organization
+  10. Complete Data Structures and API Reference
+  11. Build System and Firmware Vault
+  APPENDIX A: Role Command Matrix
+  APPENDIX B: CRC-16 Implementation
+  APPENDIX C: NVS Key Registry
+  APPENDIX D: Provisioning State Machine
+
+================================================================================
+1. OVERVIEW AND DESIGN PHILOSOPHY
+================================================================================
+
+A commercial fishing vessel carries dozens of microcontrollers managing
+autonomous functions: autopilot, deck lighting, engine room monitoring, bilge
+pumps, navigation aids, camera interfaces, and environmental sensors. Each of
+these nodes must communicate with the central Jetson compute cluster, operate
+independently when the network fails, and be hot-swappable at sea.
+
+VesselNode is a unified firmware framework that runs on every ESP32-S3 in the
+vessel. Rather than maintaining eight separate firmware codebases (one per role),
+VesselNode provides a common base layer that handles identity, provisioning,
+communication, persistence, OTA updates, and watchdog supervision. Role-specific
+behavior is injected through a module system — each role compiles as a linked-in
+ESP-IDF component, not a dynamic loadable library (ESP32 has no MMU for dynamic
+loading in a meaningful sense).
+
+The key design goals are:
+
+  1. ONE firmware binary structure, parameterized by role at compile time,
+     assigned at runtime by the Jetson provisioning server.
+
+  2. ZERO-TOUCH provisioning: a captain plugs a fresh ESP32 into any cable run,
+     and the system automatically identifies it, assigns its role, loads
+     calibration data, and brings it online. No laptop, no USB, no button
+     sequences required.
+
+  3. INDEPENDENT OPERATION: every node continues its primary safety function if
+     all Jetsons crash. The autopilot holds heading with buttons and OLED. The
+     engine monitor runs alarms. The bilge monitor pumps autonomously.
+
+  4. UNIFORM PROTOCOL: every node speaks the same VesselLink JSON-over-serial
+     protocol. The Jetson needs one serial driver and one message parser to talk
+     to any node on the vessel.
+
+  5. MARINE HARDENED: all design choices prioritize reliability over features.
+     We use ESP-IDF bare metal (not Arduino), cJSON (not ArduinoJson), static
+     memory allocation (where feasible), and dual-NVS copy strategies.
+
+
+================================================================================
+2. COMMON FIRMWARE FRAMEWORK ("VESSELNODE")
+================================================================================
+
+------------------------------------------------------------------------------
+2.1 Software Architecture Overview
+------------------------------------------------------------------------------
+
+The VesselNode firmware is structured as a layered architecture:
+
+  +--------------------------------------------------------------+
+  |  Role Module (e.g., role_autopilot.c, role_lighting.c)       |  <- ROLE LAYER
+  +--------------------------------------------------------------+
+  |  VesselLink Protocol Handler (JSON parse/serialize, CRC)     |  <- PROTOCOL LAYER
+  +--------------------------------------------------------------+
+  |  NVS Settings Manager (read/write/version/backup)            |  <- PERSISTENCE LAYER
+  +--------------------------------------------------------------+
+  |  OTA Manager (slot management, chunked RX, verify)           |  <- OTA LAYER
+  +--------------------------------------------------------------+
+  |  Node Identity Manager (MAC, EEPROM ID, provisioning FSM)    |  <- IDENTITY LAYER
+  +--------------------------------------------------------------+
+  |  Watchdog & Health Monitor (task monitoring, ext WDT kick)   |  <- SAFETY LAYER
+  +--------------------------------------------------------------+
+  |  Serial Bridge (UART driver, TX/RX queues, framing)          |  <- TRANSPORT LAYER
+  +--------------------------------------------------------------+
+  |  ESP-IDF v5.2+ / FreeRTOS 10.5.1 / Hardware Abstraction     |  <- HAL LAYER
+  +--------------------------------------------------------------+
+
+Each layer is an ESP-IDF component in the CMake build system. The role module
+at the top registers callbacks with the protocol handler and defines the
+role's specific FreeRTOS tasks.
+
+------------------------------------------------------------------------------
+2.2 Node Roles
+------------------------------------------------------------------------------
+
+Every VesselNode instance has exactly one role, stored in NVS and reported
+during provisioning. The enum and metadata are defined in vessel_node.h:
+
+  typedef enum {
+      ROLE_AUTOPILOT          = 0x01,  // PID heading control, rudder drive
+      ROLE_LIGHTING_CONTROLLER = 0x02,  // Deck/cabin/lighting channel control
+      ROLE_ENGINE_MONITOR      = 0x03,  // RPM, temp, pressure, oil level
+      ROLE_DECK_EQUIPMENT      = 0x04,  // Winch, pot hauler, crane status
+      ROLE_CAMERA_INTERFACE    = 0x05,  // Camera power, PTZ control, streaming
+      ROLE_ENVIRONMENTAL_SENSOR = 0x06, // Wind, temp, humidity, barometer
+      ROLE_BILGE_MONITOR       = 0x07,  // Bilge level, pump control, flood alarm
+      ROLE_NAVIGATION_AID      = 0x08,  // Navigation light controller, AIS
+      ROLE_UNKNOWN             = 0xFF   // Unprovisioned state
+  } vessel_role_t;
+
+  typedef struct {
+      vessel_role_t  role;
+      const char    *role_name;       // Human-readable string
+      const char    *role_version;    // Role module version
+      const char    *description;     // Brief description
+      uint32_t       capabilities;    // Bitfield of role capabilities
+  } role_descriptor_t;
+
+  // Role descriptor table (defined in role_registry.c)
+  extern const role_descriptor_t ROLE_TABLE[];
+
+  // Each role module must implement these functions:
+  typedef struct {
+      esp_err_t (*init)(const nvs_settings_t *settings);
+      esp_err_t (*register_commands)(protocol_handler_t *handler);
+      esp_err_t (*register_tasks)(void);
+      esp_err_t (*on_jetson_connected)(void);
+      esp_err_t (*on_jetson_lost)(void);
+      esp_err_t (*on_shutdown)(void);  // Called before ESP32 deep sleep or reset
+      esp_err_t (*get_status)( cJSON *status_obj );
+      esp_err_t (*factory_reset)(void);
+  } role_interface_t;
+
+  // Each role module exports a single symbol:
+  extern const role_interface_t ROLE_MODULE;
+
+------------------------------------------------------------------------------
+2.3 Common Subsystems (Inherited by All Roles)
+------------------------------------------------------------------------------
+
+Every VesselNode, regardless of role, provides these subsystems:
+
+  2.3.1 Serial Bridge to Jetson
+  ---------------------------------
+  - UART2 at 115200 baud (configurable via NVS)
+  - RS-422 physical layer (SN75176 transceiver) for cable runs up to 15m
+  - Dedicated TX task (priority 19) and RX task (priority 19)
+  - FreeRTOS queues: tx_queue (32 items, 64 bytes each), rx_queue (16 items)
+  - Automatic framing: JSON payload + newline + CRC-16 hex suffix
+  - Heartbeat: sends heartbeat JSON every 500ms; expects ack within 2000ms
+  - Reconnection: if no heartbeat ack for 2s, declares LINK_LOST; retries
+    indefinitely. Role module is notified via on_jetson_lost() callback.
+
+  API:
+    esp_err_t serial_bridge_init(const serial_config_t *config);
+    esp_err_t serial_bridge_send(const cJSON *msg);
+    esp_err_t serial_bridge_register_rx_callback(rx_callback_fn cb, void *ctx);
+    bool      serial_bridge_is_link_up(void);
+    uint32_t  serial_bridge_get_rx_count(void);
+    uint32_t  serial_bridge_get_tx_count(void);
+    uint32_t  serial_bridge_get_crc_error_count(void);
+
+  2.3.2 JSON Protocol (VesselLink)
+  ---------------------------------
+  - cJSON library for parsing and serialization (allocated from PSRAM pool)
+  - Pre-allocated cJSON parse buffer (4096 bytes on PSRAM) to avoid fragmentation
+  - CRC-16/CCITT-FALSE computed over every outbound message
+  - CRC validation on every inbound message before parsing
+  - Message deduplication via msg_id tracking (32-entry ring buffer)
+  - Command dispatch table: maps "cmd" string to handler function pointer
+  - Common commands (handled by base framework):
+      ping, identify, get_status, get_config, set_config, ota_update,
+      factory_reset, heartbeat, heartbeat_ack
+  - Role commands (registered by role module):
+      autopilot: set_heading, engage, standby, set_pid_gains, calibrate
+      lighting: set_channel, set_scene, set_brightness
+      engine: get_readings, set_alarm_threshold, clear_alarm
+      deck: get_equipment_status, command_equipment
+      camera: set_ptz, capture_image, start_stream, stop_stream
+      environmental: get_readings, set_sampling_rate
+      bilge: get_level, set_pump_mode, test_pump
+      navigation: set_light_mode, get_ais_data, set_pattern
+
+  API:
+    esp_err_t protocol_init(serial_bridge_t *bridge);
+    esp_err_t protocol_register_command(const char *cmd, cmd_handler_fn handler,
+                                        void *ctx);
+    esp_err_t protocol_dispatch(const cJSON *msg);
+
+  2.3.3 Heartbeat System
+  -----------------------
+  - task_watchdog (priority 23) runs at 100ms period
+  - Monitors all role-specific task heartbeats (timestamps updated by tasks)
+  - Monitors serial link health (Jetson heartbeat ack within 2s)
+  - Kicks external hardware watchdog (MAX6818) every 100ms
+  - Monitors ESP32 supply voltage via ADC1
+  - Reports system health to Jetson via get_status command
+  - Triggers alarms via alarm_queue -> display/buzzer/LED tasks
+
+  API:
+    esp_err_t watchdog_register_task(const char *task_name,
+                                     volatile uint32_t *heartbeat_ts,
+                                     uint32_t timeout_ms);
+    void     watchdog_kick_external(void);
+    bool     watchdog_is_system_healthy(void);
+    alarm_t  watchdog_get_active_alarm(void);
+
+  2.3.4 OTA Update Capability
+  -----------------------------
+  - Dual-slot flash: ESP-IDF's "factory" + "ota_0" partitions (4MB each)
+  - Chunked binary transfer over serial: Jetson sends 4KB chunks with CRC
+  - ACK/NACK per chunk; NACK triggers retransmit (max 3 retries per chunk)
+  - After all chunks received: verify SHA-256 of entire image against manifest
+  - If verification passes: set OTA boot partition, send ota_complete to Jetson
+  - Reboot into new firmware on next reset
+  - If verification fails: keep current partition, send ota_failed to Jetson
+  - Rollback: if new firmware fails to boot within 60s (watchdog timeout),
+    ESP-IDF's anti-rollback mechanism reverts to previous partition
+
+  API:
+    esp_err_t ota_init(void);
+    esp_err_t ota_begin(uint32_t total_size, const char *version,
+                        const char *sha256_expected);
+    esp_err_t ota_write_chunk(uint32_t offset, const uint8_t *data,
+                              uint16_t len, uint16_t crc);
+    esp_err_t ota_verify_and_apply(void);
+    esp_err_t ota_rollback(void);
+    ota_state_t ota_get_state(void);
+
+  2.3.5 Node Self-Identification
+  --------------------------------
+  - Reads ESP32-S3 MAC address from efuse (factory-programmed, unique)
+  - Optionally reads external EEPROM (AT24C256 on I2C) for a human-readable
+    node_id string (e.g., "AP-001", "ENG-002")
+  - Combines into node_identity_t structure, stored in NVS at first boot
+  - Identity reported in every identify response and periodic telemetry
+
+  API:
+    esp_err_t identity_init(void);
+    const node_identity_t *identity_get(void);
+    const char *identity_get_node_id(void);
+    uint8_t    identity_get_mac(uint8_t mac[6]);
+    const char *identity_get_role_name(void);
+
+  2.3.6 NVS Settings Persistence
+  --------------------------------
+  - ESP-IDF Non-Volatile Storage API (flash-based, wear-leveled key-value store)
+  - Partition: "nvs" (24KB, sufficient for all settings + backup namespace)
+  - Settings are versioned (uint32_t version per setting group)
+  - Dual-copy strategy: write to backup namespace first, verify read-back,
+    then write to primary namespace
+  - Immediate-write settings: calibration data, node_id, role assignment
+  - Deferred-write settings: runtime state (written only on shutdown command)
+  - Full API reference in Section 5.
+
+
+------------------------------------------------------------------------------
+2.4 FreeRTOS Task Architecture (Common Tasks)
+------------------------------------------------------------------------------
+
+Every VesselNode instance runs these common tasks:
+
++----+-------------------------------+------+----------+---------+----------+
+| ID | Task Name                    | Pri  | Stack    | Period  | WCET     |
+|    |                               |      | (bytes)  | (ms)    | (ms)     |
++----+-------------------------------+------+----------+---------+----------+
+|  1 | task_serial_jetson_rx         |  23  |   4096   |  Event  |   5.0    |
+|  2 | task_serial_jetson_tx         |  22  |   2048   |  Event  |   3.0    |
+|  3 | task_watchdog_heartbeat       |  24  |   1024   |   100   |   1.0    |
+|  4 | task_protocol_dispatch        |  21  |   4096   |  Event  |   8.0    |
+|  5 | task_ota_handler              |  19  |   4096   |  Event  |   20.0    |
+|  6 | task_button_handler           |  15  |   1024   |  Event  |   0.5    |
+|  7 | task_display_oled             |  12  |   4096   |   200   |  15.0    |
+|  8 | task_led_status               |  10  |   1024   |   250   |   1.0    |
++----+-------------------------------+------+----------+---------+----------+
+
+Role-specific tasks are created by the role module's register_tasks() function
+and appended to this table. The autopilot role, for example, adds:
+  task_pid_control (priority 25), task_compass_reader (18), task_rudder_feedback (18),
+  task_nmea_parser (20), task_gps_nmea_reader (17).
+
+For non-real-time roles (lighting, bilge monitor, environmental sensor), no
+task exceeds priority 18. The task_watchdog_heartbeat (priority 24) is always
+the highest application task and monitors all registered role tasks.
+
+Common task priority rationale:
+  24  Watchdog/heartbeat       — Must detect task failures within 100ms
+  23  Serial RX                — Must not lose bytes from Jetson
+  22  Serial TX                — Keep outbound latency low
+  21  Protocol dispatch        — Parse and route commands promptly
+  19  OTA handler              — Only active during firmware updates
+  15  Button handler           — Human input, debounced
+  12  OLED display             — 5 Hz refresh, non-critical
+  10  LED status               — Visual indicators, lowest priority
+
+
+================================================================================
+3. NODE IDENTITY AND HOT-SWAP PROVISIONING SYSTEM
+================================================================================
+
+------------------------------------------------------------------------------
+3.1 Hardware Identity
+------------------------------------------------------------------------------
+
+Every ESP32-S3 has a factory-burned MAC address stored in eFuse (6 bytes, globally
+unique). This is the primary hardware identifier.
+
+  typedef struct {
+      uint8_t mac_addr[6];           // BLE MAC from eFuse (ESP-IDF: esp_read_mac())
+      char    mac_str[18];           // "AA:BB:CC:DD:EE:FF" formatted string
+      char    node_id[24];           // Human-readable ID (e.g., "AP-001")
+      bool    has_external_eeprom;   // True if AT24C256 detected on I2C
+      char    eeprom_serial[16];     // Optional: factory-assigned serial from EEPROM
+      char    board_revision[8];     // PCB revision (read from EEPROM or NVS)
+  } node_identity_t;
+
+Identity read sequence at boot (identity_init()):
+
+  1. Read BLE MAC address via esp_read_mac(MAC_TYPE, mac_addr).
+  2. Format as colon-separated hex string into mac_str.
+  3. Attempt I2C probe for AT24C256 at address 0x50:
+     - If present: read 16 bytes from offset 0x00 as eeprom_serial.
+     - Read 8 bytes from offset 0x10 as board_revision.
+     - If first byte is 0xFF: EEPROM is blank (virgin board), skip.
+  4. Open NVS namespace "identity":
+     - Read "node_id" key → node_id field.
+     - If node_id is empty string: set to "UNASSIGNED-XXXXXXXX" where X is
+       last 8 hex chars of MAC. This marks the node as unprovisioned.
+  5. Store identity struct in global: g_node_identity (const after init).
+
+------------------------------------------------------------------------------
+3.2 Provisioning State Machine
+------------------------------------------------------------------------------
+
+When the ESP32 boots, it enters the provisioning state machine. This is
+implemented in identity_provisioning.c as a FreeRTOS task running at priority 18.
+
+  +-------------------+
+  | BOOT              |
+  | Read MAC/NVS/EEP  |
+  +--------+----------+
+           |
+           v
+  +-------------------+     Has valid role     +-------------------+
+  | CHECK NVS         |---- in NVS? ---------->| CONNECTED         |
+  | role != UNKNOWN?  |                       | Normal operation  |
+  +--------+----------+                       | with Jetson       |
+           | No valid role                    +-------------------+
+           v
+  +-------------------+
+  | ANNOUNCE          |
+  | Send "announce"   |---->  Serial bridge sends:
+  | on serial to      |       {"msg_id":1,"ts":0,"cmd":"announce",
+  | Jetson            |        "params":{"mac":"AA:BB:...",
+  +--------+----------+        "node_id":"UNASSIGNED-...",
+           |                       "board_rev":"1.0",
+           v                       "eeprom_serial":"",
+  +-------------------+           "fw_version":"2.1.0",
+  | WAIT_PROVISION    |           "role":"unknown"}}
+  | Timeout: 30s      |
+  +--------+----------+
+           |                      Jetson provisioning server receives announce:
+           |                      1. Look up MAC in node_database table
+           |                      2. IF FOUND: send provision_existing message
+           |                      3. IF NOT FOUND: prompt operator, send provision_new
+           v
+  +-------------------+
+  | PROVISIONED       |
+  | Write role,       |     OR
+  | config to NVS     |     timeout -> enter STANDALONE mode
+  +--------+----------+
+           |
+           v
+  +-------------------+
+  | REBOOT INTO ROLE  |
+  | (system reset)    |
+  +-------------------+
+
+Jetson → ESP32 provisioning messages:
+
+  provision_existing (for known MAC):
+  {
+    "msg_id": 10,
+    "ts": 1704067200000,
+    "cmd": "provision_existing",
+    "params": {
+      "node_id": "AP-001",
+      "role": "autopilot",
+      "role_version": "2.1.0",
+      "serial_config": { "baud": 115200, "uart": 2 },
+      "settings_version": 42,
+      "needs_ota": false,
+      "settings": { ... }    // Full role-specific calibration/settings
+    }
+  }
+
+  provision_new (for unknown MAC — operator assigns role on Jetson UI):
+  {
+    "msg_id": 11,
+    "ts": 1704067200000,
+    "cmd": "provision_new",
+    "params": {
+      "node_id": "ENG-003",
+      "role": "engine_monitor",
+      "role_version": "2.1.0",
+      "needs_ota": true,
+      "ota_url": "firmware://engine_monitor_v2.1.0.bin",
+      "ota_sha256": "abcdef123456...",
+      "ota_size": 1572864,
+      "settings": { ... }
+    }
+  }
+
+On receiving provision_existing:
+  1. Write node_id, role, settings to NVS
+  2. If needs_ota == true: enter OTA mode (receive binary chunks via serial)
+  3. If needs_ota == false: apply settings, call role_module.init(&settings)
+  4. Send provision_ack to Jetson
+  5. Enter CONNECTED state (normal operation)
+
+On receiving provision_new:
+  1. Write node_id, role to NVS
+  2. Always enter OTA mode (firmware must be pushed for new roles)
+  3. After OTA + reboot: boot into assigned role
+  4. On next boot: CHECK NVS will find valid role → skip provisioning
+
+Provisioning timeout (30 seconds):
+  - If no Jetson responds within 30 seconds, the ESP32 enters STANDALONE mode.
+  - In STANDALONE mode: if NVS has a previously valid role, the node operates
+    with its last-known settings (no Jetson communication needed).
+  - If NVS has no valid role: the node blinks its status LED and waits.
+    Physical buttons can be used for manual role assignment (rare, backup path).
+
+------------------------------------------------------------------------------
+3.3 Hot-Swap Procedure (Captain's Workflow)
+------------------------------------------------------------------------------
+
+Scenario: The autopilot ESP32 fails during a trip. The captain has a waterproof
+spare kit containing pre-programmed ESP32-S3 boards (no firmware needed — the
+boards ship with the VesselNode base firmware that knows how to receive any role).
+
+  1. Captain opens waterproof kit, removes spare ESP32 board.
+  2. Captain unplugs the failed autopilot's serial cable from the RS-422 bus.
+  3. Captain plugs the spare ESP32 into the cable.
+  4. Spare ESP32 boots → sends "announce" on serial.
+  5. Jetson provisioning server receives announce → sees unknown MAC.
+  6. Jetson prompts on the helm display: "NEW NODE detected. Assign role:
+     [Autopilot] [Lighting] [Engine] [Skip]"
+  7. Captain taps "Autopilot" on the display.
+  8. Jetson sends provision_new with role="autopilot" + needs_ota=true +
+     stored calibration data for node "AP-001".
+  9. Spare ESP32 enters OTA mode → receives autopilot firmware binary from
+     Jetson over serial (takes ~2 minutes at 115200 baud for 1.5MB binary).
+  10. ESP32 verifies SHA-256, sets boot partition, sends ota_complete.
+  11. ESP32 reboots into autopilot role → sends announce again (now as "AP-001").
+  12. Jetson recognizes "AP-001" → sends provision_existing with saved settings.
+  13. Autopilot comes online with full calibration. Total downtime: ~3 minutes.
+
+  NOTE: For faster swap, the Jetson can be pre-configured to auto-assign the
+  role "autopilot" to any unknown MAC detected on serial port /dev/ttyTHS1
+  (the physical port wired to the autopilot location). This reduces the
+  procedure to: unplug old, plug in new, wait 2 minutes. No touchscreen
+  interaction required.
+
+------------------------------------------------------------------------------
+3.4 Firmware Vault on Jetson
+------------------------------------------------------------------------------
+
+The Jetson provisioning server maintains a "firmware vault" — a directory
+structure containing compiled binaries for every supported role:
+
+  /opt/vessel/firmware_vault/
+  ├── autopilot/
+  │   ├── autopilot_v2.1.0.bin          # Main firmware binary
+  │   ├── autopilot_v2.1.0.bin.sha256   # SHA-256 checksum
+  │   ├── autopilot_v2.1.0.manifest     # JSON: version, size, sha, changelog
+  │   └── autopilot_v2.0.3.bin          # Previous version (for rollback)
+  ├── engine_monitor/
+  │   ├── engine_monitor_v2.1.0.bin
+  │   ├── engine_monitor_v2.1.0.bin.sha256
+  │   └── ...
+  ├── lighting_controller/
+  │   └── ...
+  └── node_database.json               # Maps MAC addresses to node IDs and roles
+
+The provisioning server Python script:
+
+  class FirmwareVault:
+      VAULT_PATH = "/opt/vessel/firmware_vault"
+      DB_PATH = "/opt/vessel/firmware_vault/node_database.json"
+
+      def get_firmware(self, role: str, version: str = None) -> dict:
+          """Returns path, size, sha256 of the firmware binary for a role."""
+
+      def register_node(self, mac: str, node_id: str, role: str) -> None:
+          """Add a new MAC→role mapping to the node database."""
+
+      def get_node_info(self, mac: str) -> dict | None:
+          """Look up a MAC address. Returns None if unknown."""
+
+      def get_latest_version(self, role: str) -> str:
+          """Return the latest firmware version for a given role."""
+
+      def push_firmware_over_serial(self, port: str, firmware_path: str,
+                                     progress_cb=None) -> bool:
+          """Chunked serial transfer with ACK/NACK protocol."""
+
+
+================================================================================
+4. LANGUAGE AND TOOLCHAIN CHOICES
+================================================================================
+
+------------------------------------------------------------------------------
+4.1 Primary Language: C with ESP-IDF v5.2+
+------------------------------------------------------------------------------
+
+All VesselNode firmware is written in C (C11 standard) using the ESP-IDF
+(Espressif IoT Development Framework) v5.2 or later.
+
+Why C + ESP-IDF:
+
+  1. DIRECT RTOS CONTROL: ESP-IDF exposes FreeRTOS directly. Tasks, queues,
+     semaphores, event groups, and timers are created with full parameter
+     control. Priority assignment, stack size, and affinity (core 0 or core 1)
+     are explicit. No hidden task creation, no hidden event loops, no hidden
+     memory allocation.
+
+  2. DETERMINISTIC MEMORY: ESP-IDF uses heap_4.c (best-fit with coalescing) by
+     default, but VesselNode pre-allocates critical buffers statically and
+     uses ESP-IDF's PSRAM-capable heap APIs (heap_caps_malloc with
+     MALLOC_CAP_SPIRAM flag) for large buffers. No hidden String objects, no
+     implicit heap fragmentation from library code.
+
+  3. COMPLETE HARDWARE ACCESS: ESP-IDF provides direct register-level access
+     to all peripherals: UART, I2C, SPI, ADC, GPIO, MCPWM, PCNT, RMT, TWAI.
+     No abstraction layers hiding timing behavior. The PID control task can
+     drive GPIO with precisely known latency.
+
+  4. FLASH AND OTA CONTROL: ESP-IDF's esp_ota_ops API provides full control
+     over dual-slot OTA: selecting boot partition, reading partition table,
+     verifying firmware integrity, and handling rollback. No third-party OTA
+     library with unknown behavior.
+
+  5. NVS API: ESP-IDF's Non-Volatile Storage is purpose-built for key-value
+     storage on NOR flash with wear leveling. It is atomic, crash-safe, and
+     has a well-documented API (nvs_open, nvs_get/set_blob, nvs_commit).
+
+  6. TOOLCHAIN: ESP-IDF uses the Xtensa (or RISC-V for ESP32-C6) GCC
+     cross-compiler. GDB debugging via JTAG or USB-serial is first-class.
+     Trace, profiling, and heap analysis tools (heap_caps_print_info) are
+     built in.
+
+  7. MARINE RELIABILITY: ESP-IDF is used in commercial products worldwide.
+     Espressif provides LTS (Long Term Support) releases. The v5.2 branch is
+     supported until at least 2027. Code written today will compile on future
+     ESP-IDF versions.
+
+------------------------------------------------------------------------------
+4.2 Why NOT Arduino Framework
+------------------------------------------------------------------------------
+
+The Arduino core for ESP32 (arduino-esp32) is an abstraction layer ON TOP of
+ESP-IDF. It is excellent for prototyping and hobby projects but unsuitable for
+this application for the following reasons:
+
+  1. HIDDEN TASK CREATION: Arduino creates its own FreeRTOS task (loopTask)
+     and event loop task. The main loop() function runs at priority 1 (idle+1).
+     This means any Arduino sketch task can be preempted by Arduino's internal
+     tasks. For a PID control loop, this is unacceptable — we need priority 24
+     and the guarantee that no higher-priority task blocks us.
+
+  2. HIDDEN TIMERS AND CALLBACKS: attachInterrupt(),Ticker, etc., create
+     timer callbacks that run in unknown contexts. If a timer ISR calls a
+     function that allocates memory, and that allocation coincides with the
+     PID task allocating memory, we get unexplained latency spikes.
+
+  3. String CLASS HEAP FRAGMENTATION: Arduino's String class is a wrapper
+     around heap-allocated char arrays. Every concatenation, substring, or
+     format operation may allocate and free memory. On a 512KB SRAM ESP32
+     running for months at sea, heap fragmentation from String operations is
+     a leading cause of OOM crashes. cJSON uses a single pre-allocated buffer
+     for parsing (see §2.3.2).
+
+  4. SERIAL OBJECT STATE: Arduino's Serial object has internal buffers and
+     state machines. The serialEvent() mechanism is fragile and depends on
+     yield() being called (which Arduino inserts into loop() — but if you're
+     in a tight loop without yield(), you miss serial data). VesselNode's
+     serial bridge uses DMA-backed ring buffers with ISR-driven semaphore
+     notification — zero bytes lost, zero hidden dependencies.
+
+  5. NO DUAL-SLOT OTA: Arduino's built-in OTA (via WiFi) uses a single
+     update mechanism that does not support rollback. ESP-IDF's esp_ota_ops
+     provides full dual-slot management with rollback protection.
+
+  6. LIMITED WATCHDOG CONTROL: Arduino's watchdog is simplistic (a single
+     timeout, no task-level monitoring). VesselNode needs per-task heartbeat
+     monitoring and external hardware watchdog integration.
+
+------------------------------------------------------------------------------
+4.3 Why NOT MicroPython or Rust
+------------------------------------------------------------------------------
+
+  MicroPython:
+    - INTERPRETER OVERHEAD: MicroPython's bytecode interpreter adds 5-50x
+      execution time overhead vs. native C. A PID loop at 100Hz that takes
+      2.5ms in C would take 12-125ms in MicroPython — exceeding the 10ms
+      deadline.
+    - GARBAGE COLLECTION PAUSES: MicroPython's GC is stop-the-world. During
+      a collection pass (which can take 1-10ms depending on heap size), ALL
+      Python code stops. The PID loop would miss its deadline.
+    - HEAP FRAGMENTATION: Python objects are variable-sized and heap-allocated.
+      Long-running Python systems on microcontrollers eventually fragment the
+      heap and crash.
+    - LIMITED DEBUGGING: No GDB support. Tracebacks are limited. Profiling
+      tools are rudimentary. When a node fails at sea, you need GDB-level
+      debug output.
+    - VERDICT: Acceptable for prototyping only. Not for production marine
+      safety systems.
+
+  Rust (esp-rs):
+    - MATURITY: esp-rs is progressing rapidly but is not yet at production
+      maturity for ESP32-S3. As of early 2025: USB support is experimental,
+      some peripherals lack stable drivers, and the HAL layer is incomplete.
+    - COMPILATION TIME: Rust cross-compilation for Xtensa is significantly
+      slower than C. For rapid iteration during development and field
+      debugging, this matters.
+    - ECOSYSTEM: Most marine electronics reference designs, sensor drivers,
+      and example code are in C. Rewriting proven I2C/SPI/UART drivers in
+      Rust introduces risk without benefit.
+    - TEAM EXPERTISE: The target development team for commercial marine
+      electronics is primarily C-competent. Rust's borrow checker introduces
+      a learning curve that slows development for the current team.
+    - VERDICT: Promising for future versions. Track esp-rs progress. Plan
+      to evaluate Rust for new peripheral drivers that don't have proven C
+      implementations. Consider Rust for Jetson-side software where maturity
+      is higher.
+
+------------------------------------------------------------------------------
+4.4 JSON Parsing: cJSON
+------------------------------------------------------------------------------
+
+VesselNode uses the cJSON library (https://github.com/DaveGamble/cJSON) for
+all JSON parsing and serialization.
+
+Why cJSON:
+  - SINGLE FILE: cJSON is one .c and one .h file (~600 lines). No external
+    dependencies, no build system complexity, no version conflicts.
+  - MINIMAL HEAP: cJSON allocates nodes individually from the heap, but
+    VesselNode wraps cJSON parsing with a pre-allocated "parse arena" using
+    the cJSON_GetHooks mechanism:
+      - Custom malloc: allocates from a 4KB static buffer (on PSRAM).
+      - Custom free: no-op (arena is reset after parsing, not freed per-node).
+      - Result: ZERO heap fragmentation from JSON parsing.
+  - PROVEN: cJSON is used in thousands of production embedded systems.
+    It has been audited, fuzzed, and is battle-tested.
+  - UTF-8: cJSON handles UTF-8 strings natively (important for
+    multi-language display text if ever needed).
+
+Alternative considered and rejected:
+  - ArduinoJson: Excellent library, but depends on C++ templates. Mixing C++
+    and C in the same ESP-IDF project is possible but adds build complexity.
+    Also, ArduinoJson's deserializeJson() allocates from the Arduino heap,
+    not ESP-IDF's heap_caps system, leading to fragmentation on PSRAM builds.
+  - jsmn: Ultra-lightweight tokenizer-only parser. Would require writing a
+    custom tree-builder on top. Not worth the effort when cJSON works well.
+
+------------------------------------------------------------------------------
+4.5 Build System: CMake + ESP-IDF Component System
+------------------------------------------------------------------------------
+
+VesselNode uses ESP-IDF's standard CMake-based build system with the component
+model:
+
+  vessel_node_fw/
+  ├── CMakeLists.txt              # Top-level project CMake
+  ├── main/
+  │   ├── CMakeLists.txt          # Main component
+  │   ├── main.c                  # app_main() entry point
+  │   └── idf_component.yml
+  ├── components/
+  │   ├── vessel_core/            # Base framework component
+  │   │   ├── CMakeLists.txt
+  │   │   ├── include/
+  │   │   │   ├── vessel_node.h
+  │   │   │   ├── identity.h
+  │   │   │   ├── serial_bridge.h
+  │   │   │   ├── protocol_handler.h
+  │   │   │   ├── nvs_settings.h
+  │   │   │   ├── watchdog.h
+  │   │   │   ├── ota_manager.h
+  │   │   │   └── alarm.h
+  │   │   └── src/
+  │   │       ├── identity.c
+  │   │       ├── serial_bridge.c
+  │   │       ├── protocol_handler.c
+  │   │       ├── nvs_settings.c
+  │   │       ├── watchdog.c
+  │   │       ├── ota_manager.c
+  │   │       └── alarm.c
+  │   ├── role_autopilot/         # Autopilot role component
+  │   │   ├── CMakeLists.txt
+  │   │   ├── include/
+  │   │   │   └── role_autopilot.h
+  │   │   └── src/
+  │   │       ├── role_autopilot.c  # Implements role_interface_t
+  │   │       ├── pid_control.c
+  │   │       ├── compass.c
+  │   │       ├── rudder.c
+  │   │       └── nmea_parser.c
+  │   ├── role_lighting/          # Lighting controller role
+  │   ├── role_engine/            # Engine monitor role
+  │   ├── role_deck/              # Deck equipment role
+  │   ├── role_camera/            # Camera interface role
+  │   ├── role_environmental/     # Environmental sensor role
+  │   ├── role_bilge/             # Bilge monitor role
+  │   └── role_navigation/        # Navigation aid role
+  ├── third_party/
+  │   └── cJSON/                  # JSON library (static source)
+  └── sdkconfig.defaults          # ESP-IDF configuration defaults
+
+Build one role:
+  idf.py -DROLE=autopilot -p /dev/ttyUSB0 flash monitor
+
+The ROLE CMake variable selects which role component is linked. In the top-level
+CMakeLists.txt:
+
+  set(ROLE $ENV{ROLE} CACHE STRING "Node role")
+  if("${ROLE}" STREQUAL "autopilot")
+      set(ROLE_COMPONENT "role_autopilot")
+  elseif("${ROLE}" STREQUAL "lighting")
+      set(ROLE_COMPONENT "role_lighting")
+  # ... etc ...
+  endif()
+  set(EXTRA_COMPONENT_DIRS "components/${ROLE_COMPONENT}")
+  add_extra_components(${ROLE_COMPONENT})
+
+This allows a single source tree to produce eight different firmware binaries,
+one per role. The common vessel_core component is shared by all builds. The
+role component registers its role_interface_t with the core at link time.
+
+
+================================================================================
+5. NVS SETTINGS PERSISTENCE ARCHITECTURE
+================================================================================
+
+------------------------------------------------------------------------------
+5.1 ESP-IDF NVS Overview
+------------------------------------------------------------------------------
+
+ESP-IDF's NVS (Non-Volatile Storage) is a key-value store implemented on top of
+a NOR flash partition. It provides:
+
+  - WEAR LEVELING: NVS internally manages flash pages (4KB each) and rotates
+    writes to distribute wear evenly across the partition.
+  - CRASH SAFETY: All NVS writes are atomic. If power is lost mid-write,
+    the previous value is preserved. No partial updates are possible.
+  - KEY-VALUE: Keys are null-terminated strings up to 15 characters. Values
+    can be: uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t,
+    int64_t, strings (up to 4000 bytes), or blobs (up to ~32KB per entry with
+    multi-page encoding).
+  - NAMESPACES: Keys are organized into namespaces (like directories) to
+    prevent key collisions between components.
+
+VesselNode uses three NVS namespaces:
+
+  "identity"   — Node identity, role assignment, provisioning state
+  "settings"   — Role-specific configuration (calibration, thresholds, etc.)
+  "settings_backup" — Mirror of "settings" for dual-copy integrity
+
+------------------------------------------------------------------------------
+5.2 Settings Versioning
+------------------------------------------------------------------------------
+
+Every settings group has a version number (uint32_t, monotonically increasing).
+The Jetson tracks the current settings version in its node database. When the
+Jetson pushes a new configuration, it increments the version number.
+
+  // Stored in NVS under key "settings_ver" in "settings" namespace
+  uint32_t current_version;  // Currently active settings version
+
+  // When Jetson pushes settings:
+  1. Jetson sends: {"cmd":"set_config", "params":{"settings_version":43, ...}}
+  2. ESP32 compares 43 > current_version (42) → accepts update
+  3. ESP32 writes new settings to NVS, updates settings_ver = 43
+  4. ESP32 applies settings to running role module
+  5. ESP32 sends: {"cmd":"set_config_ack", "params":{"settings_version":43}}
+
+  // If version is NOT higher:
+  // ESP32 rejects: {"cmd":"set_config_ack", "params":{"error":"stale_version"}}
+
+This prevents stale Jetson restarts from overwriting settings that were
+updated by a newer Jetson instance (in a multi-Jetson redundancy scenario).
+
+------------------------------------------------------------------------------
+5.3 Dual-Copy NVS Strategy
+------------------------------------------------------------------------------
+
+To protect against flash corruption (rare but possible with heavy vibration,
+EMI, or marginal flash parts), VesselNode implements a dual-copy strategy:
+
+  nvs_settings_write(const char *key, const void *value, size_t len) {
+      // Step 1: Write to backup namespace
+      nvs_handle_t backup;
+      nvs_open("settings_backup", NVS_READWRITE, &backup);
+      nvs_set_blob(backup, key, value, len);
+      nvs_commit(backup);    // Force flash write
+      nvs_close(backup);
+
+      // Step 2: Verify backup read-back
+      nvs_handle_t verify;
+      nvs_open("settings_backup", NVS_READONLY, &verify);
+      uint8_t verify_buf[len];
+      size_t verify_len = len;
+      esp_err_t ret = nvs_get_blob(verify, key, verify_buf, &verify_len);
+      nvs_close(verify);
+
+      if (ret != ESP_OK || memcmp(value, verify_buf, len) != 0) {
+          ESP_LOGE(TAG, "NVS backup verify FAILED for key '%s'", key);
+          return ESP_FAIL;
+      }
+
+      // Step 3: Write to primary namespace
+      nvs_handle_t primary;
+      nvs_open("settings", NVS_READWRITE, &primary);
+      nvs_set_blob(primary, key, value, len);
+      nvs_commit(primary);
+      nvs_close(primary);
+
+      return ESP_OK;
+  }
+
+  nvs_settings_read(const char *key, void *value, size_t *len) {
+      // Try primary first
+      esp_err_t ret = nvs_get_blob(primary_handle, key, value, len);
+      if (ret == ESP_OK) return ESP_OK;
+
+      // Primary failed — try backup
+      ret = nvs_get_blob(backup_handle, key, value, len);
+      if (ret == ESP_OK) {
+          ESP_LOGW(TAG, "Settings restored from backup for key '%s'", key);
+          // Repair primary from backup
+          nvs_set_blob(primary_handle, key, value, *len);
+          nvs_commit(primary_handle);
+          return ESP_OK;
+      }
+
+      return ESP_ERR_NOT_FOUND;  // Both copies failed
+  }
+
+------------------------------------------------------------------------------
+5.4 Write Timing Strategy
+------------------------------------------------------------------------------
+
+NVS flash writes have finite endurance (typically 100,000 erase cycles per
+page, but wear leveling extends this significantly). More importantly, each
+nvs_commit() takes ~20-50ms during which the flash controller is busy. If the
+PID task were to block on an NVS write, it would miss its deadline.
+
+VesselNode categorizes settings by write frequency:
+
+  IMMEDIATE-WRITE (written to NVS as soon as changed):
+    - node_id, role, provisioning state (written once at provisioning)
+    - calibration data (rudder center, compass calibration, etc.)
+    - serial_config (baud rate, UART number — changed rarely)
+    - settings_version (incremented when Jetson pushes new config)
+    These are written from low-priority tasks (protocol dispatch or a dedicated
+    NVS writer task). NEVER from the PID task or any task with priority > 15.
+
+  DEFERRED-WRITE (written to NVS only on shutdown command):
+    - Runtime telemetry counters (uptime, alarm counts, cycle counts)
+    - Last-known heading/rudder state (for recovery after unexpected reboot)
+    - Performance metrics (max latency, missed deadlines)
+    These are accumulated in RAM and written to NVS when the Jetson sends a
+    "shutdown" command (before the ESP32 enters deep sleep) or when the role
+    module's on_shutdown() callback is invoked.
+
+  NEVER-WRITE (volatile, RAM-only):
+    - PID integral accumulator (reset on every engage/disengage)
+    - Heartbeat timestamps
+    - Temporary calibration data (not yet confirmed by operator)
+
+------------------------------------------------------------------------------
+5.5 Role-Specific NVS Settings
+------------------------------------------------------------------------------
+
+  AUTOPILOT role (namespace "settings", prefix "ap_"):
+    Key                  | Type     | Description
+    ---------------------|----------|------------------------------------------
+    ap_rudder_center     | float32  | Rudder center ADC value (or encoder count)
+    ap_rudder_min_deg    | float32  | Maximum port rudder angle (negative, e.g., -35)
+    ap_rudder_max_deg    | float32  | Maximum starboard rudder angle (positive)
+    ap_counter_rudder_gain | float32 | Counter-rudder gain for overshoot damping
+    ap_yaw_damping       | float32  | Yaw damping coefficient
+    ap_pid_kp            | float32  | Proportional gain
+    ap_pid_ki            | float32  | Integral gain
+    ap_pid_kd            | float32  | Derivative gain
+    ap_pid_dd            | float32  | Derivative-of-derivative gain
+    ap_pid_pr            | float32  | Proportional-root gain
+    ap_pid_ff            | float32  | Feed-forward gain
+    ap_heading_offset    | float32  | Compass heading offset (deviation correction)
+    ap_compass_cal       | blob     | BNO085 calibration data (up to 100 bytes)
+    ap_profile_calm      | blob     | PID gains for calm seas preset
+    ap_profile_rough     | blob     | PID gains for rough seas preset
+    ap_profile_light     | blob     | PID gains for light air preset
+    ap_active_profile    | uint8    | Currently selected profile index
+
+  ALL ROLES (namespace "identity", no prefix):
+    Key                  | Type     | Description
+    ---------------------|----------|------------------------------------------
+    node_id              | string   | Human-readable node ID (e.g., "AP-001")
+    role                 | uint8    | Current role (vessel_role_t enum)
+    mac_addr             | blob     | 6-byte BLE MAC address
+    board_revision       | string   | PCB revision string
+    fw_version           | string   | Currently running firmware version
+    provisioned          | uint8    | 1 if provisioned, 0 if not
+    serial_baud          | uint32   | Jetson serial baud rate
+    serial_uart          | uint8    | Jetson serial UART number
+    settings_version     | uint32   | Current settings version from Jetson
+    last_shutdown_reason | uint8    | Reason for last shutdown (enum)
+    uptime_at_shutdown   | uint32   | Total uptime in seconds at last shutdown
+
+  ENGINE MONITOR role (prefix "eng_"):
+    eng_alarm_temp_high    | float32  | Engine temp high alarm threshold (°C)
+    eng_alarm_temp_crit    | float32  | Engine temp critical alarm threshold (°C)
+    eng_alarm_oil_low      | float32  | Oil pressure low alarm threshold (PSI)
+    eng_alarm_rpm_high     | uint16   | RPM high alarm threshold
+    eng_alarm_coolant_low  | float32  | Coolant level low threshold (%)
+    eng_sensor_offsets     | blob     | ADC calibration offsets for all sensors
+
+  LIGHTING CONTROLLER role (prefix "lt_"):
+    lt_channel_states      | blob     | Current state of all lighting channels
+    lt_scene_presets       | blob     | Named scene presets (up to 8 scenes)
+    lt_default_scene       | uint8    | Scene to load on power-up
+    lt_brightness_default  | uint8    | Default brightness (0-255) on power-up
+
+  BILGE MONITOR role (prefix "blg_"):
+    blg_pump_auto_threshold | uint16  | Water level to auto-start pump (mm)
+    blg_pump_off_threshold  | uint16  | Water level to stop pump (mm)
+    blg_alarm_level          | uint16  | Water level for flood alarm (mm)
+    blg_pump_cycle_count     | uint32  | Total pump cycles (lifetime counter)
+
+  (Other roles follow the same pattern — see Appendix C for complete key list.)
+
+------------------------------------------------------------------------------
+5.6 NVS Initialization and Recovery
+------------------------------------------------------------------------------
+
+At boot, nvs_settings_init() performs:
+
+  1. nvs_flash_init() — Initialize NVS flash partition.
+     If NVS flash is corrupt (NVS_NEW_VERSION_FOUND or NVS_CORRUPT_KEY_PART),
+     call nvs_flash_erase() and retry. This is safe because the dual-copy
+     strategy means we NEVER store the only copy of critical data in NVS.
+     (Calibration data exists on the Jetson; it can be re-pushed.)
+
+  2. Open "identity" namespace. Read node_id, role, provisioned flag.
+     If provisioned == 0: enter provisioning state machine (Section 3.2).
+     If provisioned == 1: load role-specific settings and call role_module.init().
+
+  3. Open "settings" namespace. Read all role-specific settings into a RAM
+     struct (role_settings_t). Future reads come from RAM. Writes update both
+     RAM and NVS (via dual-copy strategy).
+
+  4. Verify settings_version matches what was stored. If settings_version
+     decremented (possible if Jetson was restored from backup), log a warning
+     but accept the stored settings (they are the most recent on-device data).
+
+
+================================================================================
+6. STANDALONE OPERATION AND DEGRADATION PLANNING
+================================================================================
+
+Every VesselNode must be able to operate without the Jetson. The vessel must
+be safe to operate even if every computer on board crashes simultaneously.
+This is a core design principle, not an optional feature.
+
+------------------------------------------------------------------------------
+6.1 Standalone Autonomy Levels
+------------------------------------------------------------------------------
+
+  LEVEL 0: FULL OPERATION (Jetson connected)
+    - All features available.
+    - Jetson provides UI, telemetry aggregation, multi-node coordination.
+    - Settings pushed from Jetson database.
+    - OTA updates available.
+
+  LEVEL 1: DEGRADED OPERATION (Jetson lost, NVS has valid config)
+    - Role module operates with last-known settings from NVS.
+    - All safety-critical functions remain active.
+    - Local controls (buttons, OLED display) fully functional.
+    - Serial bridge continues sending announce messages every 10 seconds.
+    - No telemetry aggregation, no multi-node coordination.
+    - OTA not available.
+    - This is the NORMAL standalone mode. All nodes spend most of their
+      operating life here when the Jetson is simply powered off.
+
+  LEVEL 2: EMERGENCY OPERATION (Jetson lost, NVS identity but no role config)
+    - Node identity is known but role-specific calibration is missing.
+    - Role module enters "safe defaults" mode:
+      - Autopilot: uses conservative factory-default PID gains, requires
+        operator to confirm calibration before engaging.
+      - Lighting: all channels OFF, manual button override only.
+      - Engine monitor: uses default alarm thresholds (conservative).
+    - Node continues announcing on serial, waiting for Jetson to return.
+    - Settings can be adjusted via physical controls if available.
+
+  LEVEL 3: UNPROVISIONED (No NVS identity, no Jetson)
+    - Node blinks amber LED at 1Hz to indicate unprovisioned state.
+    - No role-specific functionality available.
+    - Accepts serial commands only from a direct USB-serial connection
+      (for bench provisioning with a laptop).
+
+------------------------------------------------------------------------------
+6.2 Role-Specific Standalone Behaviors
+------------------------------------------------------------------------------
+
+  AUTOPILOT (most critical — must hold heading indefinitely):
+    - Full "Iron Mike" mode: PID heading control runs independently.
+    - OLED shows: heading, rudder angle, mode, compass status.
+    - Buttons: AUTO/STBY, PORT ±1°/±10°, STBD ±1°/±10°, MODE.
+    - No track mode (requires GPS data from Jetson or NMEA bus).
+    - Gain profiles selectable via MODE button (calm/rough/light presets).
+    - Compass calibration stored in NVS — survives reboot.
+    - If compass fails: ALARM (3-beep, red LED), auto-disengage, rudder to center.
+    - If supply voltage drops below 8V: auto-disengage (solenoids require stable power).
+
+  LIGHTING CONTROLLER:
+    - Remembers last channel states from NVS (written on every state change).
+    - On power-up: restores last known lighting state.
+    - Physical override buttons on the lighting panel work independently.
+    - Scene presets stored in NVS, selectable via panel buttons.
+    - No remote control from Jetson (that's fine — lights are lights).
+
+  ENGINE MONITOR:
+    - Reads all sensors at configured sample rates (ADC for temp, pressure,
+      RPM via frequency counter on tach output).
+    - Alarm thresholds from NVS — if engine exceeds threshold: buzzer sounds,
+      red LED illuminates, alarm relay closes (to drive a remote alarm horn).
+    - Continues logging sensor data to a local ring buffer (last 24 hours of
+      1-minute averages stored in PSRAM). Jetson can retrieve this data on
+      reconnection.
+    - NO autonomous engine control (engine monitor never shuts down the engine
+      — that's the engineer's decision).
+
+  BILGE MONITOR:
+    - Water level sensor read every 5 seconds.
+    - If level exceeds auto-start threshold: bilge pump activates.
+    - If level exceeds alarm threshold: alarm buzzer + LED.
+    - Pump run-time logged in NVS (cumulative hours).
+    - Pump cycle counter in NVS (for maintenance scheduling).
+    - Test button on bilge panel: manually starts pump for 10 seconds.
+    - CRITICAL: bilge pump operation is NEVER dependent on Jetson. A flooded
+      bilge must be pumped even with zero computers running.
+
+  ENVIRONMENTAL SENSOR:
+    - Reads wind speed/direction, air temp, humidity, barometric pressure.
+    - Data logged to PSRAM ring buffer (1-minute averages, 48 hours).
+    - No standalone safety function (purely informational).
+    - Display shows current readings on OLED if equipped.
+
+  CAMERA INTERFACE:
+    - Camera power control is stateless (on/off relay).
+    - PTZ control is Jetson-dependent (no standalone PTZ operation).
+    - In standalone: camera remains in last position. Power state preserved.
+    - Physical camera power toggle button on the camera housing (optional).
+
+  NAVIGATION AID:
+    - Navigation lights follow a programmed pattern (e.g., steaming, anchor,
+      fishing, restricted visibility).
+    - Pattern stored in NVS, selected via rotary switch or buttons.
+    - In standalone: lights continue current pattern indefinitely.
+    - If connected to AIS transponder: AIS continues broadcasting independently
+      (AIS has its own processor; ESP32 just controls power and configuration).
+
+  DECK EQUIPMENT:
+    - Reads status sensors (winch load, pot hauler position, crane angle).
+    - Alarm on overload conditions (independent of Jetson).
+    - Equipment control commands are Jetson-dependent — in standalone, the
+      operator uses physical deck controls directly (ESP32 monitors, does not
+      command).
+
+------------------------------------------------------------------------------
+6.3 Watchdog Architecture for Standalone Operation
+------------------------------------------------------------------------------
+
+Each node has a three-tier watchdog system:
+
+  TIER 1: INTERNAL TASK WATCHDOG (ESP-IDF)
+    - CONFIG_ESP_TASK_WDT_TIMEOUT_S = 10 seconds
+    - Monitors all FreeRTOS tasks. If any task fails to feed the watchdog
+      (call esp_task_wdt_reset()) within 10 seconds, the ESP-IDF panic
+      handler triggers a full chip reset.
+    - The watchdog task (task_watchdog_heartbeat) feeds the TWDT every 100ms
+      AFTER verifying all monitored tasks have updated their heartbeats.
+
+  TIER 2: APPLICATION-LEVEL MONITORING (task_watchdog_heartbeat)
+    - Period: 100ms
+    - Checks:
+      a. All role tasks have updated their heartbeat timestamp within their
+         declared timeout (PID: 50ms, compass: 500ms, serial: 5s, etc.)
+      b. Supply voltage is within range (10-16V).
+      c. ESP32 internal temperature is below 80°C.
+      d. Heap free space is above 50KB (early warning of memory leak).
+    - On failure: trigger alarm, auto-disengage if safety-critical, log to NVS.
+
+  TIER 3: EXTERNAL HARDWARE WATCHDOG (MAX6818)
+    - Independent IC, powered from the same 12V supply as the ESP32.
+    - Timeout: 1.6 seconds.
+    - Kicked by a hardware timer ISR (not a task) every 100ms via GPIO toggle.
+    - If the ESP32 firmware enters an infinite loop WITH INTERRUPTS DISABLED,
+      the ISR cannot fire, and the MAX6818 resets the ESP32 after 1.6 seconds.
+    - This is the ultimate safety net — it catches scenarios that the internal
+      WDT cannot (e.g., GPIO latch-up, firmware stuck in ISR, flash lockup).
+
+  Recovery after watchdog reset:
+    1. MAX6818 pulls ESP32's EN pin low → full chip reset.
+    2. ESP32 boots → bootloader loads last valid OTA partition.
+    3. Firmware enters app_main() → identity_init() → loads NVS settings.
+    4. If role is autopilot: firmware boots in STANDBY mode (never auto-engage).
+    5. Clutch remains de-energized throughout reset (GPIO defaults to low-Z
+       input, MOSFET gate pull-down resistor keeps MOSFET off).
+    6. Rudder is held by hydraulic lock (centered by spring-return valve).
+    7. Operator must explicitly press AUTO/STBY to engage after a watchdog reset.
+
+
+================================================================================
+7. SHARED COMMUNICATION PROTOCOL (VESSELLINK JSON PROTOCOL)
+================================================================================
+
+------------------------------------------------------------------------------
+7.1 Physical and Framing Layer
+------------------------------------------------------------------------------
+
+  Medium:      RS-422 differential serial (3.3V TTL for bench testing)
+  Baud Rate:   115200 bps (default, configurable via NVS)
+  Frame Format: {JSON_PAYLOAD}\n*HHHH
+
+  Where:
+    JSON_PAYLOAD: UTF-8 encoded JSON object, max 250 bytes
+    \n:          Newline (0x0A) delimiter
+    *HHHH:       Asterisk + 4 hex characters of CRC-16/CCITT-FALSE
+
+  CRC-16/CCITT-FALSE Parameters:
+    Polynomial: 0x1021
+    Init:       0x0000
+    RefIn:      false
+    RefOut:     false
+    XorOut:     0x0000
+    Computed over: The entire JSON string (excluding \n and *HHHH)
+
+  See Appendix B for the complete CRC-16 implementation.
+
+------------------------------------------------------------------------------
+7.2 Common Message Structure
+------------------------------------------------------------------------------
+
+Every VesselLink message (in both directions) has this base structure:
+
+  {
+    "msg_id":    <uint32>,    // Monotonically increasing, per-endpoint counter
+    "ts":        <uint64>,    // Unix epoch milliseconds (UTC), 0 if unsynced
+    "cmd":       <string>,    // Command name (see command registry)
+    "params":    { ... }      // Command-specific parameters (may be empty {})
+  }
+
+Responses and acknowledgements include a "ref_id" field referencing the
+original command's msg_id:
+
+  {
+    "msg_id":    <uint32>,
+    "ts":        <uint64>,
+    "cmd":       "ack",       // Generic acknowledgement
+    "params":    { "status": "ok" },
+    "ref_id":    <uint32>     // References the command being acknowledged
+  }
+
+Error responses use status "error" with an error_code and message:
+
+  {
+    "msg_id":    <uint32>,
+    "ts":        <uint64>,
+    "cmd":       "ack",
+    "params":    {
+      "status": "error",
+      "error_code": "INVALID_PARAM",
+      "error_msg": "Heading must be 0.0 to 359.9"
+    },
+    "ref_id":    <uint32>
+  }
+
+  Defined error codes:
+    OK                  — Success
+    INVALID_PARAM       — Parameter out of range or wrong type
+    UNKNOWN_CMD         — Command not recognized by this role
+    NOT_PROVISIONED     — Node is unprovisioned, cannot execute
+    STALE_VERSION       — Settings version not newer than current
+    ALARM_ACTIVE        — Cannot execute while alarm is active
+    MODE_WRONG          — Command not valid in current mode
+    CRC_ERROR           — Inbound message CRC mismatch (silently dropped)
+    OTA_IN_PROGRESS     — Cannot execute during OTA update
+    HARDWARE_ERROR      — Sensor/peripheral failure
+
+------------------------------------------------------------------------------
+7.3 Common Commands (All Roles)
+------------------------------------------------------------------------------
+
+  ping:
+    Jetson → ESP32: {"msg_id":1,"ts":T,"cmd":"ping","params":{}}
+    ESP32 → Jetson: {"msg_id":1,"ts":T,"cmd":"pong","params":{
+                      "latency_us": 150, "heap_free": 187432, "uptime_s": 86400
+                     },"ref_id":1}
+    Purpose: Verify link integrity, measure round-trip latency, check health.
+
+  identify:
+    Jetson → ESP32: {"msg_id":2,"ts":T,"cmd":"identify","params":{}}
+    ESP32 → Jetson: {"msg_id":2,"ts":T,"cmd":"identify_ack","params":{
+                      "node_id":"AP-001","mac":"AA:BB:CC:DD:EE:FF",
+                      "role":"autopilot","role_version":"2.1.0",
+                      "fw_version":"2.1.0","protocol_version":"2.0",
+                      "board_rev":"1.0","uptime_s":86400,
+                      "heap_free":187432,"psram_free":8388608,
+                      "nvs_used_pages":12
+                     },"ref_id":2}
+    Purpose: Full node identification and health summary.
+
+  get_status:
+    Jetson → ESP32: {"msg_id":3,"ts":T,"cmd":"get_status","params":{}}
+    ESP32 → Jetson: {"msg_id":3,"ts":T,"cmd":"status","params":{
+                      "role_status":{...},   // Role-specific status (delegated)
+                      "system": {
+                        "link_up": true,
+                        "jetson_heartbeat_ms_ago": 150,
+                        "voltage_v": 12.3,
+                        "temperature_c": 42.5,
+                        "watchdog_ok": true,
+                        "active_alarms": []
+                      }
+                     },"ref_id":3}
+    Purpose: Comprehensive system and role status. Role module provides
+             role_status object via its get_status() callback.
+
+  get_config:
+    Jetson → ESP32: {"msg_id":4,"ts":T,"cmd":"get_config","params":{}}
+    ESP32 → Jetson: {"msg_id":4,"ts":T,"cmd":"config","params":{
+                      "settings_version": 42,
+                      "config": { ... }   // Full role-specific config
+                     },"ref_id":4}
+    Purpose: Read current configuration from node.
+
+  set_config:
+    Jetson → ESP32: {"msg_id":5,"ts":T,"cmd":"set_config","params":{
+                      "settings_version": 43,
+                      "config": { ... }
+                     }}
+    ESP32 → Jetson: {"msg_id":5,"ts":T,"cmd":"ack","params":{
+                      "status":"ok","settings_version":43
+                     },"ref_id":5}
+    Purpose: Push new configuration from Jetson to node. Version must be
+             higher than current. Settings are validated, stored in NVS
+             (dual-copy), and applied to running role module.
+
+  ota_update:
+    Jetson → ESP32: {"msg_id":6,"ts":T,"cmd":"ota_update","params":{
+                      "version":"2.2.0","sha256":"abcdef...",
+                      "size":1572864
+                     }}
+    ESP32 → Jetson: {"msg_id":6,"ts":T,"cmd":"ota_ready","params":{
+                      "chunk_size":4096,"status":"ready"
+                     },"ref_id":6}
+    Purpose: Initiate OTA firmware update. After this handshake, binary
+             chunks are sent using the binary OTA protocol (Section 8).
+
+  factory_reset:
+    Jetson → ESP32: {"msg_id":7,"ts":T,"cmd":"factory_reset","params":{
+                      "confirm": true
+                     }}
+    ESP32 → Jetson: {"msg_id":7,"ts":T,"cmd":"ack","params":{
+                      "status":"ok","message":"Rebooting in 2s"
+                     },"ref_id":7}
+    Purpose: Erase all NVS settings, reset to factory defaults, reboot.
+             Requires confirm=true (prevents accidental factory reset).
+
+  heartbeat (sent by Jetson every 500ms):
+    Jetson → ESP32: {"msg_id":N,"ts":T,"cmd":"heartbeat","params":{
+                      "seq": 12345
+                     }}
+    ESP32 → Jetson: {"msg_id":N,"ts":T,"cmd":"heartbeat_ack","params":{
+                      "seq": 12345
+                     },"ref_id":N}
+    Purpose: Keep-alive. If ESP32 doesn't receive heartbeat for 2 seconds,
+             it declares LINK_LOST and calls role_module.on_jetson_lost().
+
+  shutdown:
+    Jetson → ESP32: {"msg_id":N,"ts":T,"cmd":"shutdown","params":{
+                      "reason":"maintenance","deep_sleep_ms":0
+                     }}
+    ESP32 → Jetson: {"msg_id":N,"ts":T,"cmd":"ack","params":{
+                      "status":"ok","deferred_settings_saved":true
+                     },"ref_id":N}
+    Purpose: Graceful shutdown. Triggers deferred NVS writes, saves runtime
+             state, then optionally enters deep sleep or full reset.
+
+------------------------------------------------------------------------------
+7.4 Role-Specific Commands (Partial)
+------------------------------------------------------------------------------
+
+  Autopilot additional commands:
+    set_heading:   {"params":{"heading":127.5,"source":"jetson"}}
+    engage:        {"params":{"heading":127.5}}  // Set heading and engage
+    standby:       {"params":{}}
+    set_pid_gains: {"params":{"P":0.003,"D":0.09,"DD":0.075,"PR":0.005,"FF":0.6,"I":0.0}}
+    set_mode:      {"params":{"mode":"auto|track|wind"}}
+    calibrate:     {"params":{"type":"compass|rudder","action":"start|save|cancel"}}
+    set_profile:   {"params":{"profile":"calm|rough|light"}}
+
+  Lighting additional commands:
+    set_channel:   {"params":{"channel":3,"brightness":180,"color_temp":4000}}
+    set_scene:     {"params":{"scene_name":"night_fishing"}}
+    get_channels:  {"params":{}}
+
+  Engine monitor additional commands:
+    get_readings:  {"params":{}}
+    set_alarm_threshold: {"params":{"sensor":"coolant_temp","warning":95,"critical":105}}
+    clear_alarm:   {"params":{"alarm_id":"eng_over_temp"}}
+
+  Bilge monitor additional commands:
+    get_level:     {"params":{}}
+    set_pump_mode: {"params":{"mode":"auto|manual|off"}}
+    test_pump:     {"params":{"duration_ms":10000}}
+
+  (See Appendix A for the complete role command matrix.)
+
+------------------------------------------------------------------------------
+7.5 Telemetry Messages (ESP32 → Jetson, unsolicited)
+------------------------------------------------------------------------------
+
+Nodes send unsolicited telemetry at regular intervals:
+
+  TELEMETRY_FAST (10 Hz — real-time data for display/logging):
+    - Autopilot: heading, rudder angle, heading error, PID output, mode
+    - Engine: RPM, coolant temp, oil pressure
+    - Environmental: wind speed, wind direction
+
+  TELEMETRY_SLOW (1 Hz — status summary):
+    - All nodes: voltage, temperature, heap, uptime, link status, alarms
+
+  TELEMETRY_ALARM (immediate — on alarm trigger/clear):
+    - Alarm ID, severity, trigger value, current value, timestamp
+
+  TELEMETRY_EVENT (immediate — on discrete events):
+    - Mode change, engagement, calibration complete, pump cycle, etc.
+
+All telemetry uses the standard JSON message format with cmd set to "telemetry"
+and params containing the data. The Jetson subscribes to telemetry by sending
+a "subscribe" command specifying which telemetry categories it wants.
+
+  Jetson → ESP32: {"cmd":"subscribe","params":{
+                    "telemetry":["fast","slow","alarm","event"]
+                  }}
+  ESP32 → Jetson: {"cmd":"telemetry","params":{
+                    "category":"fast","data":{
+                      "heading":127.3,"rudder":-5.2,
+                      "heading_error":0.2,"pid_output":-0.03,
+                      "mode":"auto"
+                    }
+                  }}
+
+
+================================================================================
+8. OTA FIRMWARE UPDATE ARCHITECTURE
+================================================================================
+
+------------------------------------------------------------------------------
+8.1 Binary OTA Protocol
+------------------------------------------------------------------------------
+
+After the ota_update handshake (Section 7.3), the Jetson sends firmware binary
+in chunks over the serial link using a dedicated binary protocol:
+
+  BINARY FRAME FORMAT:
+    +--------+----------+--------+---------+--------+--------+---------+
+    | STX    | SEQ      | OFFSET | LEN     | DATA   | CRC_H  | CRC_L  |
+    | 0x02   | uint32   | uint32 | uint16  | N bytes| uint8  | uint8  |
+    | 1 byte | 4 bytes  | 4 bytes| 2 bytes | N bytes| 1 byte | 1 byte |
+    +--------+----------+--------+---------+--------+--------+---------+
+    Total: 12 + N bytes per frame
+
+  Where:
+    STX    = 0x02 (Start of TeXt — avoids false framing on random bytes)
+    SEQ    = Monotonically increasing chunk sequence number (0-based)
+    OFFSET = Byte offset within the firmware image
+    LEN    = Number of data bytes (typically 4096)
+    DATA   = Raw firmware binary data
+    CRC_H  = High byte of CRC-16/CCITT-FALSE computed over SEQ+OFFSET+LEN+DATA
+    CRC_L  = Low byte of CRC-16
+
+  ACK/NACK FRAME (from ESP32 to Jetson):
+    +--------+----------+--------+--------+
+    | ACK    | SEQ      | STATUS | REASON |
+    | 0x06   | uint32   | uint8  | uint8  |
+    | 1 byte | 4 bytes  | 1 byte | 1 byte |
+    +--------+----------+--------+--------+
+    Total: 7 bytes
+
+  STATUS values:
+    0x00 = ACK (chunk accepted and written successfully)
+    0x01 = NACK (CRC error — retransmit)
+    0x02 = NACK (offset mismatch — retransmit)
+    0x03 = NACK (flash write error — fatal, abort OTA)
+    0x04 = NACK (out of sequence — retransmit from correct SEQ)
+
+  Transfer parameters:
+    CHUNK_SIZE    = 4096 bytes (configurable, negotiated in ota_update handshake)
+    MAX_RETRIES   = 3 per chunk
+    TRANSFER_TIMEOUT = 5 seconds per chunk (if no ACK received within 5s,
+                     Jetson retransmits)
+    FLOW_CONTROL  = Stop-and-wait (Jetson sends chunk, waits for ACK, sends next)
+
+  Why stop-and-wait instead of sliding window:
+    - Serial is reliable at 115200 baud with RS-422 (bit error rate < 10^-9).
+    - Stop-and-wait is simpler to implement and debug in firmware.
+    - Throughput is limited by serial bandwidth, not protocol overhead.
+    - At 115200 baud with 4096-byte chunks: theoretical throughput ~11 KB/s,
+      actual throughput ~10 KB/s (accounting for framing and ACK).
+      1.5 MB firmware transfer time: ~150 seconds (2.5 minutes).
+      This is acceptable for a hot-swap scenario (done once, rarely).
+
+------------------------------------------------------------------------------
+8.2 OTA State Machine
+------------------------------------------------------------------------------
+
+  OTA_IDLE:
+    Normal operation. Receives ota_update command → transition to OTA_BEGIN.
+
+  OTA_BEGIN:
+    - Receive ota_update handshake with version, sha256, size.
+    - Validate: size <= partition size (4MB), sha256 is valid hex (64 chars).
+    - Call esp_ota_begin() to get OTA handle and erase new partition.
+    - Send ota_ready ACK to Jetson.
+    - Transition to OTA_RECEIVING.
+
+  OTA_RECEIVING:
+    - Receive binary chunks via binary OTA protocol.
+    - For each chunk: validate CRC, write to OTA partition via esp_ota_write().
+    - Send ACK/NACK for each chunk.
+    - Track progress: chunks_received / total_chunks.
+    - If 3 consecutive NACKs on same chunk → abort, send ota_failed.
+    - If all chunks received successfully → transition to OTA_VERIFYING.
+    - If any non-CRC error (flash write failure) → abort, send ota_failed.
+
+  OTA_VERIFYING:
+    - Compute SHA-256 of the entire written partition using mbedtls_sha256.
+    - Compare with expected SHA-256 from ota_update handshake.
+    - If match → transition to OTA_APPLYING.
+    - If mismatch → send ota_failed, rollback to current partition.
+
+  OTA_APPLYING:
+    - Call esp_ota_set_boot_partition() to set new partition as boot target.
+    - Send ota_complete to Jetson with {"version":"2.2.0","sha256":"..."}.
+    - Save deferred NVS writes (runtime state, counters).
+    - Call esp_restart().
+
+  OTA_FAILED:
+    - Current partition remains boot target (no change).
+    - Send ota_failed to Jetson with error reason.
+    - Transition to OTA_IDLE.
+    - Node continues operating on current firmware.
+
+  ANTI-ROLLBACK:
+    ESP-IDF supports anti-rollback via eFuse key burning. VesselNode uses
+    a simple software versioning scheme instead (to preserve eFuse寿命):
+    - Each firmware image embeds a monotonic version number.
+    - On boot: if current firmware version < last known version in NVS,
+      the bootloader logs a warning but still boots (allows intentional
+      downgrade for debugging). In production, the Jetson never pushes a
+      downgrade.
+    - ESP-IDF's built-in anti-rollback can be enabled via menuconfig if
+      regulatory requirements demand it (eFuse key must be pre-burned).
+
+------------------------------------------------------------------------------
+8.3 OTA During Active Role Operation
+------------------------------------------------------------------------------
+
+The OTA handler task runs at priority 19, which is below the watchdog (24)
+and serial RX (23) tasks. This ensures that:
+
+  1. Serial communication with Jetson is never starved during OTA.
+  2. The watchdog continues to be kicked during OTA.
+  3. Role-specific tasks continue operating during OTA.
+
+For safety-critical roles (autopilot), the OTA handler adds an extra guard:
+
+  - If the autopilot is ENGAGED: reject ota_update command with error
+    "CANNOT_OTA_WHILE_ENGAGED". The operator must disengage before updating.
+  - If the autopilot is in STANDBY: OTA is allowed. The PID task continues
+    running (monitoring heading, just not commanding rudder) during OTA.
+
+For non-safety roles (lighting, environmental sensor), OTA is always allowed.
+
+
+================================================================================
+9. MODULE SYSTEM AND ROLE-SPECIFIC CODE ORGANIZATION
+================================================================================
+
+------------------------------------------------------------------------------
+9.1 Role Interface Contract
+------------------------------------------------------------------------------
+
+Every role module is an ESP-IDF component that exports a single symbol:
+
+  extern const role_interface_t ROLE_MODULE;
+
+The role_interface_t struct (defined in vessel_node.h) requires these functions:
+
+  esp_err_t (*init)(const nvs_settings_t *settings);
+    Called once after provisioning (or on boot if already provisioned).
+    Loads role-specific settings from the settings struct, initializes
+    hardware peripherals, and prepares for operation.
+    Returns ESP_OK on success, ESP_FAIL on hardware init failure.
+
+  esp_err_t (*register_commands)(protocol_handler_t *handler);
+    Registers role-specific commands with the protocol handler.
+    The role module calls protocol_register_command() for each command
+    it handles, providing a handler function pointer.
+    Example:
+      protocol_register_command(handler, "set_heading", cmd_set_heading, self);
+      protocol_register_command(handler, "engage", cmd_engage, self);
+      protocol_register_command(handler, "set_pid_gains", cmd_set_pid_gains, self);
+
+  esp_err_t (*register_tasks)(void);
+    Creates all role-specific FreeRTOS tasks.
+    Tasks are created once and never destroyed (static task model).
+    Each task must register with the watchdog via watchdog_register_task().
+
+  esp_err_t (*on_jetson_connected)(void);
+    Called when the Jetson link is established (first heartbeat received).
+    The role module may use this to synchronize state, send initial telemetry,
+    or enter a Jetson-coordinated mode.
+
+  esp_err_t (*on_jetson_lost)(void);
+    Called when the Jetson heartbeat timeout expires (2 seconds).
+    The role module must ensure continued safe operation without Jetson input.
+    For autopilot: continue current heading, accept button input only.
+    For lighting: no change (lights are lights).
+
+  esp_err_t (*on_shutdown)(void);
+    Called when a graceful shutdown is requested (shutdown command from Jetson
+    or deep sleep entry). The role module must save any deferred NVS settings,
+    de-energize outputs safely, and return ESP_OK.
+
+  esp_err_t (*get_status)(cJSON *status_obj);
+    Appends role-specific status data to the provided cJSON object.
+    Called by the get_status command handler.
+
+  esp_err_t (*factory_reset)(void);
+    Erases all role-specific NVS settings and resets to factory defaults.
+    Does NOT erase identity (node_id, role) — only calibration and config.
+
+------------------------------------------------------------------------------
+9.2 Role Module Example: Autopilot
+------------------------------------------------------------------------------
+
+  // role_autopilot.c
+  #include "role_autopilot.h"
+  #include "vessel_node.h"
+
+  static struct {
+      float target_heading;
+      float current_heading;
+      bool engaged;
+      autopilot_mode_t mode;
+      pid_params_t pid_gains;
+      // ... other state
+  } ap_state;
+
+  static esp_err_t ap_init(const nvs_settings_t *settings) {
+      // Load settings from NVS blob
+      memcpy(&ap_state.pid_gains, &settings->ap_pid_gains, sizeof(pid_params_t));
+      ap_state.rudder_center = settings->ap_rudder_center;
+      // Initialize hardware: I2C compass, ADC rudder feedback, GPIO relays
+      compass_init(settings);
+      rudder_init(settings);
+      relay_init();
+      return ESP_OK;
+  }
+
+  static esp_err_t ap_register_commands(protocol_handler_t *handler) {
+      protocol_register_command(handler, "set_heading", cmd_set_heading, NULL);
+      protocol_register_command(handler, "engage", cmd_engage, NULL);
+      protocol_register_command(handler, "standby", cmd_standby, NULL);
+      protocol_register_command(handler, "set_pid_gains", cmd_set_pid_gains, NULL);
+      protocol_register_command(handler, "set_mode", cmd_set_mode, NULL);
+      protocol_register_command(handler, "calibrate", cmd_calibrate, NULL);
+      protocol_register_command(handler, "set_profile", cmd_set_profile, NULL);
+      return ESP_OK;
+  }
+
+  static esp_err_t ap_register_tasks(void) {
+      xTaskCreatePinnedToCore(task_pid_control, "pid", 2048, NULL, 25, NULL, 1);
+      xTaskCreatePinnedToCore(task_compass_reader, "compass", 2048, NULL, 18, NULL, 0);
+      xTaskCreatePinnedToCore(task_rudder_feedback, "rudder", 1024, NULL, 18, NULL, 0);
+      xTaskCreatePinnedToCore(task_nmea_parser, "nmea", 4096, NULL, 20, NULL, 0);
+      xTaskCreatePinnedToCore(task_gps_reader, "gps", 2048, NULL, 17, NULL, 0);
+      // Register all tasks with watchdog
+      watchdog_register_task("pid", &g_pid_heartbeat, 50);
+      watchdog_register_task("compass", &g_compass_heartbeat, 500);
+      watchdog_register_task("rudder", &g_rudder_heartbeat, 200);
+      watchdog_register_task("nmea", &g_nmea_heartbeat, 1000);
+      return ESP_OK;
+  }
+
+  // ... (other interface functions)
+
+  const role_interface_t ROLE_MODULE = {
+      .init = ap_init,
+      .register_commands = ap_register_commands,
+      .register_tasks = ap_register_tasks,
+      .on_jetson_connected = ap_on_jetson_connected,
+      .on_jetson_lost = ap_on_jetson_lost,
+      .on_shutdown = ap_on_shutdown,
+      .get_status = ap_get_status,
+      .factory_reset = ap_factory_reset,
+  };
+
+------------------------------------------------------------------------------
+9.3 CMake Integration
+------------------------------------------------------------------------------
+
+Each role component's CMakeLists.txt is minimal:
+
+  # components/role_autopilot/CMakeLists.txt
+  idf_component_register(
+      SRCS "role_autopilot.c" "pid_control.c" "compass.c"
+           "rudder.c" "nmea_parser.c"
+      INCLUDE_DIRS "include"
+      REQUIRES vessel_core cJSON driver
+  )
+
+The REQUIRES line ensures this component links against vessel_core (which
+provides the role_interface_t definition and all common subsystem APIs).
+
+In the top-level CMakeLists.txt, only ONE role component is included:
+
+  # Select role via build flag
+  set(ROLE ${DEFAULT_ROLE})  # Default: "autopilot"
+
+  if("${ROLE}" STREQUAL "autopilot")
+      list(APPEND EXTRA_COMPONENT_DIRS "components/role_autopilot")
+  elseif("${ROLE}" STREQUAL "lighting")
+      list(APPEND EXTRA_COMPONENT_DIRS "components/role_lighting")
+  # ... (all 8 roles)
+  endif()
+
+
+================================================================================
+10. COMPLETE DATA STRUCTURES AND API REFERENCE
+================================================================================
+
+------------------------------------------------------------------------------
+10.1 Core Data Structures
+------------------------------------------------------------------------------
+
+  // vessel_node.h
+
+  typedef struct {
+      uint8_t mac_addr[6];
+      char    mac_str[18];
+      char    node_id[24];
+      bool    has_external_eeprom;
+      char    eeprom_serial[16];
+      char    board_revision[8];
+  } node_identity_t;
+
+  typedef struct {
+      uint32_t msg_id;
+      uint64_t timestamp_ms;
+      char     cmd[32];
+      cJSON   *params;
+  } vessel_message_t;
+
+  typedef struct {
+      vessel_role_t role;
+      uint32_t      settings_version;
+      bool          provisioned;
+      // Role-specific settings (union or blob)
+      uint8_t       role_settings_blob[2048];
+      size_t        role_settings_size;
+  } nvs_settings_t;
+
+  typedef enum {
+      LINK_STATE_DISCONNECTED,
+      LINK_STATE_PROVISIONING,
+      LINK_STATE_CONNECTED,
+      LINK_STATE_LOST
+  } link_state_t;
+
+  typedef enum {
+      NODE_STATE_BOOT,
+      NODE_STATE_PROVISIONING,
+      NODE_STATE_STANDBY,
+      NODE_STATE_ACTIVE,
+      NODE_STATE_ALARM,
+      NODE_STATE_OTA,
+      NODE_STATE_SHUTDOWN
+  } node_state_t;
+
+  typedef struct {
+      node_state_t state;
+      link_state_t link;
+      float        supply_voltage;
+      float        esp32_temperature;
+      uint32_t     heap_free;
+      uint32_t     heap_min_ever;
+      uint32_t     uptime_seconds;
+      uint32_t     total_resets;
+      char         last_reset_reason[32];
+      uint32_t     msg_rx_count;
+      uint32_t     msg_tx_count;
+      uint32_t     crc_error_count;
+      alarm_t      active_alarms[4];  // Max 4 concurrent alarms
+      uint8_t      alarm_count;
+  } system_status_t;
+
+  typedef enum {
+      ALARM_NONE = 0,
+      ALARM_PID_DEADLINE_MISSED,
+      ALARM_COMPASS_FAIL,
+      ALARM_LINK_LOST,
+      ALARM_UNDERVOLTAGE,
+      ALARM_OVERVOLTAGE,
+      ALARM_OVERCURRENT,
+      ALARM_TEMPERATURE,
+      ALARM_WATCHDOG_RESET,
+      ALARM_ROLE_SPECIFIC_BASE = 100  // Role modules start alarm IDs here
+  } alarm_id_t;
+
+  typedef struct {
+      alarm_id_t   id;
+      uint8_t      severity;  // 0=info, 1=warning, 2=critical
+      uint64_t     timestamp_ms;
+      char         description[64];
+      bool         acknowledged;
+  } alarm_t;
+
+  // Serial bridge configuration
+  typedef struct {
+      int      uart_num;         // UART port number (typically 2)
+      int      baud_rate;        // 115200 default
+      int      data_bits;        // 8
+      int      stop_bits;        // 1
+      int      parity;           // 0=none, 1=odd, 2=even
+      int      rx_buffer_size;   // 1024
+      int      tx_buffer_size;   // 1024
+      int      heartbeat_timeout_ms;  // 2000
+  } serial_config_t;
+
+  // OTA state
+  typedef enum {
+      OTA_STATE_IDLE,
+      OTA_STATE_BEGIN,
+      OTA_STATE_RECEIVING,
+      OTA_STATE_VERIFYING,
+      OTA_STATE_APPLYING,
+      OTA_STATE_COMPLETE,
+      OTA_STATE_FAILED
+  } ota_state_t;
+
+  typedef struct {
+      ota_state_t state;
+      uint32_t    total_size;
+      uint32_t    bytes_received;
+      uint32_t    chunks_received;
+      uint32_t    chunks_total;
+      uint32_t    retries;
+      char        target_version[16];
+      char        target_sha256[65];
+  } ota_status_t;
+
+------------------------------------------------------------------------------
+10.2 Public API Summary
+------------------------------------------------------------------------------
+
+  // --- Identity ---
+  esp_err_t identity_init(void);
+  const node_identity_t *identity_get(void);
+  const char *identity_get_node_id(void);
+  void identity_get_mac_str(char *buf, size_t len);
+
+  // --- Serial Bridge ---
+  esp_err_t serial_bridge_init(const serial_config_t *config);
+  esp_err_t serial_bridge_send(const cJSON *msg);
+  void serial_bridge_send_text(const char *text);  // Raw text (for debug)
+  bool serial_bridge_is_link_up(void);
+  uint32_t serial_bridge_get_link_uptime_ms(void);
+  esp_err_t serial_bridge_set_heartbeat_callback(void (*cb)(bool up));
+
+  // --- Protocol Handler ---
+  esp_err_t protocol_init(void);
+  esp_err_t protocol_register_command(const char *cmd_name,
+                                      esp_err_t (*handler)(const cJSON *params,
+                                                           cJSON *response,
+                                                           void *ctx),
+                                      void *context);
+  esp_err_t protocol_send_response(const cJSON *original_msg,
+                                    const char *cmd,
+                                    const cJSON *params);
+  esp_err_t protocol_send_error(const cJSON *original_msg,
+                                 const char *error_code,
+                                 const char *error_msg);
+  esp_err_t protocol_send_telemetry(const char *category, const cJSON *data);
+
+  // --- NVS Settings ---
+  esp_err_t nvs_settings_init(void);
+  esp_err_t nvs_settings_get_blob(const char *key, void *buf, size_t *len);
+  esp_err_t nvs_settings_set_blob(const char *key, const void *buf, size_t len);
+  esp_err_t nvs_settings_get_u32(const char *key, uint32_t *value);
+  esp_err_t nvs_settings_set_u32(const char *key, uint32_t value);
+  esp_err_t nvs_settings_get_str(const char *key, char *buf, size_t len);
+  esp_err_t nvs_settings_set_str(const char *key, const char *value);
+  esp_err_t nvs_settings_get_float(const char *key, float *value);
+  esp_err_t nvs_settings_set_float(const char *key, float value);
+  uint32_t nvs_settings_get_version(void);
+  esp_err_t nvs_settings_set_version(uint32_t version);
+  esp_err_t nvs_settings_commit_deferred(void);  // Write deferred settings
+  esp_err_t nvs_settings_erase_all(void);         // Factory reset
+
+  // --- Watchdog ---
+  esp_err_t watchdog_init(void);
+  esp_err_t watchdog_register_task(const char *name,
+                                    volatile uint32_t *heartbeat_ts,
+                                    uint32_t timeout_ms);
+  void watchdog_task_heartbeat(const char *task_name);
+  void watchdog_kick_external(void);
+  bool watchdog_is_system_healthy(void);
+  const system_status_t *watchdog_get_system_status(void);
+
+  // --- Alarm ---
+  esp_err_t alarm_init(void);
+  esp_err_t alarm_trigger(alarm_id_t id, uint8_t severity,
+                           const char *description);
+  esp_err_t alarm_clear(alarm_id_t id);
+  esp_err_t alarm_acknowledge(alarm_id_t id);
+  const alarm_t *alarm_get_active(uint8_t index);
+
+  // --- OTA ---
+  esp_err_t ota_init(void);
+  esp_err_t ota_begin(uint32_t size, const char *version,
+                       const char *sha256);
+  esp_err_t ota_write_chunk(uint32_t offset, const uint8_t *data,
+                             uint16_t len);
+  esp_err_t ota_verify(void);
+  esp_err_t ota_apply_and_reboot(void);
+  esp_err_t ota_cancel(void);
+  const ota_status_t *ota_get_status(void);
+
+  // --- Role Module (called by main.c) ---
+  esp_err_t role_init(const nvs_settings_t *settings);
+  esp_err_t role_register_commands(void);
+  esp_err_t role_register_tasks(void);
+  esp_err_t role_on_jetson_connected(void);
+  esp_err_t role_on_jetson_lost(void);
+  esp_err_t role_on_shutdown(void);
+  esp_err_t role_get_status(cJSON *obj);
+  esp_err_t role_factory_reset(void);
+
+------------------------------------------------------------------------------
+10.3 app_main() Entry Point
+------------------------------------------------------------------------------
+
+  // main.c
+  #include "vessel_node.h"
+
+  void app_main(void) {
+      // Phase 1: Hardware initialization
+      ESP_LOGI("VESSEL", "VesselNode v%s booting on %s",
+               VESSEL_FW_VERSION, CONFIG_IDF_TARGET);
+
+      // Phase 2: NVS flash init
+      ESP_ERROR_CHECK(nvs_flash_init());
+
+      // Phase 3: Identity read
+      ESP_ERROR_CHECK(identity_init());
+      ESP_LOGI("VESSEL", "Node: %s (MAC: %s)", identity_get_node_id(),
+               identity_get()->mac_str);
+
+      // Phase 4: Settings load
+      ESP_ERROR_CHECK(nvs_settings_init());
+
+      // Phase 5: Provisioning check
+      if (!nvs_settings_is_provisioned()) {
+          ESP_LOGW("VESSEL", "Node not provisioned, entering provisioning mode");
+          provisioning_start();  // Blocks until provisioned or timeout
+      }
+
+      // Phase 6: Common subsystem init
+      serial_config_t serial_cfg = {
+          .uart_num = CONFIG_JETSON_UART_NUM,
+          .baud_rate = nvs_settings_get_u32("serial_baud") ?: 115200,
+          .heartbeat_timeout_ms = 2000,
+          // ... defaults ...
+      };
+      ESP_ERROR_CHECK(serial_bridge_init(&serial_cfg));
+      ESP_ERROR_CHECK(protocol_init());
+      ESP_ERROR_CHECK(watchdog_init());
+      ESP_ERROR_CHECK(alarm_init());
+      ESP_ERROR_CHECK(ota_init());
+
+      // Phase 7: Role module init
+      nvs_settings_t settings;
+      nvs_settings_load_all(&settings);
+      ESP_ERROR_CHECK(role_init(&settings));
+      role_register_commands();
+      role_register_tasks();
+
+      // Phase 8: Common tasks
+      xTaskCreate(task_serial_jetson_rx, "serial_rx", 4096, NULL, 23, NULL);
+      xTaskCreate(task_serial_jetson_tx, "serial_tx", 2048, NULL, 22, NULL);
+      xTaskCreate(task_watchdog_heartbeat, "watchdog", 1024, NULL, 24, NULL);
+      xTaskCreate(task_protocol_dispatch, "protocol", 4096, NULL, 21, NULL);
+
+      ESP_LOGI("VESSEL", "All systems initialized. Role: %s",
+               identity_get_role_name());
+
+      // app_main returns → FreeRTOS scheduler takes over
+  }
+
+
+================================================================================
+11. BUILD SYSTEM AND FIRMWARE VAULT
+================================================================================
+
+------------------------------------------------------------------------------
+11.1 Build Targets
+------------------------------------------------------------------------------
+
+  # Build all roles (for CI/firmware vault generation)
+  for role in autopilot lighting_controller engine_monitor deck_equipment \
+             camera_interface environmental_sensor bilge_monitor navigation_aid; do
+      idf.py -DROLE=$role build
+      cp build/vessel_node_fw.bin /opt/vessel/firmware_vault/${role}/vessel_${role}_v${VERSION}.bin
+      sha256sum build/vessel_node_fw.bin > /opt/vessel/firmware_vault/${role}/vessel_${role}_v${VERSION}.bin.sha256
+  done
+
+  # Build single role for development
+  idf.py -DROLE=autopilot -p /dev/ttyUSB0 flash monitor
+
+  # Build with different flash sizes
+  idf.py -DROLE=autopilot -DCONFIG_ESPTOOLPY_FLASHSIZE_8MB=y build
+
+------------------------------------------------------------------------------
+11.2 CI/CD Pipeline (Conceptual)
+------------------------------------------------------------------------------
+
+  1. Developer pushes commit to GitLab.
+  2. GitLab CI runs on a build server with ESP-IDF v5.2 installed.
+  3. Build matrix: 8 roles × 2 flash configs (8MB, 16MB) = 16 binaries.
+  4. Each binary is: compiled, size-analyzed, unit-tested (Unity framework),
+     and static-analyzed (cppcheck).
+  5. Binaries that pass all checks are pushed to the firmware vault on the
+     Jetson (via rsync over SSH).
+  6. A manifest.json is updated with version numbers and SHA-256 hashes.
+  7. The provisioning server on the Jetson automatically picks up new
+     binaries and uses them for future provisioning of new nodes.
+
+------------------------------------------------------------------------------
+11.3 Firmware Binary Size Budget
+------------------------------------------------------------------------------
+
+  Target: Fit all roles in 4MB flash partition (OTA_0 slot).
+  Current estimated sizes (ESP-IDF v5.2, -O2 optimization):
+
+  Component              | Size (KB) | Notes
+  -----------------------|-----------|------------------------------------------
+  ESP-IDF bootloader     |    20     | Fixed overhead
+  ESP-IDF framework      |   180     | WiFi/BT stripped (not used)
+  VesselNode core        |    65     | Identity, serial, protocol, NVS, watchdog
+  cJSON library          |     8     | Single-file library
+  Role: Autopilot        |    55     | PID, compass, rudder, NMEA parser
+  Role: Lighting         |    20     | Simple GPIO/PWM control
+  Role: Engine Monitor   |    30     | ADC, frequency counter, alarms
+  Role: Bilge Monitor    |    15     | ADC, pump control
+  Role: Environmental    |    25     | I2C sensors, data logging
+  Role: Deck Equipment   |    25     | ADC, digital I/O, overload detection
+  Role: Camera Interface |    20     | UART to camera, PTZ protocol
+  Role: Navigation Aid   |    20     | GPIO, pattern controller
+  Reserved/OTA metadata  |    32     | Partition table, OTA selection
+  -----------------------|-----------|----------
+  TOTAL (max role)       |   458 KB  | Well within 4MB partition
+
+  Flash utilization: ~11% for the largest role. Plenty of headroom for future
+  features. The remaining flash space could be used for:
+  - OTA rollback storage (already handled by ESP-IDF partition table)
+  - Local data logging (wear-leaved SPIFFS/LittleFS partition)
+  - Firmware encryption (AES-256 flash encryption if required)
+
+
+================================================================================
+APPENDIX A: ROLE COMMAND MATRIX
+================================================================================
+
+  Command              | AP | LT | ENG | DECK | CAM | ENV | BLG | NAV
+  ---------------------|----|----|-----|------|-----|-----|-----|----
+  ping                 | X  | X  | X   | X    | X   | X   | X   | X
+  identify             | X  | X  | X   | X    | X   | X   | X   | X
+  get_status           | X  | X  | X   | X    | X   | X   | X   | X
+  get_config           | X  | X  | X   | X    | X   | X   | X   | X
+  set_config           | X  | X  | X   | X    | X   | X   | X   | X
+  ota_update           | X  | X  | X   | X    | X   | X   | X   | X
+  factory_reset        | X  | X  | X   | X    | X   | X   | X   | X
+  heartbeat            | X  | X  | X   | X    | X   | X   | X   | X
+  shutdown             | X  | X  | X   | X    | X   | X   | X   | X
+  subscribe            | X  | X  | X   | X    | X   | X   | X   | X
+  set_heading          | X  |    |     |      |     |     |     |
+  engage               | X  |    |     |      |     |     |     |
+  standby              | X  |    |     |      |     |     |     |
+  set_pid_gains        | X  |    |     |      |     |     |     |
+  set_mode             | X  |    |     |      |     |     |     |
+  calibrate            | X  |    |     |      |     |     |     |
+  set_profile          | X  |    |     |      |     |     |     |
+  set_channel          |    | X  |     |      |     |     |     |
+  set_scene            |    | X  |     |      |     |     |     |
+  get_channels         |    | X  |     |      |     |     |     |
+  get_readings         |    |    | X   |      |     | X   |     |
+  set_alarm_threshold  |    |    | X   |      |     |     |     |
+  clear_alarm          |    |    | X   |      |     |     |     |
+  get_equipment_status |    |    |     | X    |     |     |     |
+  command_equipment    |    |    |     | X    |     |     |     |
+  set_ptz              |    |    |     |      | X   |     |     |
+  capture_image        |    |    |     |      | X   |     |     |
+  start_stream         |    |    |     |      | X   |     |     |
+  stop_stream          |    |    |     |      | X   |     |     |
+  set_sampling_rate    |    |    |     |      |     | X   |     |
+  get_level            |    |    |     |      |     |     | X   |
+  set_pump_mode        |    |    |     |      |     |     | X   |
+  test_pump            |    |    |     |      |     |     | X   |
+  set_light_mode       |    |    |     |      |     |     |     | X
+  get_ais_data         |    |    |     |      |     |     |     | X
+  set_pattern          |    |    |     |      |     |     |     | X
+
+  AP  = Autopilot               ENG = Engine Monitor         BLG = Bilge Monitor
+  LT  = Lighting Controller     DECK = Deck Equipment        NAV = Navigation Aid
+       Camera Interface (CAM)        Environmental Sensor (ENV)
+
+
+================================================================================
+APPENDIX B: CRC-16/CCITT-FALSE IMPLEMENTATION
+================================================================================
+
+  // crc16_ccitt.h
+  #ifndef CRC16_CCITT_H
+  #define CRC16_CCITT_H
+
+  #include <stdint.h>
+  #include <stddef.h>
+
+  /**
+   * Compute CRC-16/CCITT-FALSE over a byte buffer.
+   * Polynomial: 0x1021, Init: 0x0000, no reflection, no XOR-out.
+   *
+   * @param data   Pointer to input data.
+   * @param len    Length of input data in bytes.
+   * @return       16-bit CRC value.
+   */
+  uint16_t crc16_ccitt(const uint8_t *data, size_t len);
+
+  /**
+   * Format CRC as 4-character uppercase hex string (null-terminated).
+   * Output buffer must be at least 5 bytes.
+   */
+  void crc16_format(uint16_t crc, char *buf);
+
+  /**
+   * Parse 4-character hex string to CRC value.
+   * Returns 0xFFFF on parse error.
+   */
+  uint16_t crc16_parse(const char *hex4);
+
+  #endif
+
+  // crc16_ccitt.c
+  #include "crc16_ccitt.h"
+
+  uint16_t crc16_ccitt(const uint8_t *data, size_t len) {
+      uint16_t crc = 0x0000;
+      for (size_t i = 0; i < len; i++) {
+          crc ^= (uint16_t)data[i] << 8;
+          for (int j = 0; j < 8; j++) {
+              if (crc & 0x8000)
+                  crc = (crc << 1) ^ 0x1021;
+              else
+                  crc <<= 1;
+          }
+      }
+      return crc;
+  }
+
+  void crc16_format(uint16_t crc, char *buf) {
+      const char hex[] = "0123456789ABCDEF";
+      buf[0] = hex[(crc >> 12) & 0xF];
+      buf[1] = hex[(crc >>  8) & 0xF];
+      buf[2] = hex[(crc >>  4) & 0xF];
+      buf[3] = hex[(crc >>  0) & 0xF];
+      buf[4] = '\0';
+  }
+
+  // Table-driven optimized version (optional, ~4x faster):
+  // Pre-computed CRC table for polynomial 0x1021:
+  // static const uint16_t crc16_table[256] = { ... };
+  // uint16_t crc16_ccitt_fast(const uint8_t *data, size_t len) {
+  //     uint16_t crc = 0x0000;
+  //     while (len--) crc = (crc << 8) ^ crc16_table[(crc >> 8) ^ *data++];
+  //     return crc;
+  // }
+
+  NOTE: For the 115200 baud serial link, a 250-byte JSON message takes ~22ms
+  to transmit. Computing CRC-16 in a simple loop over 250 bytes takes ~20µs
+  on ESP32-S3 at 240 MHz. This is negligible compared to transmission time,
+  so the simple implementation is preferred over the table-driven version
+  (saves 512 bytes of flash for the lookup table).
+
+
+================================================================================
+APPENDIX C: NVS KEY REGISTRY (COMPLETE)
+================================================================================
+
+  Namespace: "identity"
+  Key              | Type   | Size     | Write Timing
+  -----------------|--------|----------|------------------
+  node_id          | string | 23 bytes | Immediate (provision)
+  role             | u8     | 1 byte   | Immediate (provision)
+  mac_addr         | blob   | 6 bytes  | Immediate (first boot)
+  board_revision   | string | 7 bytes  | Immediate (first boot)
+  fw_version       | string | 15 bytes | Immediate (OTA complete)
+  provisioned      | u8     | 1 byte   | Immediate (provision)
+  serial_baud      | u32    | 4 bytes  | Immediate (provision)
+  serial_uart      | u8     | 1 byte   | Immediate (provision)
+  settings_version | u32    | 4 bytes  | Immediate (set_config)
+  last_shutdown_rsn| u8     | 1 byte   | Deferred (shutdown)
+  uptime_shutdown  | u32    | 4 bytes  | Deferred (shutdown)
+
+  Namespace: "settings" (Autopilot prefix "ap_")
+  Key                   | Type   | Size      | Write Timing
+  ----------------------|--------|-----------|------------------
+  ap_rudder_center      | f32    | 4 bytes   | Immediate (calibrate)
+  ap_rudder_min_deg     | f32    | 4 bytes   | Immediate (calibrate)
+  ap_rudder_max_deg     | f32    | 4 bytes   | Immediate (calibrate)
+  ap_counter_rudder_gain| f32    | 4 bytes   | Immediate (set_config)
+  ap_yaw_damping        | f32    | 4 bytes   | Immediate (set_config)
+  ap_pid_kp             | f32    | 4 bytes   | Immediate (set_config)
+  ap_pid_ki             | f32    | 4 bytes   | Immediate (set_config)
+  ap_pid_kd             | f32    | 4 bytes   | Immediate (set_config)
+  ap_pid_dd             | f32    | 4 bytes   | Immediate (set_config)
+  ap_pid_pr             | f32    | 4 bytes   | Immediate (set_config)
+  ap_pid_ff             | f32    | 4 bytes   | Immediate (set_config)
+  ap_heading_offset     | f32    | 4 bytes   | Immediate (calibrate)
+  ap_compass_cal        | blob   | 100 bytes | Immediate (calibrate)
+  ap_profile_calm       | blob   | 24 bytes  | Immediate (set_config)
+  ap_profile_rough      | blob   | 24 bytes  | Immediate (set_config)
+  ap_profile_light      | blob   | 24 bytes  | Immediate (set_config)
+  ap_active_profile     | u8     | 1 byte    | Immediate (set_profile)
+
+  Namespace: "settings" (Engine Monitor prefix "eng_")
+  Key                   | Type   | Size      | Write Timing
+  ----------------------|--------|-----------|------------------
+  eng_alarm_temp_warn   | f32    | 4 bytes   | Immediate (set_config)
+  eng_alarm_temp_crit   | f32    | 4 bytes   | Immediate (set_config)
+  eng_alarm_oil_low     | f32    | 4 bytes   | Immediate (set_config)
+  eng_alarm_rpm_high    | u16    | 2 bytes   | Immediate (set_config)
+  eng_sensor_offsets    | blob   | 64 bytes  | Immediate (calibrate)
+
+  Namespace: "settings" (Bilge Monitor prefix "blg_")
+  Key                   | Type   | Size      | Write Timing
+  ----------------------|--------|-----------|------------------
+  blg_pump_auto_thresh  | u16    | 2 bytes   | Immediate (set_config)
+  blg_pump_off_thresh   | u16    | 2 bytes   | Immediate (set_config)
+  blg_alarm_level       | u16    | 2 bytes   | Immediate (set_config)
+  blg_pump_cycle_count  | u32    | 4 bytes   | Deferred (shutdown)
+
+  Namespace: "settings" (Lighting Controller prefix "lt_")
+  Key                   | Type   | Size      | Write Timing
+  ----------------------|--------|-----------|------------------
+  lt_channel_states     | blob   | 64 bytes  | Immediate (set_channel)
+  lt_scene_presets      | blob   | 512 bytes | Immediate (set_scene)
+  lt_default_scene      | u8     | 1 byte    | Immediate (set_config)
+  lt_brightness_default | u8     | 1 byte    | Immediate (set_config)
+
+  Total NVS usage estimate (worst case, all roles):
+  Identity namespace:     ~100 bytes
+  Settings namespace:     ~1200 bytes (largest role: lighting with scenes)
+  Backup namespace:       ~1200 bytes (mirror of settings)
+  NVS metadata/overhead:  ~2000 bytes
+  Total:                  ~4500 bytes out of 24KB NVS partition (19% utilized)
+  Remaining: ~19500 bytes for future settings expansion.
+
+
+================================================================================
+APPENDIX D: PROVISIONING STATE MACHINE (FORMAL DEFINITION)
+================================================================================
+
+  States:
+    S0: BOOT          — Entry state on power-up
+    S1: CHECK_NVS     — Check if node is provisioned
+    S2: ANNOUNCE      — Send announce message on serial
+    S3: WAIT_PROVISION— Wait for Jetson response
+    S4: OTA_UPDATE    — Receive firmware binary
+    S5: PROVISIONED   — Write settings to NVS
+    S6: CONNECTED     — Normal operation
+    S7: STANDALONE    — Operation without Jetson
+    S8: ERROR         — Fatal error (blink LED, wait)
+
+  Transitions:
+    S0 → S1: Always (immediate)
+
+    S1 → S6: provisioned == true AND role != UNKNOWN
+             (node was previously provisioned)
+
+    S1 → S2: provisioned == false OR role == UNKNOWN
+             (node needs provisioning)
+
+    S2 → S3: announce sent successfully
+             (start 30-second timeout timer)
+
+    S3 → S5: received provision_existing or provision_new from Jetson
+
+    S3 → S7: 30-second timeout expired
+             (enter standalone with last-known config if available)
+
+    S3 → S8: serial error (hardware fault)
+
+    S4 → S5: OTA complete and verified
+             (received after S3 → S5 for provision_new with needs_ota=true)
+
+    S4 → S8: OTA failed after max retries
+
+    S5 → S0: Write settings to NVS, reboot
+             (system reset to load new role)
+
+    S6 → S3: Jetson sends re-provision command (role change)
+             OR Jetson sends ota_update (firmware upgrade)
+
+    S6 → S7: heartbeat timeout (2 seconds)
+
+    S7 → S6: heartbeat received from Jetson
+             (call role_module.on_jetson_connected())
+
+    S7 → S3: serial link detected (Jetson powered on)
+             (resend announce to trigger provisioning recovery)
+
+    S8 → S0: watchdog reset (external MAX6818 forces reset)
+
+  NOTE: The provisioning state machine is intentionally simple. Complex
+  multi-step provisioning protocols fail in noisy marine environments. The
+  entire protocol is: announce → receive response → write NVS → reboot.
+  If any step fails, the node enters standalone mode and retries on reboot.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+  Document ID:   ESDD-VN-001
+  Word Count:    ~6800 words
+  Revision:      1.0
+  Status:        COMPLETE — Ready for implementation planning
+  Next Steps:    1. Implement vessel_core component (identity, serial, protocol)
+                2. Implement role_autopilot component (port from existing design)
+                3. Implement Jetson provisioning server (Python)
+                4. Build and test OTA pipeline
+                5. Environmental testing (salt spray, vibration, EMI)
+                6. Long-duration burn-in test (30-day continuous operation)
+================================================================================

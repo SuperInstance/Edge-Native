@@ -1,0 +1,1520 @@
+================================================================================
+           VESSEL PLATFORM NODE — MARINE CALIBRATION & ONBOARDING
+                     TECHNICAL BRIEF (AGENT D DELIVERABLE)
+================================================================================
+
+ Document:    VP-TB-013 — Dockside Setup, Calibration & Commissioning
+ Revision:    1.0
+ Classification: Internal Engineering — Captain-Accessible Summary
+ Platform:    ESP32 + BNO085 + AS5048A + Jetson Orin Nano
+ Standard:    Modeled on ComNav 2001 / Simrad AP44 professional procedures
+ Word Count:  ~4,200
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+ 1.  Executive Summary
+ 2.  System Architecture Overview
+ 3.  Dockside Setup Wizard — Complete Procedure
+     3.1  STEP 1 — Vessel Configuration
+     3.2  STEP 2 — Compass Calibration
+     3.3  STEP 3 — Rudder Calibration (3a/3b/3c)
+     3.4  STEP 4 — Yaw Damping Setup
+     3.5  STEP 5 — Response Speed Tuning
+     3.6  STEP 6 — System Verification (Circle Test)
+     3.7  STEP 7 — Alarm & Safety Tests
+     3.8  STEP 8 — Save & Finalize
+ 4.  Settings Persistence Architecture
+     4.1  NVS Key Layout
+     4.2  Settings Versioning Protocol
+     4.3  Jetson Shadow Copy & SQLite Schema
+     4.4  Restore Procedure
+ 5.  Re-Calibration Triggers & Maintenance Schedule
+ 6.  Multi-Node Setup (Non-Autopilot Roles)
+ 7.  Captain-Friendly Interface Design
+     7.1  OLED Menu & Button Navigation
+     7.2  Jetson Enhanced Display
+     7.3  Voice-Guided Setup
+     7.4  Resume-After-Power-Cycle
+ 8.  Error Handling & Fallback Behavior
+ 9.  Acceptance Criteria & Sign-Off
+ A.  Appendix A — Full NVS Memory Map
+ B.  Appendix B — Compass Deviation Table Format
+ C.  Appendix C — PID Gain Presets by Vessel Type
+ D.  Appendix D — Setup Wizard State Machine Diagram
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+This document defines the complete dockside commissioning procedure for the
+Vessel Platform Node autopilot system installed on commercial fishing vessels.
+The procedure is modeled directly on the professional onboarding workflows
+found in ComNav 2001 and Simrad AP44 autopilots — the industry standard for
+commercial marine autopilot commissioning.
+
+The system uses a dual-tier architecture:
+
+  TIER 1 — ESP32 Node (standalone): All calibration can be performed using
+           only the on-node 128x64 OLED display and four navigation buttons.
+           No laptop, no external display is required. This ensures the system
+           is fully commissionable in the field, on the dock, in any weather.
+
+  TIER 2 — Jetson Orin Nano (enhanced): When the Jetson companion computer is
+           connected, it detects unconfigured nodes via CAN bus, launches a
+           full graphical setup wizard on a connected HDMI display, and
+           provides real-time data graphs, compass deviation plots, rudder
+           response curves, and voice-guided prompts.
+
+All calibration data is stored in non-volatile storage (NVS) on the ESP32 and
+shadow-copied to a SQLite database on the Jetson. Settings are versioned and
+recoverable. Every calibration step is individually saveable, so a power cycle
+during commissioning does not lose progress.
+
+This brief is structured so that a marine electronics technician can follow it
+step-by-step on the dock, and a software engineer can implement it directly
+from the specifications provided.
+
+================================================================================
+2. SYSTEM ARCHITECTURE OVERVIEW
+================================================================================
+
+2.1 HARDWARE COMPONENTS
+-----------------------
+
+  Component          Part           Interface     Purpose
+  ──────────────────────────────────────────────────────────────────────
+  MCU                ESP32-S3       —             Main controller
+  IMU                BNO085         I2C (0x4A)    9-DOF heading sensor
+  Rudder Encoder     AS5048A        SPI (HSPI)    Absolute rudder angle
+  Display            SSD1306 128x64 I2C (0x3C)    Status & menu
+  Buttons            4x tactile     GPIO           NAV/SEL/AUTO/STBY
+  CAN Transceiver    MCP2551        SPI (VSPI)     Inter-node bus
+  Solenoid Driver    BTS443P        GPIO + MOSFET  Hydraulic valve control
+  Buzzer             Piezo          GPIO           Audio alarms
+  Kill Switch        Magnetic reed  GPIO           Emergency stop
+  Jetson Orin Nano   —              CAN + HDMI     Companion computer
+
+2.2 BOOT SEQUENCE ON FIRST POWER-ON
+------------------------------------
+
+  Time     Event
+  ─────────────────────────────────────────────────────────────────────────
+  0 ms     ESP32 powers on, NVS initialized
+  50 ms    Read NVS key "commissioned" — value is 0x00 (factory default)
+  100 ms   SSD1306 initialized, backlight on
+  150 ms   OLED displays:  "┌──────────────────┐"
+                              "│  VESSEL NODE v1.0  │"
+                              "│  S/N: VP-0042-A1   │"
+                              "│                    │"
+                              "│   SETUP REQUIRED   │"
+                              "│                    │"
+                              "│  Press any button  │"
+                              "└──────────────────┘"
+  200 ms   CAN bus initialized, broadcast NODE_ANNOUNCE (role=UNKNOWN)
+  500 ms   If Jetson present: Jetson receives NODE_ANNOUNCE, displays
+           "New autopilot node detected — Launch setup wizard? [Y/N]"
+  ...      System waits for button press or Jetson command
+
+If "commissioned" = 0x01, the ESP32 skips setup and enters normal operation,
+loading all parameters from NVS and broadcasting NODE_READY on CAN.
+
+================================================================================
+3. DOCKSIDE SETUP WIZARD — COMPLETE PROCEDURE
+================================================================================
+
+The setup wizard is a finite state machine with 8 primary states (Steps 1–8).
+Each state is individually persistent — the current step index is stored in
+NVS key "setup_current_step" and restored on power cycle.
+
+The wizard can be operated in three modes:
+  (a) Standalone — OLED + buttons only
+  (b) Enhanced  — Jetson HDMI display + mouse/touch
+  (c) Voice     — "Hey Helm, start compass calibration" (requires Jetson)
+
+All three modes are functionally equivalent; they are simply different
+presentations of the same state machine.
+
+--------------------------------------------------------------------------------
+3.1 STEP 1 — VESSEL CONFIGURATION
+--------------------------------------------------------------------------------
+
+Purpose: Establish the vessel's physical characteristics so the autopilot
+can select appropriate initial PID gains, rudder rate limits, and
+counter-rudder parameters.
+
+3.1.1 OLED Menu Flow
+```
+  ┌──────────────────────┐
+  │ STEP 1/8             │
+  │ VESSEL CONFIG        │
+  │ ──────────────────── │
+  │                      │
+  │ Vessel Type:         │
+  │  > Displacement      │
+  │    Planing           │
+  │    Semi-Displacement │
+  │    Sail              │
+  │                      │
+  │ [NAV] [SEL]          │
+  └──────────────────────┘
+```
+
+3.1.2 Parameters Collected
+
+  Parameter             Type     NVS Key              Range / Options
+  ──────────────────────────────────────────────────────────────────────────
+  Vessel Type           enum     vessel_type          0=disp, 1=plan, 2=semi, 3=sail
+  Vessel Length         uint16   vessel_length        15–300 feet
+  Vessel Displacement   uint16   vessel_displacement  1–2000 tons
+  Max Speed             uint8    max_speed            5–45 knots
+  Number of Engines     uint8    num_engines          1–4
+  Propulsion            enum     propulsion_type      0=single, 1=twin
+  Steering Type         enum     steering_type        0=hydraulic, 1=mechanical, 2=power-assist
+  Number of Rudders     uint8    num_rudders          1 or 2
+  Rudder Configuration  enum     rudder_config        0=single, 1=twin-outboard
+  Vessel Name           string   vessel_name          max 24 chars (UTF-8)
+  Captain Name          string   captain_name         max 24 chars (UTF-8)
+
+3.1.3 Gain Preset Selection
+
+Based on vessel type, the system selects initial PID gains from a lookup
+table (see Appendix C). These are starting values only — they will be
+refined during Steps 3–5.
+
+  Vessel Type         P        I        D        DD       PR       FF
+  ──────────────────────────────────────────────────────────────────────────
+  Displacement        1.2      0.05     0.8      0.1      0.3      0.15
+  Planing             2.5      0.08     1.2      0.2      0.5      0.25
+  Semi-Displacement   1.8      0.06     1.0      0.15     0.4      0.20
+  Sail                0.8      0.03     0.6      0.08     0.2      0.10
+
+These defaults are loaded into the working PID structure and will be saved
+to NVS at Step 8 (or when the captain explicitly saves at any step).
+
+--------------------------------------------------------------------------------
+3.2 STEP 2 — COMPASS CALIBRATION
+--------------------------------------------------------------------------------
+
+Purpose: Calibrate the BNO085 9-DOF IMU to compensate for hard iron and soft
+iron magnetic disturbances in the vessel's installation environment. This is
+the most critical calibration step — heading accuracy directly determines
+autopilot performance.
+
+3.2.1 Pre-Calibration Checks
+
+Before starting, the system performs:
+  - BNO085 self-test: reads calibration_status register, verifies
+    sys=1, gyro=1, accel=1, mag=3 (fully calibrated)
+  - If any sensor not calibrated: display warning
+    "IMU not ready. Move vessel away from large metal objects."
+  - Check for magnetic interference: read raw magnetometer, if magnitude
+    > 1200 uT or < 20 uT, warn "Strong magnetic interference detected.
+    Check for nearby steel, electronics, or power cables."
+
+3.2.2 Calibration Procedure — Dockside "Swing Ship"
+
+At the dock, the preferred method is to swing a handheld compass in a
+circle at the compass location, OR to rotate the vessel (if in a slip
+with enough room to turn). For vessels that cannot be turned, a handheld
+compass calibration is performed by walking the BNO085 (or a compass
+reference) in a full 360° circle around the helm station.
+
+OLED Display During Calibration:
+```
+  ┌──────────────────────┐
+  │ STEP 2/8             │
+  │ COMPASS CALIBRATION  │
+  │ ──────────────────── │
+  │                      │
+  │ Rotate vessel 360°   │
+  │ slowly (30 sec/min)  │
+  │                      │
+  │ Progress:            │
+  │ ████████░░░░  67%    │
+  │                      │
+  │ Points collected: 48 │
+  │ Confidence: 82%      │
+  │                      │
+  │ Coverage:            │
+  │ N:✓ E:✓ S:✓ W:✓     │
+  │ NE:✓ SE:✗ SW:✓ NW:✓ │
+  │                      │
+  └──────────────────────┘
+```
+
+3.2.3 BNO085 Calibration Data Collection
+
+The BNO085 provides a sensor fusion calibration output. We additionally
+collect raw magnetometer data at every heading to build our own deviation
+table.
+
+Algorithm:
+  (1) Set BNO085 to raw magnetometer mode (mode = 0x01)
+  (2) Sample at 50 Hz during rotation
+  (3) For each sample, store (timestamp, mag_x, mag_y, mag_z)
+  (4) After collecting >= 500 samples, switch back to fusion mode
+  (5) Perform hard iron correction: compute mean of mag vector, subtract
+      from all samples (this is the hard iron offset)
+  (6) Perform soft iron correction: fit an ellipsoid to the corrected
+      data points using least-squares, compute the transformation matrix
+      that maps the ellipsoid to a sphere
+  (7) Store the calibration blob: hard_iron_offset (3×float) +
+      soft_iron_matrix (3×3×float) = 48 bytes
+  (8) Apply calibration to all future heading readings
+
+3.2.4 Deviation Table Construction
+
+After calibration, the system builds a deviation table with 36 entries
+(one every 10°). For each 10° bin, the average residual between the
+calibrated compass heading and the expected heading is computed.
+
+Deviation table format (see Appendix B for full spec):
+  Offset  Field              Type     Description
+  ──────────────────────────────────────────────────────────────────────────
+  0x00    table_version      uint8    Currently 1
+  0x01    num_entries        uint8    36 (every 10°)
+  0x02    timestamp          uint32   Unix epoch of calibration
+  0x06    confidence_score   uint8    0–100%
+  0x07    entries[36]        int8×36  Deviation in degrees at each 10°
+  0x2F    —                         Total: 48 bytes (rounded from 44)
+
+Each entry is a signed int8 representing the compass deviation at that
+heading in tenths of a degree. Range: -12.8° to +12.7°.
+
+The deviation is applied in real-time:
+  true_heading = compass_heading + interpolate(deviation_table, compass_heading)
+
+Linear interpolation between the two nearest 10° entries provides smooth
+correction across all headings.
+
+3.2.5 Validation
+
+After calibration, the system prompts:
+  "Point vessel toward a known bearing. Enter expected heading: ___°"
+  "Current compass reading: XXX.X°"
+  "Deviation: ±X.X°"
+  "ACCURACY: ACCEPTABLE (±2°) / MARGINAL (±5°) / RECALIBRATE (>5°)"
+
+If the captain has a GPS, and conditions are calm (speed > 2 knots,
+no current), the COG (Course Over Ground) can be used as a reference:
+  GPS COG: 045.2°
+  Compass:  043.8°
+  Residual: -1.4° — ACCEPTABLE
+
+3.2.6 Calibration Confidence Score
+
+The confidence score is computed from:
+  - Coverage completeness: were all 8 octants sampled? (weight 40%)
+  - Sample density: >= 500 points at >= 50 Hz? (weight 20%)
+  - Ellipsoid fit quality: residual < 5% of magnitude? (weight 20%)
+  - Validation residual: < 2° against reference? (weight 20%)
+
+  confidence = 0.40 × coverage + 0.20 × density + 0.20 × fit_quality
+             + 0.20 × validation_residual
+
+Minimum confidence for acceptance: 70%
+Recommended confidence for open-ocean: 85%
+
+--------------------------------------------------------------------------------
+3.3 STEP 3 — RUDDER CALIBRATION
+--------------------------------------------------------------------------------
+
+Rudder calibration is performed in three sub-steps: center finding, limit
+detection, and counter-rudder tuning.
+
+3.3.1 STEP 3a — RUDDER CENTER FINDING
+
+Purpose: Establish the rudder angle sensor's reading when the rudder is
+physically centered (amidships). This is the 0° reference for all future
+autopilot commands.
+
+Procedure:
+  (1) Display: "Turn wheel to center position (amidships)."
+  (2) Captain manually centers the wheel using the mechanical center mark
+      or visual reference (rudder angle indicator, if equipped)
+  (3) Display: "Is the rudder centered? Press STBY to confirm."
+  (4) On STBY press: sample AS5048A for 1 second at 100 Hz
+  (5) Compute median of 100 samples (rejects outliers from vibration)
+  (6) Store as NVS key "rudder_center_raw" (uint16, 14-bit encoder value)
+  (7) Display: "Center captured: 8192 (0.0°). Confirm? [SEL]"
+
+The median filter is critical because docks vibrate from engines, waves,
+and other vessels. A simple average would be biased by vibration spikes.
+
+3.3.2 STEP 3b — RUDDER LIMITS
+
+Purpose: Determine the mechanical hard-over positions of the rudder so the
+autopilot can set software limits that prevent mechanical stress.
+
+Procedure for PORT limit:
+  (1) Display: "Turn wheel hard to PORT (full left)."
+  (2) Captain turns wheel until rudder hits mechanical stop
+  (3) Display: "Rudder at port stop? Press AUTO to capture."
+  (4) On AUTO press: sample AS5048A for 500 ms at 100 Hz
+  (5) Compute median, store as "rudder_port_limit_raw"
+  (6) Compute angle from center: port_angle = (port_raw - center_raw) × 360/16384
+  (7) Display: "Port limit: -32.4°. Confirm? [SEL]"
+
+Procedure for STARBOARD limit:
+  (1) Display: "Turn wheel hard to STBD (full right)."
+  (2) Same capture process
+  (3) Store as "rudder_stbd_limit_raw"
+  (4) Compute starboard angle
+
+Software limits:
+  - The software limit is set to (mechanical_stop - 2°) on each side
+  - This 2° margin prevents the autopilot from driving against the
+    mechanical stop, which would cause hydraulic pressure spikes and
+    accelerated seal wear
+  - The margin is configurable via NVS key "rudder_margin_deg" (default: 2.0)
+
+Asymmetry detection:
+  - If |port_limit| differs from |stbd_limit| by more than 3°, display
+    warning: "RUDDER TRAVEL ASYMMETRIC: Port -32°, Stbd +36°. Check
+    mechanical linkage."
+
+3.3.3 STEP 3c — COUNTER-RUDDER TEST
+
+Purpose: Determine the optimal counter-rudder gain that prevents rudder
+overshoot when the autopilot changes heading. Too little counter-rudder
+causes overshoot and oscillation; too much causes sluggish response and
+hunting.
+
+This step requires the vessel to be underway at cruise speed. It cannot
+be performed at the dock.
+
+Procedure:
+  (1) Display: "Proceed to open water at cruise speed."
+  (2) Display: "Engage autopilot (press AUTO)."
+  (3) Captain presses AUTO — system holds current heading
+  (4) Captain dials in a 30° heading change using the rotary encoder
+  (5) System commands rudder to achieve new heading
+  (6) System records: commanded angle, rudder angle over time, actual
+      heading over time
+  (7) On reaching new heading (±1° for 5 seconds), system computes:
+      - Peak rudder angle during turn
+      - Rudder angle at heading lock (steady state)
+      - Overshoot: if rudder reverses direction before settling
+  (8) Display results:
+      "Test 1: Overshoot 4.2°, Settling time 8.3s"
+  (9) Repeat for 2 more headings (total 3 heading changes at different
+      angles: 20°, 30°, 40° or as appropriate for sea state)
+  (10) Compute average overshoot across 3 tests
+  (11) Set counter-rudder gain:
+       - If avg overshoot > 5°: counter_rudder_gain += 0.1 (more aggressive)
+       - If avg overshoot < 1°: counter_rudder_gain -= 0.05 (less aggressive)
+       - If avg overshoot 1–5°: acceptable, store current value
+  (12) Display: "Counter-rudder gain set to 0.35. Accept? [SEL]"
+
+The counter-rudder algorithm works by adding a derivative term to the
+rudder command that opposes the rate of rudder angle change when the
+heading error is decreasing. This "backs off" the rudder before the
+desired heading is reached, reducing overshoot.
+
+  rudder_command = pid_output - counter_rudder_gain × d(rudder_angle)/dt
+                                        × sign(heading_error)
+
+This is applied only when |heading_error| < 10° and is decreasing
+(i.e., the vessel is approaching the target heading).
+
+--------------------------------------------------------------------------------
+3.4 STEP 4 — YAW DAMPING SETUP
+--------------------------------------------------------------------------------
+
+Purpose: Eliminate low-frequency yaw oscillation (the "S-turn" weave) that
+occurs when the autopilot holds a heading. This is particularly common in
+displacement hulls and following seas.
+
+Procedure:
+  (1) Display: "Engage autopilot at cruise speed on calm heading."
+  (2) System holds heading for 60 seconds, recording heading trace
+  (3) Perform FFT on heading trace to identify dominant oscillation frequency
+  (4) If peak oscillation amplitude > 2°: yaw damping needed
+  (5) Display: "Yaw oscillation detected: ±3.2° at 0.08 Hz (12.5s period)"
+  (6) Display: "Increasing D gain from 0.80 to 1.00..."
+  (7) Apply new D gain, wait 30 seconds for system to settle
+  (8) Re-measure heading trace for 60 seconds
+  (9) Display: "After adjustment: ±1.1° — Improved"
+  (10) Prompt: "Yaw stable? [AUTO]=Yes, [NAV]=Increase D more"
+  (11) If captain selects "Increase D more": add 0.15 to D, repeat from (7)
+  (12) Maximum D gain: 3.0 (prevents instability from excessive derivative)
+  (13) On acceptance: store "yaw_damping_gain" (= final D gain value)
+
+The derivative (D) gain in the PID controller acts as a yaw rate damper.
+It produces a rudder command proportional to the rate of heading change,
+effectively adding viscous damping to the vessel's rotational dynamics.
+
+  d_term = D × (d(heading_error)/dt)
+
+A vessel that yaws at 2°/s with D=1.0 will get a 2° rudder correction
+opposing the yaw. This is analogous to the shock absorber in a vehicle
+suspension — it doesn't change the steady-state heading, but it prevents
+oscillation around it.
+
+Warning display if D gain exceeds safe range:
+  "WARNING: D gain > 2.5. High sea state may cause erratic steering.
+   Consider reducing speed or adjusting sea state profile."
+
+--------------------------------------------------------------------------------
+3.5 STEP 5 — RESPONSE SPEED TUNING
+--------------------------------------------------------------------------------
+
+Purpose: Verify and optimize the autopilot's transient response to large
+heading changes. This step validates the P (proportional) gain, which
+determines how aggressively the autopilot corrects heading errors.
+
+Procedure:
+  (1) Display: "Test: Full 30° heading change."
+  (2) Captain engages autopilot, dials in 30° change
+  (3) System records complete response:
+      - t0: command issued
+      - t1: rudder begins to move (hydraulic latency)
+      - t2: vessel begins to turn (hull response)
+      - t3: heading reaches target (first crossing)
+      - t4: heading settles within ±1° (steady state)
+  (4) Compute performance metrics:
+      - Response latency: t1 - t0 (target: < 500 ms for hydraulic)
+      - Rise time: t3 - t0 (target: proportional to vessel size)
+      - Overshoot: max heading - target heading (target: < 5°)
+      - Settling time: t4 - t0 (target: < 30s for 30° change)
+      - Steady-state error: average heading error after settling
+  (5) Display results:
+```
+  ┌──────────────────────┐
+  │ RESPONSE TEST        │
+  │ ──────────────────── │
+  │ Command:   30°       │
+  │ Latency:   280 ms    │
+  │ Rise time: 12.4 s    │
+  │ Overshoot:  3.2°     │
+  │ Settle:    18.7 s    │
+  │ SS Error:  -0.3°     │
+  │                      │
+  │ Rating: GOOD         │
+  │ [SEL] Accept         │
+  │ [NAV] Adjust P gain  │
+  └──────────────────────┘
+```
+
+  (6) If captain selects "Adjust P gain":
+      - Display: "Increase P = more aggressive, Decrease P = smoother"
+      - Display current P value, allow ±0.1 adjustments
+      - Re-run test automatically
+  (7) If overshoot > 8°: "Response too aggressive. Decrease P gain."
+  (8) If settling time > 45s: "Response too slow. Increase P gain."
+  (9) Captain accepts final P gain → stored in working PID structure
+
+Performance targets by vessel type:
+  Vessel Type         Rise Time (30°)  Max Overshoot  Max Settle
+  ─────────────────────────────────────────────────────────────────
+  Displacement        < 20s             < 5°            < 30s
+  Planing             < 10s             < 6°            < 20s
+  Semi-Displacement   < 15s             < 5°            < 25s
+  Sail                < 25s             < 4°            < 35s
+
+--------------------------------------------------------------------------------
+3.6 STEP 6 — SYSTEM VERIFICATION (CIRCLE TEST)
+--------------------------------------------------------------------------------
+
+Purpose: Verify compass linearity and autopilot performance through a
+full 360° heading change. This is the definitive test of the entire
+heading sensing and control chain.
+
+This test MUST be performed in open water with adequate sea room.
+
+Procedure:
+  (1) Display: "Proceed to open water. Turn vessel in a full circle at
+      cruise speed."
+  (2) Captain engages autopilot, dials in continuous turn (or steers
+      manually while system records)
+  (3) System records compass heading at 1 Hz during the full 360° turn
+  (4) After completing the circle, system analyzes:
+      - Total heading change (should be ~360°)
+      - Heading continuity: no jumps > 10° between consecutive readings
+      - Heading rate consistency: standard deviation of turn rate
+      - Compass linearity: plot heading vs. expected (linear ramp)
+  (5) Compute residuals: for each 10° segment, compute deviation from
+      expected heading
+  (6) Flag any deviation > 5° with heading and magnitude
+  (7) Display results:
+```
+  ┌──────────────────────┐
+  │ CIRCLE TEST          │
+  │ ──────────────────── │
+  │ Total turn: 358.4°   │
+  │ Max deviation: 3.2°  │
+  │  at heading: 127°    │
+  │ Avg deviation: 1.1°  │
+  │                      │
+  │  ✓ 0-90°: PASS      │
+  │  ✓ 90-180°: PASS    │
+  │  ✓ 180-270°: PASS   │
+  │  ✓ 270-360°: PASS   │
+  │                      │
+  │ ┌──────────────────┐ │
+  │ │ CIRCLE TEST PASS │ │
+  │ └──────────────────┘ │
+  │                      │
+  │ [SEL] Continue       │
+  └──────────────────────┘
+```
+
+  (8) If any quadrant FAIL (> 5° deviation):
+      - Display: "FAILED at XXX° — deviation Y.Y°"
+      - Prompt: "Possible cause: magnetic interference at this heading.
+        Check for loose metal objects, electronics interference."
+      - Option: re-run compass calibration (return to Step 2) or accept
+        and proceed (captain's discretion)
+
+The circle test is the marine equivalent of a full-scale sensor validation.
+It confirms that the compass calibration holds across all headings, not
+just the headings sampled during the dockside calibration swing.
+
+--------------------------------------------------------------------------------
+3.7 STEP 7 — ALARM & SAFETY TESTS
+--------------------------------------------------------------------------------
+
+Purpose: Verify all safety systems operate correctly. This is a critical
+step — the autopilot must fail safely in every foreseeable scenario.
+
+3.7.1 Kill Switch Test
+
+Procedure:
+  (1) Display: "KILL SWITCH TEST"
+  (2) Display: "Press kill switch NOW."
+  (3) Captain presses the magnetic kill switch (or pulls the lanyard)
+  (4) System must, within 100 ms:
+      - De-energize all solenoid drivers ( hydraulic valves center)
+      - Sound the piezo buzzer (continuous tone, 80 dB minimum)
+      - Display alarm on OLED: "⚠ KILL SWITCH ENGAGED"
+      - Transmit CAN message: KILL_SWITCH_ACTIVATED
+      - Jetson displays full-screen alarm
+  (5) After 5 seconds: "Kill switch acknowledged. Reset to continue."
+  (6) Captain resets kill switch
+  (7) System must:
+      - NOT automatically re-engage solenoids
+      - Display: "Kill switch reset. Press AUTO to resume."
+      - Require explicit AUTO press to regain control
+
+3.7.2 Power Cycle Test
+
+Procedure:
+  (1) Display: "POWER CYCLE TEST"
+  (2) Display: "Turn off 12V power to autopilot node."
+  (3) Captain disconnects 12V power
+  (4) Wait 5 seconds
+  (5) Captain reconnects 12V power
+  (6) System must:
+      - Boot to STANDBY mode (NOT AUTO)
+      - Display: "VESSEL NODE v1.0 — STANDBY"
+      - NOT move solenoids during boot
+      - NOT engage autopilot automatically
+  (7) Verify: "System booted to STANDBY? [SEL]=Yes, [NAV]=No"
+  (8) This verifies that a power glitch cannot cause unexpected rudder
+      movement — a critical safety requirement for Class-approved systems
+
+3.7.3 Off-Course Alarm Test
+
+Procedure:
+  (1) Display: "OFF-COURSE ALARM TEST"
+  (2) Engage autopilot, set heading
+  (3) Captain manually turns vessel 10° off course
+  (4) System must:
+      - Detect heading error > off_course_threshold (default: 10°)
+      - Sound alarm buzzer (intermittent beep)
+      - Display: "⚠ OFF COURSE 12.3°"
+      - After 15 seconds: automatically disengage to STANDBY
+      - Display: "AUTOPILOT DISENGAGED — Off course timeout"
+  (5) Captain confirms alarm was observed
+
+3.7.4 Watch Alarm Test (if equipped)
+
+If the system includes a watch alarm (NMMA/ABYC requirement for
+unattended helm):
+  (1) Display: "WATCH ALARM TEST"
+  (2) Engage autopilot
+  (3) Wait for watch alarm interval (configurable, default: 5 min for test)
+  (4) System beeps: "Watch alarm! Press any key."
+  (5) If no response within 15 seconds: system disengages, sounds
+      continuous alarm
+  (6) Captain confirms
+
+--------------------------------------------------------------------------------
+3.8 STEP 8 — SAVE & FINALIZE
+--------------------------------------------------------------------------------
+
+Purpose: Persist all calibration data permanently and verify redundancy.
+
+Procedure:
+  (1) Display: "SAVE & FINALIZE"
+  (2) Display: "Saving calibration data..."
+  (3) System performs:
+      a. Increment NVS key "settings_version" (rolling counter)
+      b. Write all parameters to NVS namespace "autopilot"
+      c. Write NVS key "commissioned" = 0x01
+      d. Compute CRC-32 of all calibration data
+      e. Store CRC in NVS key "settings_crc"
+  (4) If dual-redundant ESP32 configuration:
+      a. Transmit all settings to secondary ESP32 via CAN
+      b. Secondary writes to its NVS
+      c. Secondary reads back and verifies CRC
+      d. Display: "Secondary node synchronized ✓"
+  (5) Jetson backup:
+      a. Jetson receives all settings via CAN
+      b. Jetson writes to SQLite table "node_settings"
+      c. Jetson computes its own CRC and compares with ESP32's CRC
+      d. Display: "Jetson backup verified ✓"
+  (6) Display summary:
+```
+  ┌──────────────────────┐
+  │ SETUP COMPLETE       │
+  │ ──────────────────── │
+  │                      │
+  │ Vessel: NORTH WIND   │
+  │ Type: Displacement   │
+  │ Length: 45 ft        │
+  │                      │
+  │ Compass: CALIBRATED  │
+  │  Confidence: 92%     │
+  │                      │
+  │ Rudder: CALIBRATED   │
+  │  Center: 0.0°        │
+  │  Limits: ±33.2°      │
+  │                      │
+  │ PID Gains:           │
+  │  P=1.2 I=0.05 D=0.95│
+  │  Counter=0.35        │
+  │                      │
+  │ Settings v3 saved    │
+  │ CRC: 0xA7F3B2C1      │
+  │                      │
+  │ [AUTO] Go to STANDBY │
+  └──────────────────────┘
+```
+
+  (7) Captain presses AUTO → system enters STANDBY mode
+  (8) Setup wizard is complete. Normal operation begins.
+
+================================================================================
+4. SETTINGS PERSISTENCE ARCHITECTURE
+================================================================================
+
+4.1 NVS KEY LAYOUT
+------------------
+
+The ESP32 NVS (Non-Volatile Storage) is organized into namespaces. The
+autopilot node uses namespace "autopilot" for all calibration data.
+
+  NVS Key                    Type     Size     Description
+  ──────────────────────────────────────────────────────────────────────────────
+  commissioned                uint8    1 B      0x00=factory, 0x01=commissioned
+  settings_version            uint32   4 B      Incremented on every save
+  settings_crc                uint32   4 B      CRC-32 of all settings
+  setup_current_step          uint8    1 B      Wizard step (0–8), for resume
+  node_id                     string   16 B     Unique node identifier
+  role                        uint8    1 B      0=autopilot, 1=lights, 2=engine
+  firmware_version            string   12 B     "1.0.0-build42"
+
+  — Vessel Configuration —
+  vessel_type                 uint8    1 B      0=disp, 1=plan, 2=semi, 3=sail
+  vessel_length               uint16   2 B      Feet
+  vessel_displacement         uint16   2 B      Tons
+  max_speed                   uint8    1 B      Knots
+  num_engines                 uint8    1 B      1–4
+  propulsion_type             uint8    1 B      0=single, 1=twin
+  steering_type               uint8    1 B      0=hydraulic, 1=mech, 2=power
+  num_rudders                 uint8    1 B      1 or 2
+  rudder_config               uint8    1 B      0=single, 1=twin-outboard
+  vessel_name                 string   24 B     UTF-8
+  captain_name                string   24 B     UTF-8
+
+  — Rudder Calibration —
+  rudder_center_raw           uint16   2 B      AS5048A value at amidships
+  rudder_port_limit_raw       uint16   2 B      AS5048A at port stop
+  rudder_stbd_limit_raw       uint16   2 B      AS5048A at stbd stop
+  rudder_port_limit_deg       float    4 B      Port limit in degrees
+  rudder_stbd_limit_deg       float    4 B      Starboard limit in degrees
+  rudder_max_deg              float    4 B      Software limit (min of both)
+  rudder_margin_deg           float    4 B      Margin from mechanical stop
+
+  — Compass Calibration —
+  compass_cal_blob            blob     48 B     Hard/soft iron calibration
+  compass_cal_valid           uint8    1 B      1=valid, 0=invalid
+  compass_deviation_table     blob     48 B     36 entries (see Appendix B)
+  compass_confidence          uint8    1 B      0–100%
+  compass_cal_timestamp       uint32   4 B      Unix epoch
+
+  — PID Gains —
+  pid_p                       float    4 B      Proportional gain
+  pid_i                       float    4 B      Integral gain
+  pid_d                       float    4 B      Derivative gain
+  pid_dd                      float    4 B      Derivative-of-derivative
+  pid_pr                      float    4 B      Proportional on rudder
+  pid_ff                      float    4 B      Feed-forward (weather helm)
+  counter_rudder_gain         float    4 B      Counter-rudder coefficient
+  yaw_damping_gain            float    4 B      Yaw damping (= D gain final)
+
+  — Sea State Profiles —
+  profile_calm_p              float    4 B      Calm sea P gain
+  profile_calm_d              float    4 B      Calm sea D gain
+  profile_rough_p             float    4 B      Rough sea P gain
+  profile_rough_d             float    4 B      Rough sea D gain
+  profile_light_p             float    4 B      Light load P gain
+  profile_light_d             float    4 B      Light load D gain
+
+  — Runtime State —
+  last_heading                float    4 B      Last known heading
+  last_mode                   uint8    1 B      0=STBY, 1=AUTO, 2=TRACK, 3=WIND
+  total_autopilot_hours       uint32   4 B      Cumulative operating hours
+  power_cycle_count           uint32   4 B      Number of boot cycles
+  last_commission_date        uint32   4 B      Unix epoch of last Step 8
+
+  TOTAL NVS USAGE:            ~360 bytes (well within ESP32 NVS capacity)
+
+4.2 SETTINGS VERSIONING PROTOCOL
+---------------------------------
+
+Every time the captain saves settings (Step 8 or manual save), the
+"settings_version" counter is incremented. This serves two purposes:
+
+  (1) Conflict detection: If the Jetson and ESP32 have different version
+      numbers, the system knows which is newer and can resolve conflicts.
+
+  (2) Audit trail: The version number provides a rough count of how many
+      times settings have been modified, useful for troubleshooting.
+
+Save procedure (atomic):
+  1. Prepare all new settings in RAM
+  2. Compute CRC-32 of entire settings block
+  3. Write "settings_version" (incremented)
+  4. Write all individual NVS keys
+  5. Write "settings_crc"
+  6. Read back "settings_crc" and verify match
+  7. If mismatch: retry up to 3 times, then flag error
+
+4.3 JETSON SHADOW COPY & SQLITE SCHEMA
+--------------------------------------
+
+The Jetson maintains a complete backup of every node's settings in a
+SQLite database. This provides:
+
+  - Redundancy: if an ESP32's NVS becomes corrupt, settings can be restored
+  - Fleet management: the captain/system admin can view all vessel configs
+  - Historical tracking: settings changes can be logged over time
+
+SQLite schema:
+```sql
+CREATE TABLE IF NOT EXISTS node_settings (
+    node_id            TEXT PRIMARY KEY,
+    settings_version   INTEGER NOT NULL,
+    settings_crc       INTEGER NOT NULL,
+    raw_settings_json  TEXT NOT NULL,           -- Complete JSON blob
+    timestamp          INTEGER NOT NULL,        -- Unix epoch
+    sync_status        TEXT DEFAULT 'synced',   -- synced / pending / conflict
+    vessel_name        TEXT,
+    last_seen          INTEGER                   -- Last CAN heartbeat
+);
+
+CREATE TABLE IF NOT EXISTS settings_history (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id            TEXT NOT NULL,
+    settings_version   INTEGER NOT NULL,
+    raw_settings_json  TEXT NOT NULL,
+    timestamp          INTEGER NOT NULL,
+    change_reason      TEXT                      -- 'commissioning', 'recal', 'manual'
+);
+
+CREATE INDEX idx_settings_history_node ON settings_history(node_id, settings_version);
+```
+
+The Jetson polls all nodes every 30 seconds via CAN:
+  - Request: GET_SETTINGS (node_id, request_version)
+  - Response: SETTINGS_RESPONSE (node_id, version, crc, key_values...)
+  - If version matches: no action
+  - If version > Jetson's: Jetson updates its SQLite copy
+  - If version < Jetson's: possible issue, flag for investigation
+
+4.4 RESTORE PROCEDURE
+---------------------
+
+If an ESP32's NVS is corrupt or the node is replaced:
+
+  1. Jetson identifies: settings_crc mismatch or NVS read error
+  2. Jetson displays: "Node VP-0042-A1 settings corrupt. Restore from backup?"
+  3. Captain confirms
+  4. Jetson transmits all settings via CAN in a SETTINGS_PUSH message
+  5. ESP32 writes each key to NVS
+  6. ESP32 reads back all keys and computes CRC
+  7. ESP32 responds: SETTINGS_ACK (version, crc)
+  8. Jetson verifies CRC matches
+  9. If match: "Restore complete. Power cycle node."
+  10. If mismatch: "Restore FAILED. Manual intervention required."
+
+The restore procedure writes approximately 360 bytes of NVS data. At CAN
+bus speed (500 kbps), this takes approximately 50 ms. The NVS write
+operations take approximately 200 ms total (each NVS write is ~10 ms for
+a 4 KB flash sector).
+
+================================================================================
+5. RE-CALIBRATION TRIGGERS & MAINTENANCE SCHEDULE
+================================================================================
+
+5.1 AUTOMATIC RE-CALIBRATION PROMPTS
+------------------------------------
+
+The system monitors for conditions that may invalidate existing calibration
+and prompts the captain accordingly.
+
+Trigger                              Condition                  Action
+─────────────────────────────────────────────────────────────────────────────────
+Compass recalibration needed         - Compass confidence < 50%  "Compass
+                                     - Heading jumps > 10°       accuracy degraded.
+                                     - BNO085 recalibration      Recalibrate?
+                                     flag set by sensor         Long-press MODE
+                                                              → Calibrate"
+                                                              ─────────────────
+Rudder recalibration needed          - Rudder angle reads       "Rudder sensor
+                                     outside limits             discrepancy.
+                                     - Rudder center drift      Recalibrate?
+                                     > 2° from stored           Long-press MODE
+                                                              → Rudder Cal"
+                                                              ─────────────────
+Counter-rudder adjustment needed      - Overshoot > 8° on       "Steering behavior
+                                     3 consecutive heading     changed. Run
+                                     changes                    counter-rudder
+                                     - Captain reports          test? MODE →
+                                     "hunting" or               Counter-Rudder"
+                                     "sluggish"
+                                                              ─────────────────
+Yaw damping adjustment               - Yaw oscillation         "Sea state change
+                                     amplitude doubled         detected. Adjust
+                                     - Speed change > 30%      yaw damping?
+                                     from profile baseline     MODE → Yaw"
+                                                              ─────────────────
+Post-maintenance recalibration       - Any NVS key              "System settings
+                                     overwritten by            changed. Full
+                                     maintenance mode          recalibration
+                                     - Firmware update          recommended."
+                                     completed
+
+5.2 MAINTENANCE SCHEDULE
+------------------------
+
+  Interval        Task                                        Trigger
+  ───────────────────────────────────────────────────────────────────────────────
+  Annually        Full compass recalibration                  Calendar or
+                                                              runtime hours
+  After haul-out  Compass recalibration (hull work changes    Captain action
+                  magnetic signature)
+  After any       Compass recalibration (metal work near      Captain action
+  metal work      compass location)
+  After hydraulic Rudder recalibration (cylinder or line      Captain action
+  service         changes affect centering)
+  After loading   Counter-rudder & yaw damping recheck        Captain action
+  change          (fuel, cargo, water tanks)
+  After firmware  Full verification (Steps 6–7)               Automatic
+  update          — circle test + alarm test
+
+5.3 MANUAL CALIBRATION ACCESS
+-----------------------------
+
+At any time, the captain can access the calibration menu by:
+
+  OLED: Long-press MODE (2 seconds) → Calibration menu appears:
+```
+  ┌──────────────────────┐
+  │ CALIBRATION MENU     │
+  │ ──────────────────── │
+  │                      │
+  │ 1. Compass Cal       │
+  │ 2. Rudder Center     │
+  │ 3. Rudder Limits     │
+  │ 4. Counter-Rudder    │
+  │ 5. Yaw Damping       │
+  │ 6. Response Speed    │
+  │ 7. Circle Test       │
+  │ 8. Alarm Test        │
+  │ 9. Full Commission   │
+  │                      │
+  │ [NAV] [SEL] [STBY]   │
+  └──────────────────────┘
+```
+
+  Voice: "Hey Helm, start compass calibration"
+         "Hey Helm, recalibrate rudder"
+         "Hey Helm, run circle test"
+
+  Jetson: Settings → Calibration → [select step]
+
+Individual steps can be run independently — the captain is not required
+to re-run the entire commissioning sequence unless specifically needed.
+
+================================================================================
+6. MULTI-NODE SETUP (NON-AUTOPILOT ROLES)
+================================================================================
+
+The Vessel Platform supports multiple node types, each with its own
+role-specific setup wizard. The Jetson detects the node's role from the
+NODE_ANNOUNCE CAN message and launches the appropriate wizard.
+
+6.1 LIGHTING CONTROLLER NODE
+-----------------------------
+
+Setup wizard steps:
+  (1) ZONE ASSIGNMENT
+      - Configure up to 8 zones: cabin, deck, nav, engine_room,
+        cockpit, masthead, underwater, anchor
+      - Assign PWM channels to zones (1–4 channels per zone)
+      - Set zone names (customizable, stored in NVS)
+
+  (2) DIMMING CURVES
+      - For each zone: select dimming curve type
+        - Linear: straightforward PWM mapping
+        - Logarithmic: perceptually uniform (recommended for cabin)
+        - S-curve: slow start, fast middle, slow end (deck floods)
+        - Custom: captain defines 10-point lookup table
+      - Set minimum brightness (night mode floor): 1–20%
+      - Set maximum brightness: 50–100%
+
+  (3) SCENE PRESETS
+      - Define up to 8 scenes: "Night Running", "Docked", "Working Deck",
+        "Anchor", "Emergency", "Cruise", "Fishing", "Custom 1"
+      - Each scene stores brightness level for every zone
+      - Scenes activated via OLED menu, CAN command, or Jetson UI
+
+  (4) NAVIGATION LIGHTS COMPLIANCE
+      - If nav lights assigned: enforce COLREGs compliance
+        - Underway: masthead + stern + port (red) + stbd (green)
+        - Anchored: all-around white (anchor light) only
+        - Sailing: masthead tri-color (if equipped)
+      - System prevents illegal combinations (e.g., anchor light +
+        steaming lights simultaneously)
+
+6.2 ENGINE MONITOR NODE
+-----------------------
+
+Setup wizard steps:
+  (1) ENGINE IDENTIFICATION
+      - Engine model selection (from database of common marine engines)
+      - Number of cylinders
+      - 2-stroke or 4-stroke (affects RPM alarm thresholds)
+      - Rated RPM, idle RPM, cruise RPM, max RPM
+
+  (2) SENSOR CHANNEL ASSIGNMENT
+      - Assign analog inputs to sensor types:
+        - Channel 0: Coolant temperature (thermistor curve)
+        - Channel 1: Oil pressure (0–100 psi sender)
+        - Channel 2: Tachometer (pulse count per revolution)
+        - Channel 3: Exhaust temperature (thermocouple)
+        - Channel 4: Fuel level (tank sender, 0–190 ohms)
+        - Channel 5: Boost pressure (MAP sensor, 0–30 psi)
+      - For each channel: configure input range, alarm thresholds,
+        display units, smoothing filter
+
+  (3) ALARM THRESHOLDS
+      - For each sensor: set Warning and Critical thresholds
+      - Example:
+        - Coolant temp: Warning 200°F, Critical 220°F
+        - Oil pressure: Warning 25 psi, Critical 15 psi
+        - RPM: Warning 2800 rpm, Critical 3000 rpm (overspeed)
+        - RPM: Warning 600 rpm (undocumented low idle)
+      - Alarm actions: buzzer, OLED display, CAN broadcast, Jetson alert
+
+  (4) GAUGE CALIBRATION
+      - For analog gauges: 2-point calibration (zero + span)
+      - "Disconnect sensor, apply ground — reading should be 0"
+      - "Apply known value (e.g., 100 psi with shop gauge) — reading
+        should match"
+      - Calibration coefficients stored in NVS
+
+6.3 GENERIC SENSOR NODE
+-----------------------
+
+For nodes with custom sensor configurations:
+  (1) Role assignment from a predefined list
+  (2) I2C/SPI/UART sensor auto-detection
+  (3) Data format configuration
+  (4) Sample rate and reporting interval
+  (5) Alarm thresholds (if applicable)
+
+Each node type stores its configuration in its own NVS namespace:
+  - Autopilot: "autopilot"
+  - Lighting:  "lighting"
+  - Engine:    "engine_N" (where N = engine number, 1-based)
+  - Generic:   "sensor_N"
+
+================================================================================
+7. CAPTAIN-FRIENDLY INTERFACE DESIGN
+================================================================================
+
+The system is designed so that a captain with no computer expertise can
+complete the full commissioning procedure using only the OLED display and
+four buttons. The Jetson display and voice interface are enhancements,
+not requirements.
+
+7.1 OLED MENU & BUTTON NAVIGATION
+----------------------------------
+
+Hardware buttons (4):
+  AUTO  — Confirm / Next / Accept / Engage autopilot
+  STBY  — Back / Previous / Decline / Disengage autopilot
+  NAV   — Up / Increase value / Next option
+  SEL   — Down / Decrease value / Previous option
+
+Navigation model:
+  - All menus are lists of items
+  - NAV/SEL move the cursor up/down
+  - AUTO selects the current item
+  - STBY goes back one level
+  - Long-press (2s) of any button activates context-sensitive shortcuts:
+    - Long AUTO: enter/confirm calibration substep
+    - Long STBY: abort current calibration, return to main menu
+    - Long NAV: jump to next wizard step (skip current — for
+      experienced technicians)
+    - Long SEL: repeat last measurement (re-sample)
+
+Display layout conventions:
+```
+  Line 0: Step indicator           "STEP 3/8"
+  Line 1: Section title            "RUDDER CALIBRATION"
+  Line 2: Sub-step indicator       "3b: LIMITS"
+  Line 3: (blank or instruction)
+  Line 4: Value or progress
+  Line 5: Value or progress
+  Line 6: Status or prompt
+  Line 7: Button hints             "[NAV] [SEL] [AUTO]"
+```
+
+Text rendering guidelines:
+  - Use 6x8 pixel font (21 characters × 8 lines)
+  - Use 12x16 font for numbers and critical values (10 characters × 4 lines)
+  - Progress bars: 20 characters wide, block character █ for filled,
+    shade character ▓ for partial, light shade ░ for empty
+  - Blinking text for critical prompts (toggle every 500 ms)
+  - All text in English (future: configurable language via NVS key
+    "display_language")
+
+7.2 JETSON ENHANCED DISPLAY
+----------------------------
+
+When the Jetson is connected, it provides a significantly richer
+commissioning experience:
+
+Screen layout (1920x1080):
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  VESSEL PLATFORM — Autopilot Commissioning    [NORTH WIND — Step 3/8] │
+  ├─────────────────────────────────┬───────────────────────────────────────┤
+  │                                 │                                       │
+  │  Current Step:                  │  HEADING TRACE (last 60s)            │
+  │  3b — RUDDER LIMITS            │                                       │
+  │                                 │   360° ┤                              │
+  │  Instructions:                  │        │    ╱╲                         │
+  │  Turn wheel hard to PORT        │   180° ┤───╱  ╲──╱╲───                 │
+  │  (full left). Press AUTO when   │        │  ╱    ╲╱  ╲                    │
+  │  rudder hits mechanical stop.   │    0° ┤╱          ╲                   │
+  │                                 │        └───────────────               │
+  │  Current rudder angle:          │        time (s)                       │
+  │     -28.4°                      │                                       │
+  │                                 ├───────────────────────────────────────┤
+  │  [████████████████████░░░░]     │  RUDDER ANGLE (last 30s)             │
+  │   PORT: -28.4°    STBD: --.-°   │                                       │
+  │                                 │   +35° ┤                              │
+  │                                 │        │         ┌─────               │
+  │                                 │     0° ┤─────────┘                     │
+  │                                 │   -35° ┤                              │
+  │  ┌──────────┐  ┌──────────────┐ │        └───────────────               │
+  │  │  ◀ BACK  │  │ CAPTURE ▶   │ │                                       │
+  │  └──────────┘  └──────────────┘ │                                       │
+  └─────────────────────────────────┴───────────────────────────────────────┘
+
+Jetson-exclusive features during commissioning:
+  - Real-time heading trace graph (scrolling plot)
+  - Real-time rudder angle graph
+  - Compass deviation plot (rose diagram)
+  - FFT analysis of yaw oscillation (frequency domain)
+  - Step response plot (heading vs. time for response speed test)
+  - Circle test polar plot (heading error vs. true heading)
+  - PDF report generation (save commissioning report to USB)
+  - Sensor data logging (raw CSV export for analysis)
+
+7.3 VOICE-GUIDED SETUP
+----------------------
+
+When the Jetson is running the voice assistant service ("Helm"), the
+captain can perform hands-free calibration:
+
+Voice commands:
+  "Hey Helm, start setup wizard"         → Begin from Step 1
+  "Hey Helm, skip to compass calibration" → Jump to Step 2
+  "Hey Helm, the rudder is centered"      → Trigger center capture
+  "Hey Helm, capture port limit"          → Trigger port capture
+  "Hey Helm, that looks good"             → Accept current value
+  "Hey Helm, save settings"               → Jump to Step 8
+  "Hey Helm, what's my heading?"          → Read current heading
+  "Hey Helm, cancel calibration"          → Abort to main menu
+
+Voice prompts during calibration:
+  "Please turn the wheel to center position and say 'rudder is centered'."
+  "Now turn the wheel hard to port until it stops, then say 'captured'."
+  "Heading accuracy is plus or minus 1.4 degrees. That is acceptable."
+  "Circle test passed. All quadrants within tolerance."
+
+The voice system uses the Jetson's microphone and speaker. Audio feedback
+is also available through an optional Bluetooth earpiece for noisy
+environments (engine room, deck).
+
+Voice recognition confidence threshold: 80%. Below this, the system asks
+for confirmation: "Did you say 'capture port limit'? Say yes or no."
+
+7.4 RESUME-AFTER-POWER-CYCLE
+-----------------------------
+
+One of the most important UX features for dockside commissioning is
+the ability to resume after a power interruption. Marine environments
+are harsh — a loose connection, tripped breaker, or dead battery can
+kill power at any time.
+
+Implementation:
+  - NVS key "setup_current_step" stores the wizard step index (1–8)
+  - NVS key "setup_sub_step" stores the sub-step within the current step
+  - NVS key "setup_temp_data" stores intermediate calibration data
+    (e.g., compass samples collected so far)
+  - These keys are updated at the end of every interaction (button press,
+    voice command, Jetson command)
+
+Resume procedure:
+  1. ESP32 boots, reads "commissioned" = 0x00
+  2. Reads "setup_current_step" = 3
+  3. Displays: "VESSEL NODE v1.0"
+  4. Displays: "RESUME SETUP? Step 3: Rudder Calibration"
+  5. Captain presses AUTO → resumes Step 3
+  6. Captain presses STBY → "Start from beginning? [AUTO]=Yes [STBY]=No"
+  7. If captain selects No → enters limited operation mode (STANDBY only)
+
+Temporary data is stored in a separate NVS namespace "setup_temp" to
+avoid contaminating the main "autopilot" namespace. On successful
+completion of Step 8, the "setup_temp" namespace is erased.
+
+================================================================================
+8. ERROR HANDLING & FALLBACK BEHAVIOR
+================================================================================
+
+8.1 SENSOR FAILURE DURING COMMISSIONING
+---------------------------------------
+
+  Failure                        Detection                 Response
+  ───────────────────────────────────────────────────────────────────────────────
+  BNO085 not responding          I2C timeout > 5s          "COMPASS ERROR:
+                                                      Check I2C wiring.
+                                                      Cannot continue compass
+                                                      calibration. Skip?
+                                                      [AUTO]=Skip [STBY]=Abort"
+                                                      ─────────────────
+  AS5048A not responding         SPI read returns 0xFF    "RUDDER SENSOR ERROR:
+                                                      Check SPI wiring.
+                                                      Cannot continue rudder
+                                                      calibration. Skip?"
+                                                      ─────────────────
+  AS5048A reading stuck          Value unchanged for 10s  "Rudder sensor appears
+                                                      stuck. Check mechanical
+                                                      linkage. [AUTO]=Retry
+                                                      [STBY]=Skip"
+                                                      ─────────────────
+  Solenoid driver fault          Current sense > limit    "SOLENOID FAULT:
+                                                      Port solenoid overcurrent.
+                                                      Disconnect and check
+                                                      wiring. Cannot test
+                                                      counter-rudder."
+
+8.2 NVS WRITE FAILURE
+---------------------
+
+If an NVS write operation fails (flash wear, corruption):
+
+  1. Retry up to 3 times with 100 ms delay
+  2. If still failing: "SETTINGS SAVE FAILED. NVS error.
+     Continuing with RAM settings. Data will be lost on power cycle."
+  3. Continue operation with in-RAM settings (reduced functionality)
+  4. Flag error on CAN bus: NVS_ERROR
+  5. Jetson logs the error and can attempt to restore settings on
+     next boot
+
+8.3 CAN BUS COMMUNICATION LOSS
+-------------------------------
+
+During commissioning, if the Jetson loses contact with the ESP32:
+
+  1. ESP32 continues standalone commissioning (OLED + buttons)
+  2. Jetson displays: "Lost contact with node VP-0042-A1.
+     Check CAN bus wiring."
+  3. On reconnection: Jetson requests current wizard state and
+     re-synchronizes its display
+
+8.4 WATCHDOG TIMER
+------------------
+
+The ESP32 has a hardware watchdog timer set to 5 seconds. If the
+firmware hangs for any reason (e.g., I2C bus lockup), the watchdog
+resets the MCU. On reset:
+
+  1. NVS key "last_reset_reason" is updated with the reset code
+  2. If in commissioning mode: resume from "setup_current_step"
+  3. If in normal operation: boot to STANDBY, log error
+
+================================================================================
+9. ACCEPTANCE CRITERIA & SIGN-OFF
+================================================================================
+
+The commissioning is considered complete and the vessel is ready for
+service when ALL of the following criteria are met:
+
+  [ ] Step 1: Vessel configuration saved and verified
+  [ ] Step 2: Compass calibration confidence >= 70% (>= 85% recommended)
+  [ ] Step 2: Deviation table has entries for all 36 points
+  [ ] Step 2: Validation residual < 5° against reference bearing
+  [ ] Step 3a: Rudder center captured with < 0.5° sample spread
+  [ ] Step 3b: Port and starboard limits captured
+  [ ] Step 3b: Asymmetry < 3° (or acknowledged by captain)
+  [ ] Step 3c: Counter-rudder overshoot < 5° on average
+  [ ] Step 4: Yaw oscillation < 2° peak-to-peak after D gain tuning
+  [ ] Step 5: Response time within vessel-type targets
+  [ ] Step 5: Overshoot < 6° on 30° heading change
+  [ ] Step 6: Circle test PASSED (all quadrants < 5° deviation)
+  [ ] Step 7: Kill switch test PASSED (solenoids de-energize, alarm sounds)
+  [ ] Step 7: Power cycle test PASSED (boots to STANDBY, no auto-engage)
+  [ ] Step 7: Off-course alarm test PASSED
+  [ ] Step 8: Settings saved to ESP32 NVS with valid CRC
+  [ ] Step 8: Settings backed up to Jetson SQLite
+  [ ] Step 8: NVS key "commissioned" = 0x01
+  [ ] Redundancy: (if dual-ESP32) secondary node synchronized
+
+Captain Sign-Off:
+  _____________________________________________    Date: _______________
+  Captain Name (printed)
+
+  _____________________________________________    Date: _______________
+  Technician Name (printed)
+
+  Vessel: ____________________    Node S/N: ____________________
+
+  Firmware Version: ______________    Settings Version: ______________
+
+================================================================================
+APPENDIX A — FULL NVS MEMORY MAP
+================================================================================
+
+Address    Key                        Namespace     Type     Size
+─────────────────────────────────────────────────────────────────────────────────
+0x0000     commissioned               autopilot     u8       1 B
+0x0001     settings_version           autopilot     u32      4 B
+0x0005     settings_crc               autopilot     u32      4 B
+0x0009     setup_current_step         autopilot     u8       1 B
+0x000A     setup_sub_step             autopilot     u8       1 B
+0x000B     node_id                    autopilot     str      16 B
+0x001B     role                       autopilot     u8       1 B
+0x001C     firmware_version           autopilot     str      12 B
+0x0028     vessel_type                autopilot     u8       1 B
+0x0029     vessel_length              autopilot     u16      2 B
+0x002B     vessel_displacement        autopilot     u16      2 B
+0x002D     max_speed                  autopilot     u8       1 B
+0x002E     num_engines                autopilot     u8       1 B
+0x002F     propulsion_type            autopilot     u8       1 B
+0x0030     steering_type              autopilot     u8       1 B
+0x0031     num_rudders                autopilot     u8       1 B
+0x0032     rudder_config              autopilot     u8       1 B
+0x0033     vessel_name                autopilot     str      24 B
+0x004B     captain_name               autopilot     str      24 B
+0x0063     rudder_center_raw          autopilot     u16      2 B
+0x0065     rudder_port_limit_raw      autopilot     u16      2 B
+0x0067     rudder_stbd_limit_raw      autopilot     u16      2 B
+0x0069     rudder_port_limit_deg      autopilot     f32      4 B
+0x006D     rudder_stbd_limit_deg      autopilot     f32      4 B
+0x0071     rudder_max_deg             autopilot     f32      4 B
+0x0075     rudder_margin_deg          autopilot     f32      4 B
+0x0079     compass_cal_blob           autopilot     blob     48 B
+0x00A9     compass_cal_valid          autopilot     u8       1 B
+0x00AA     compass_deviation_table    autopilot     blob     48 B
+0x00DA     compass_confidence         autopilot     u8       1 B
+0x00DB     compass_cal_timestamp      autopilot     u32      4 B
+0x00DF     pid_p                      autopilot     f32      4 B
+0x00E3     pid_i                      autopilot     f32      4 B
+0x00E7     pid_d                      autopilot     f32      4 B
+0x00EB     pid_dd                     autopilot     f32      4 B
+0x00EF     pid_pr                     autopilot     f32      4 B
+0x00F3     pid_ff                     autopilot     f32      4 B
+0x00F7     counter_rudder_gain        autopilot     f32      4 B
+0x00FB     yaw_damping_gain           autopilot     f32      4 B
+0x00FF     profile_calm_p             autopilot     f32      4 B
+0x0103     profile_calm_d             autopilot     f32      4 B
+0x0107     profile_rough_p            autopilot     f32      4 B
+0x010B     profile_rough_d            autopilot     f32      4 B
+0x010F     profile_light_p            autopilot     f32      4 B
+0x0113     profile_light_d            autopilot     f32      4 B
+0x0117     last_heading               autopilot     f32      4 B
+0x011B     last_mode                  autopilot     u8       1 B
+0x011C     total_autopilot_hours      autopilot     u32      4 B
+0x0120     power_cycle_count          autopilot     u32      4 B
+0x0124     last_commission_date       autopilot     u32      4 B
+─────────────────────────────────────────────────────────────────────────────────
+TOTAL: 296 bytes (0x128)   +   setup_temp namespace (variable, max 200 B)
+                                +   NVS overhead (~256 B per sector)
+                                ≈ 752 bytes total NVS usage
+
+================================================================================
+APPENDIX B — COMPASS DEVIATION TABLE FORMAT
+================================================================================
+
+struct deviation_table_t {
+    uint8_t  version;          // 1
+    uint8_t  num_entries;      // 36 (every 10°)
+    uint32_t timestamp;        // Unix epoch
+    uint8_t  confidence;       // 0–100%
+    int8_t   deviations[36];   // Signed deviation in 0.1° units
+    // Example: deviations[0] = +14 means +1.4° at heading 000°
+    //          deviations[18] = -8 means -0.8° at heading 180°
+};
+
+Total size: 1 + 1 + 4 + 1 + 36 = 43 bytes (padded to 48 for NVS alignment)
+
+Interpolation at runtime:
+  heading_bin = (int)(heading + 5) / 10;  // Round to nearest 10°
+  heading_bin = heading_bin % 36;          // Wrap around
+  frac = (heading - heading_bin * 10) / 10.0;
+  dev = deviations[heading_bin] * (1 - frac)
+      + deviations[(heading_bin + 1) % 36] * frac;
+  deviation_degrees = dev / 10.0;
+
+================================================================================
+APPENDIX C — PID GAIN PRESETS BY VESSEL TYPE
+================================================================================
+
+Vessel Type: DISPLACEMENT (trawler, tug, workboat)
+  Condition     P       I       D       DD      PR      FF      Notes
+  Calm          1.20    0.05    0.80    0.10    0.30    0.15    Default
+  Rough         0.80    0.03    1.20    0.15    0.20    0.10    Higher D
+  Light Load    1.40    0.06    0.70    0.10    0.35    0.18    Higher P
+
+Vessel Type: PLANING (sport fish, patrol, fast ferry)
+  Condition     P       I       D       DD      PR      FF      Notes
+  Calm          2.50    0.08    1.20    0.20    0.50    0.25    Aggressive
+  Rough         1.80    0.05    1.80    0.25    0.40    0.15    Much higher D
+  Light Load    3.00    0.10    1.00    0.18    0.60    0.30    Very responsive
+
+Vessel Type: SEMI-DISPLACEMENT (pilot boat, crew boat, small ferry)
+  Condition     P       I       D       DD      PR      FF      Notes
+  Calm          1.80    0.06    1.00    0.15    0.40    0.20    Balanced
+  Rough         1.20    0.04    1.50    0.20    0.30    0.12    Higher D
+  Light Load    2.20    0.07    0.90    0.14    0.50    0.24    More responsive
+
+Vessel Type: SAIL (sloop, ketch, cutter)
+  Condition     P       I       D       DD      PR      FF      Notes
+  Calm          0.80    0.03    0.60    0.08    0.20    0.10    Gentle
+  Rough         0.50    0.02    1.00    0.12    0.15    0.05    High D
+  Light Load    1.00    0.04    0.50    0.07    0.25    0.12    More responsive
+
+FF (feed-forward) compensates for weather helm — the tendency of a vessel
+to turn into the wind. It adds a constant rudder offset that counteracts
+the weather helm tendency. The captain can adjust FF in real-time using
+the rotary encoder while underway.
+
+================================================================================
+APPENDIX D — SETUP WIZARD STATE MACHINE DIAGRAM
+================================================================================
+
+                            ┌─────────────┐
+                            │  POWER ON   │
+                            └──────┬──────┘
+                                   │
+                        ┌──────────┴──────────┐
+                        │ Read "commissioned" │
+                        └──────────┬──────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    │ 0x00        │              │ 0x01
+                    ▼             │              ▼
+           ┌────────────┐        │      ┌────────────┐
+           │ Check       │        │      │ LOAD ALL   │
+           │ setup_step  │        │      │ SETTINGS   │
+           └──────┬─────┘        │      └──────┬─────┘
+                  │               │             │
+        ┌─────────┼─────────┐     │      ┌──────▼──────┐
+        │  0      │  1-8    │     │      │ STANDBY     │
+        │         │         │     │      │ (normal op) │
+        ▼         ▼         │     │      └─────────────┘
+   ┌─────────┐ ┌────────┐   │     │
+   │ STEP 1  │ │Resume  │   │     │
+   │ VESSEL  │ │at step │   │     │
+   │ CONFIG  │ │ N      │   │     │
+   └────┬────┘ └───┬────┘   │     │
+        │          │        │     │
+        ▼          ▼        │     │
+   ┌────────────────────┐   │     │
+   │ STEP 2             │   │     │
+   │ COMPASS CAL        │   │     │
+   └────────┬───────────┘   │     │
+            │               │     │
+            ▼               │     │
+   ┌────────────────────┐   │     │
+   │ STEP 3             │   │     │
+   │ 3a: RUDDER CENTER  │   │     │
+   │ 3b: RUDDER LIMITS  │   │     │
+   │ 3c: COUNTER-RUDDER │   │     │
+   └────────┬───────────┘   │     │
+            │               │     │
+            ▼               │     │
+   ┌────────────────────┐   │     │
+   │ STEP 4             │   │     │
+   │ YAW DAMPING        │   │     │
+   └────────┬───────────┘   │     │
+            │               │     │
+            ▼               │     │
+   ┌────────────────────┐   │     │
+   │ STEP 5             │   │     │
+   │ RESPONSE SPEED     │   │     │
+   └────────┬───────────┘   │     │
+            │               │     │
+            ▼               │     │
+   ┌────────────────────┐   │     │
+   │ STEP 6             │   │     │
+   │ CIRCLE TEST        │   │     │
+   └────────┬───────────┘   │     │
+            │               │     │
+            ▼               │     │
+   ┌────────────────────┐   │     │
+   │ STEP 7             │   │     │
+   │ ALARM & SAFETY     │   │     │
+   └────────┬───────────┘   │     │
+            │               │     │
+            ▼               │     │
+   ┌────────────────────┐   │     │
+   │ STEP 8             │   │     │
+   │ SAVE & FINALIZE    │   │     │
+   └────────┬───────────┘   │     │
+            │               │     │
+            ▼               │     │
+   ┌────────────────────┐   │     │
+   │ COMMISSIONED=0x01  │   │     │
+   │ → STANDBY          │   │     │
+   └────────────────────┘   │     │
+
+At any step:
+  - Power cycle → resume at current step (NVS: setup_current_step)
+  - Long-press STBY → abort to main menu
+  - Long-press NAV → skip to next step (technician override)
+
+Transitions between steps are gated: the wizard does not advance until
+the current step's minimum acceptance criteria are met, UNLESS the
+captain explicitly skips (long-press NAV) with a confirmation prompt.
+
+================================================================================
+END OF DOCUMENT — VP-TB-013
+================================================================================
+
+Document prepared by: Agent D — Marine Systems and Calibration Expert
+Platform: Vessel Platform Node (ESP32 + Jetson Orin Nano)
+Date: 2025
+For: Captain and Engineering Team Review
+
+================================================================================

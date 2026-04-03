@@ -1,0 +1,363 @@
+{
+  "_comment": "Dockside Calibration & Commissioning Configuration — Vessel presets, calibration procedures, PID tuning, NVS keys",
+  "_version": "1.0.0",
+  "_schema": "calibration_config",
+  "_source_briefs": ["VP-TB-013 (Brief 13)"],
+
+  "vessel_types": {
+    "_comment": "Preset configurations per vessel hull type. Each preset selects initial PID gains, rudder limits, and timing parameters.",
+    "types": [
+      {
+        "id": 0,
+        "name": "displacement",
+        "description": "Heavy displacement hull — slow maneuvering, large rudder authority at speed, significant inertia",
+        "typical_length_ft": [30, 120],
+        "typical_speed_kts": [6, 14],
+        "performance_targets": {
+          "rise_time_30deg_sec": 20,
+          "max_overshoot_deg": 5,
+          "max_settling_sec": 30
+        }
+      },
+      {
+        "id": 1,
+        "name": "planing",
+        "description": "Planing hull — fast response, reduced rudder authority at low speed, less inertia",
+        "typical_length_ft": [18, 40],
+        "typical_speed_kts": [12, 35],
+        "performance_targets": {
+          "rise_time_30deg_sec": 10,
+          "max_overshoot_deg": 6,
+          "max_settling_sec": 20
+        }
+      },
+      {
+        "id": 2,
+        "name": "semi_displacement",
+        "description": "Semi-displacement hull — moderate response, compromise between displacement and planing",
+        "typical_length_ft": [25, 70],
+        "typical_speed_kts": [8, 22],
+        "performance_targets": {
+          "rise_time_30deg_sec": 15,
+          "max_overshoot_deg": 5,
+          "max_settling_sec": 25
+        }
+      },
+      {
+        "id": 3,
+        "name": "sail",
+        "description": "Sailing vessel — significant weather helm, slow response, need for counter-rudder tuning",
+        "typical_length_ft": [25, 60],
+        "typical_speed_kts": [3, 10],
+        "performance_targets": {
+          "rise_time_30deg_sec": 25,
+          "max_overshoot_deg": 4,
+          "max_settling_sec": 35
+        }
+      }
+    ],
+    "vessel_config_params": {
+      "_comment": "Parameters collected during calibration Step 1",
+      "vessel_type": {"type": "uint8", "range": [0, 3], "nvs_key": "vessel_type", "options": ["displacement", "planing", "semi_displacement", "sail"]},
+      "vessel_length": {"type": "uint16", "range": [15, 300], "unit": "feet", "nvs_key": "vessel_length"},
+      "vessel_displacement": {"type": "uint16", "range": [1, 2000], "unit": "tons", "nvs_key": "vessel_displacement"},
+      "max_speed": {"type": "uint8", "range": [5, 45], "unit": "knots", "nvs_key": "max_speed"},
+      "num_engines": {"type": "uint8", "range": [1, 4], "nvs_key": "num_engines"},
+      "propulsion_type": {"type": "uint8", "nvs_key": "propulsion_type", "options": ["single", "twin"]},
+      "steering_type": {"type": "uint8", "nvs_key": "steering_type", "options": ["hydraulic", "mechanical", "power-assist"]},
+      "num_rudders": {"type": "uint8", "range": [1, 2], "nvs_key": "num_rudders"},
+      "rudder_config": {"type": "uint8", "nvs_key": "rudder_config", "options": ["single", "twin-outboard"]},
+      "vessel_name": {"type": "string", "max_length": 24, "nvs_key": "vessel_name"},
+      "captain_name": {"type": "string", "max_length": 24, "nvs_key": "captain_name"}
+    }
+  },
+
+  "compass_calibration": {
+    "procedure": "swing_ship_360",
+    "pre_checks": {
+      "bno085_self_test": {
+        "required": ["sys=1", "gyro=1", "accel=1", "mag>=2"],
+        "on_fail": "Display warning: 'IMU not ready. Move vessel away from large metal objects.'"
+      },
+      "magnetic_interference": {
+        "mag_range_uT": [20, 1200],
+        "on_low": "Check for ferrous objects nearby",
+        "on_high": "Strong magnetic interference detected. Check for steel, electronics, or power cables."
+      }
+    },
+    "rotation": {
+      "method": "Dockside 'Swing Ship' — rotate vessel 360° or walk handheld compass reference",
+      "speed": "30 sec/revolution",
+      "sample_rate_hz": 50,
+      "min_samples": 500,
+      "min_confidence_pct": 70,
+      "recommended_confidence_pct": 85
+    },
+    "calibration_algorithm": {
+      "step1": "Set BNO085 to raw magnetometer mode (0x01)",
+      "step2": "Sample at 50 Hz during rotation, store (timestamp, mag_x, mag_y, mag_z)",
+      "step3": "Perform hard iron correction: compute mean of mag vector, subtract from all samples",
+      "step4": "Perform soft iron correction: fit ellipsoid to corrected data using least-squares, compute transformation matrix",
+      "step5": "Store calibration blob: hard_iron_offset (3×float) + soft_iron_matrix (3×3×float) = 48 bytes"
+    },
+    "deviation_table": {
+      "num_entries": 36,
+      "resolution_deg": 10,
+      "format": "signed int8 per entry (0.1° resolution, range ±12.8°)",
+      "table_version": 1,
+      "total_bytes": 48,
+      "interpolation": "Linear between nearest 10° bins",
+      "application": "true_heading = compass_heading + interpolate(deviation_table, compass_heading)"
+    },
+    "tolerances": {
+      "acceptable_deg": 2.0,
+      "marginal_deg": 5.0,
+      "recalibrate_above_deg": 5.0
+    },
+    "confidence_score": {
+      "weights": {
+        "coverage_completeness": 0.40,
+        "sample_density": 0.20,
+        "ellipsoid_fit_quality": 0.20,
+        "validation_residual": 0.20
+      },
+      "formula": "0.40 * coverage + 0.20 * density + 0.20 * fit_quality + 0.20 * validation_residual"
+    },
+    "validation": {
+      "method": "Compare calibrated heading against known bearing or GPS COG",
+      "gps_cog_min_speed_kts": 2.0,
+      "gps_cog_condition": "Calm water, no current"
+    }
+  },
+
+  "rudder_calibration": {
+    "center_method": {
+      "procedure": "Captain manually centers wheel to amidships using mechanical center mark",
+      "confirmation": "STBY button press",
+      "sampling": "100 samples at 100 Hz over 1 second",
+      "filter": "Median filter (rejects vibration spikes at dock)",
+      "storage_key": "rudder_center_raw",
+      "storage_type": "uint16",
+      "description": "AS5048A encoder value at rudder amidships"
+    },
+    "limit_method": {
+      "procedure": "Captain turns wheel hard to port and starboard mechanical stops",
+      "port_capture": "AUTO button press, 500ms sample at 100 Hz, median",
+      "stbd_capture": "AUTO button press, 500ms at 100 Hz, median",
+      "port_storage_key": "rudder_port_limit_raw",
+      "stbd_storage_key": "rudder_stbd_limit_raw",
+      "angle_calculation": "(raw_value - center_raw) × 360 / 16384",
+      "port_deg_key": "rudder_port_limit_deg",
+      "stbd_deg_key": "rudder_stbd_limit_deg",
+      "software_margin_deg": 2.0,
+      "margin_description": "Software limit = mechanical stop - 2° to prevent driving against stops",
+      "margin_key": "rudder_margin_deg",
+      "asymmetry_warning_threshold_deg": 3.0,
+      "asymmetry_action": "Display warning: 'RUDDER TRAVEL ASYMMETRIC. Check mechanical linkage.'"
+    },
+    "counter_rudder_test": {
+      "requires_underway": true,
+      "min_speed_kts": 3.0,
+      "heading_changes_deg": [20, 30, 40],
+      "measured_metrics": ["peak_rudder_angle", "rudder_at_settling", "overshoot_deg", "settling_time_sec"],
+      "gain_adjustment": {
+        "overshoot_above_5": {"action": "increase counter_rudder_gain", "step": 0.1},
+        "overshoot_below_1": {"action": "decrease counter_rudder_gain", "step": 0.05},
+        "acceptable_range": [1.0, 5.0]
+      },
+      "algorithm": "rudder_command = pid_output - counter_rudder_gain × d(rudder_angle)/dt × sign(heading_error)",
+      "applied_when": "|heading_error| < 10° AND heading_error decreasing"
+    }
+  },
+
+  "pid_presets": {
+    "_comment": "PID gain presets organized by vessel type × sea state. These are starting values refined during calibration Steps 4-5.",
+    "_reference_firmware": "PID gain structure: u = P*e + I*integral(e) + D*(-dh/dt) + DD*(d²h/dt²) + PR*sqrt(|e|)*sign(e) + FF*d(heading_cmd)/dt",
+    "displacement": {
+      "calm": {"P": 1.2, "I": 0.05, "D": 0.8, "DD": 0.1, "PR": 0.3, "FF": 0.15, "description": "Light winds, calm seas"},
+      "rough": {"P": 1.5, "I": 0.08, "D": 1.1, "DD": 0.12, "PR": 0.4, "FF": 0.10, "description": "Strong winds, heavy seas (increased D for damping)"},
+      "light": {"P": 0.8, "I": 0.03, "D": 0.6, "DD": 0.08, "PR": 0.2, "FF": 0.10, "description": "Light air, drifting (reduced P, increased FF)"}
+    },
+    "planing": {
+      "calm": {"P": 2.5, "I": 0.08, "D": 1.2, "DD": 0.2, "PR": 0.5, "FF": 0.25, "description": "Light winds, calm seas"},
+      "rough": {"P": 3.0, "I": 0.12, "D": 1.5, "DD": 0.25, "PR": 0.6, "FF": 0.15, "description": "Strong winds, heavy seas"},
+      "light": {"P": 1.8, "I": 0.05, "D": 0.9, "DD": 0.15, "PR": 0.35, "FF": 0.30, "description": "Light air, reduced speed"}
+    },
+    "semi_displacement": {
+      "calm": {"P": 1.8, "I": 0.06, "D": 1.0, "DD": 0.15, "PR": 0.4, "FF": 0.20, "description": "Light winds, calm seas"},
+      "rough": {"P": 2.2, "I": 0.10, "D": 1.3, "DD": 0.18, "PR": 0.5, "FF": 0.15, "description": "Strong winds, heavy seas"},
+      "light": {"P": 1.2, "I": 0.04, "D": 0.7, "DD": 0.10, "PR": 0.25, "FF": 0.25, "description": "Light air, reduced speed"}
+    },
+    "sail": {
+      "calm": {"P": 0.8, "I": 0.03, "D": 0.6, "DD": 0.08, "PR": 0.2, "FF": 0.10, "description": "Light winds, calm seas"},
+      "rough": {"P": 1.0, "I": 0.05, "D": 0.8, "DD": 0.10, "PR": 0.3, "FF": 0.08, "description": "Strong winds, heavy seas (increased D for weather helm)"},
+      "light": {"P": 0.5, "I": 0.02, "D": 0.4, "DD": 0.05, "PR": 0.15, "FF": 0.08, "description": "Very light air, minimal speed"}
+    }
+  },
+
+  "circle_test": {
+    "description": "Full 360° verification test of compass linearity and autopilot performance",
+    "requires_open_water": true,
+    "min_speed_kts": 3.0,
+    "method": "Captain engages autopilot, steers full circle at cruise speed while system records",
+    "recording": {
+      "rate_hz": 1,
+      "duration": "full 360° rotation (~5-10 minutes)"
+    },
+    "analysis": {
+      "total_heading_change_target_deg": 360.0,
+      "continuity_max_jump_deg": 10,
+      "quadrants": [
+        {"range": "0-90", "max_deviation_deg": 5.0},
+        {"range": "90-180", "max_deviation_deg": 5.0},
+        {"range": "180-270", "max_deviation_deg": 5.0},
+        {"range": "270-360", "max_deviation_deg": 5.0}
+      ],
+      "deviation_above_5_action": "Display FAILED, suggest compass recalibration (Step 2) or captain acceptance"
+    },
+    "pass_criteria": {
+      "total_turn_deg_min": 355,
+      "total_turn_deg_max": 365,
+      "max_deviation_per_10deg_deg": 5.0,
+      "all_quadrants_pass": true
+    },
+    "average_deviation_acceptable_deg": 2.0
+  },
+
+  "alarm_tests": {
+    "kill_switch": {
+      "expected_response_ms": 100,
+      "required_behavior": "De-energize all solenoids, sound buzzer, display alarm, transmit CAN KILL_SWITCH_ACTIVATED",
+      "reset_behavior": "NOT auto-re-engage. Require explicit AUTO press to resume."
+    },
+    "power_cycle": {
+      "expected_boot_mode": "STANDBY",
+      "required_behavior": "Boot to STANDBY, NOT move solenoids, NOT auto-engage. Captain must manually press AUTO."
+    },
+    "off_course_alarm": {
+      "threshold_deg": 10,
+      "timeout_before_disengage_sec": 15,
+      "required_behavior": "Detect heading error > 10°, sound alarm, auto-disengage after 15s"
+    }
+  },
+
+  "nvs_keys": {
+    "_comment": "Complete NVS key registry for the autopilot node. Keys stored in 'autopilot' NVS namespace unless otherwise noted.",
+    "_nvs_partition_size_kb": 24,
+    "_total_estimated_usage_bytes": 360,
+    "identity_namespace": {
+      "commissioned": {"type": "uint8", "default": 0, "values": {"factory": 0, "commissioned": 1}, "description": "Commissioning status flag"},
+      "settings_version": {"type": "uint32", "default": 0, "description": "Monotonically incremented on every save"},
+      "settings_crc": {"type": "uint32", "default": 0, "description": "CRC-32 of all settings block"},
+      "setup_current_step": {"type": "uint8", "default": 0, "range": [0, 8], "description": "Current calibration wizard step (for resume after power cycle)"},
+      "node_id": {"type": "string", "max_length": 16, "default": "", "namespace": "identity", "description": "Unique node identifier"},
+      "role": {"type": "uint8", "default": 255, "namespace": "identity", "values": {"unknown": 255}, "description": "Role enum value"},
+      "firmware_version": {"type": "string", "max_length": 12, "default": "0.0.0", "namespace": "identity", "description": "Firmware version string"}
+    },
+    "vessel_config": {
+      "vessel_type": {"type": "uint8", "default": 0, "options": {"displacement": 0, "planing": 1, "semi_displacement": 2, "sail": 3}},
+      "vessel_length": {"type": "uint16", "default": 0, "range": [15, 300], "unit": "feet"},
+      "vessel_displacement": {"type": "uint16", "default": 0, "range": [1, 2000], "unit": "tons"},
+      "max_speed": {"type": "uint8", "default": 0, "range": [5, 45], "unit": "knots"},
+      "num_engines": {"type": "uint8", "default": 1, "range": [1, 4]},
+      "propulsion_type": {"type": "uint8", "default": 0, "options": {"single": 0, "twin": 1}},
+      "steering_type": {"type": "uint8", "default": 0, "options": {"hydraulic": 0, "mechanical": 1, "power_assist": 2}},
+      "num_rudders": {"type": "uint8", "default": 1, "options": {"single": 1, "twin": 2}},
+      "rudder_config": {"type": "uint8", "default": 0, "options": {"single": 0, "twin-outboard": 1}},
+      "vessel_name": {"type": "string", "max_length": 24, "default": ""},
+      "captain_name": {"type": "string", "max_length": 24, "default": ""}
+    },
+    "rudder_calibration": {
+      "rudder_center_raw": {"type": "uint16", "default": 8192, "description": "AS5048A value at amidships (14-bit, mid-range)"},
+      "rudder_port_limit_raw": {"type": "uint16", "default": 0, "description": "AS5048A at port mechanical stop"},
+      "rudder_stbd_limit_raw": {"type": "uint16", "default": 16383, "description": "AS5048A at starboard mechanical stop"},
+      "rudder_port_limit_deg": {"type": "float", "default": -33.0, "unit": "degrees", "description": "Port limit in degrees (negative)"},
+      "rudder_stbd_limit_deg": {"type": "float", "default": 33.0, "unit": "degrees", "description": "Starboard limit in degrees"},
+      "rudder_max_deg": {"type": "float", "default": 33.0, "unit": "degrees", "description": "Software limit (minimum of both absolute limits)"},
+      "rudder_margin_deg": {"type": "float", "default": 2.0, "unit": "degrees", "description": "Safety margin from mechanical stop"}
+    },
+    "compass_calibration": {
+      "compass_cal_blob": {"type": "blob", "size": 48, "default": null, "description": "Hard iron offset (3×float) + soft iron matrix (3×3×float)"},
+      "compass_cal_valid": {"type": "uint8", "default": 0, "values": {"invalid": 0, "valid": 1}, "description": "Calibration validity flag"},
+      "compass_deviation_table": {"type": "blob", "size": 48, "default": null, "description": "36 deviation entries (int8 each, 0.1° resolution)"},
+      "compass_confidence": {"type": "uint8", "default": 0, "range": [0, 100], "unit": "%", "description": "Calibration confidence score"},
+      "compass_cal_timestamp": {"type": "uint32", "default": 0, "description": "Unix epoch of last calibration"}
+    },
+    "pid_gains": {
+      "pid_p": {"type": "float", "default": 0.003, "min": 0.0, "max": 0.03, "description": "Proportional gain"},
+      "pid_i": {"type": "float", "default": 0.0, "min": 0.0, "max": 0.05, "description": "Integral gain (0 = disabled)"},
+      "pid_d": {"type": "float", "default": 0.09, "min": 0.0, "max": 0.24, "description": "Derivative gain (rate of turn damping)"},
+      "pid_dd": {"type": "float", "default": 0.075, "min": 0.0, "max": 0.24, "description": "Second derivative (reaction time)"},
+      "pid_pr": {"type": "float", "default": 0.005, "min": 0.0, "max": 0.02, "description": "Proportional root (overshoot reduction)"},
+      "pid_ff": {"type": "float", "default": 0.6, "min": 0.0, "max": 2.4, "description": "Feed forward (course change response)"},
+      "counter_rudder_gain": {"type": "float", "default": 0.0, "min": 0.0, "max": 1.0, "description": "Counter-rudder coefficient"},
+      "yaw_damping_gain": {"type": "float", "default": 0.09, "min": 0.0, "max": 3.0, "description": "Final D gain value (yaw damping tuning result)"}
+    },
+    "sea_state_profiles": {
+      "profile_calm_p": {"type": "float", "default": 0.003, "description": "Calm sea P gain"},
+      "profile_calm_d": {"type": "float", "default": 0.09, "description": "Calm sea D gain"},
+      "profile_rough_p": {"type": "float", "default": 0.005, "description": "Rough sea P gain"},
+      "profile_rough_d": {"type": "float", "default": 0.12, "description": "Rough sea D gain"},
+      "profile_light_p": {"type": "float", "default": 0.002, "description": "Light conditions P gain"},
+      "profile_light_d": {"type": "float", "default": 0.06, "description": "Light conditions D gain"}
+    },
+    "runtime_state": {
+      "last_heading": {"type": "float", "default": 0.0, "unit": "degrees", "description": "Last known heading (persisted on shutdown)"},
+      "last_mode": {"type": "uint8", "default": 0, "values": {"standby": 0, "auto": 1, "track": 2, "wind": 3, "alarm": 99}, "description": "Last operating mode"},
+      "total_autopilot_hours": {"type": "uint32", "default": 0, "unit": "hours", "description": "Cumulative autopilot operating hours"},
+      "power_cycle_count": {"type": "uint32", "default": 0, "description": "Number of boot cycles"},
+      "last_commission_date": {"type": "uint32", "default": 0, "description": "Unix epoch of last calibration Step 8 completion"}
+    }
+  },
+
+  "wizard_steps": {
+    "_comment": "8-step dockside setup wizard. Each step is individually persistent — current step stored in setup_current_step NVS key.",
+    "total_steps": 8,
+    "steps": [
+      {"step": 1, "name": "vessel_config", "description": "Vessel type, length, displacement, propulsion", "dockside": true, "required": true},
+      {"step": 2, "name": "compass_calibration", "description": "Swing ship 360° for hard/soft iron correction", "dockside": true, "required": true},
+      {"step": 3, "name": "rudder_calibration", "description": "Center finding + limit detection + counter-rudder test", "dockside": false, "required": true},
+      {"step": 4, "name": "yaw_damping", "description": "D gain tuning to eliminate yaw oscillation", "dockside": false, "required": true},
+      {"step": 5, "name": "response_speed", "description": "P gain tuning for transient response", "dockside": false, "required": true},
+      {"step": 6, "name": "circle_test", "description": "Full 360° compass and autopilot verification", "dockside": false, "required": true},
+      {"step": 7, "name": "alarm_tests", "description": "Kill switch, power cycle, off-course alarm", "dockside": false, "required": true},
+      {"step": 8, "name": "save_finalize", "description": "Persist all data, CRC verification, backup to Jetson", "dockside": false, "required": true}
+    ]
+  },
+
+  "save_finalize": {
+    "steps": [
+      "Increment settings_version (rolling counter)",
+      "Write all parameters to NVS namespace 'autopilot'",
+      "Write NVS key commissioned = 0x01",
+      "Compute CRC-32 of all calibration data",
+      "Store CRC in NVS key settings_crc",
+      "If dual-ESP32: transmit settings to secondary via UART cross-link, secondary writes to NVS, secondary reads back and verifies CRC",
+      "Jetson backup: receive all settings via serial, write to SQLite, compute independent CRC, compare",
+      "Display summary on OLED with vessel name, calibration status, PID gains, settings version, CRC"
+    ]
+  },
+
+  "recalibration_triggers": {
+    "compass": {
+      "conditions": [
+        {"condition": "compass_confidence < 50%", "message": "Compass accuracy degraded. Long-press MODE → Calibrate"},
+        {"condition": "Heading jumps > 10°", "message": "Suspected compass fault. Long-press MODE → Calibrate"},
+        {"condition": "BNO085 recalibration flag set", "message": "IMU recalibration needed. Long-press MODE → Calibrate"}
+      ],
+      "schedule": "Annually, or when triggered by conditions above"
+    },
+    "rudder": {
+      "conditions": [
+        {"condition": "Rudder angle reads outside calibrated limits", "message": "Rudder sensor discrepancy. Long-press MODE → Rudder Cal"},
+        {"condition": "Rudder center drift > 2° from stored", "message": "Rudder center drift detected. Long-press MODE → Rudder Cal"}
+      ],
+      "schedule": "After any mechanical work on steering system"
+    },
+    "counter_rudder": {
+      "conditions": [
+        {"condition": "Overshoot > 8° on 3 consecutive heading changes", "message": "Steering behavior changed. Run counter-rudder test? MODE → Counter-Rudder"}
+      ]
+    }
+  }
+}

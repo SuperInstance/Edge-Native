@@ -1,0 +1,347 @@
+{
+  "_comment": "FreeRTOS Task Definitions \u2014 Complete task layout, priorities, stacks, and inter-task communication for ESP32 marine autopilot",
+  "_version": "1.1.0",
+  "_freertos_version": "10.5.1",
+  "_tick_rate_hz": 1000,
+  "_cpu_freq_mhz": 240,
+  "config_constants": {
+    "CONFIG_FREERTOS_HZ": 1000,
+    "CONFIG_FREERTOS_MAX_TASK_NAME_LEN": 16,
+    "CONFIG_FREERTOS_TIMER_TASK_PRIORITY": 22,
+    "CONFIG_FREERTOS_TIMER_QUEUE_LENGTH": 10,
+    "CONFIG_FREERTOS_CHECK_STACKOVERFLOW": 2,
+    "CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP": 2,
+    "CONFIG_FREERTOS_ASSERT_FAIL": "abort"
+  },
+  "tasks": [
+    {
+      "name": "task_pid_control",
+      "description": "Execute PID control loop. Compute rudder command from heading error. Drive solenoid MOSFETs. NEVER blocks \u2014 NEVER calls blocking API.",
+      "priority": 24,
+      "stack_size_bytes": 2048,
+      "core": 0,
+      "period_ms": 10,
+      "watchdog_timeout_ms": 50,
+      "affinity": "core0",
+      "preemption_allowed": false,
+      "notes": "Highest application priority (25 reserved for NMI/panic). CPU utilization ~25%. WCET ~2.5ms. Reads shared variables written by lower-priority tasks. Uses xTaskNotifyWait with 0 timeout to check for gain updates."
+    },
+    {
+      "name": "task_watchdog",
+      "description": "Monitor health of all tasks, verify PID executing, manage external WDT, generate alarms, update status LEDs.",
+      "priority": 23,
+      "stack_size_bytes": 1024,
+      "core": 0,
+      "period_ms": 100,
+      "watchdog_timeout_ms": 500,
+      "notes": "Checks: PID heartbeat <50ms, compass fresh <500ms, Jetson heartbeat <2000ms, rudder fresh <200ms. Kicks MAX6818 every cycle. Updates LEDs and buzzer.. Also checks I2C bus health (no successful I2C transaction in 200ms \u2192 I2C_BUS_ERROR alarm)."
+    },
+    {
+      "name": "task_nmea_parser",
+      "description": "Parse incoming NMEA 0183 sentences from UART1. Validate checksums. Extract heading, GPS, wind, APB data.",
+      "priority": 20,
+      "stack_size_bytes": 4096,
+      "core": 0,
+      "trigger": "event",
+      "watchdog_timeout_ms": 500,
+      "notes": "Largest stack (string parsing). Woken by UART1 RX DMA event. Parses HDM/HDT/HDG/RMC/GGA/APB/RMB/VHW/MWV. Updates shared navigation data."
+    },
+    {
+      "name": "task_serial_jetson_tx",
+      "description": "Transmit telemetry messages to Jetson over UART2. JSON serialization + CRC-16 checksum.",
+      "priority": 19,
+      "stack_size_bytes": 2048,
+      "core": 0,
+      "trigger": "event",
+      "watchdog_timeout_ms": 1000,
+      "notes": "Telemetry at 10Hz (heading, rudder, PID state) and 1Hz (full status). Rate-limited to prevent UART flooding."
+    },
+    {
+      "name": "task_serial_jetson_rx",
+      "description": "Receive and parse commands from Jetson over UART2. Validate, bounds-check, execute.",
+      "priority": 19,
+      "stack_size_bytes": 2048,
+      "core": 0,
+      "trigger": "event",
+      "watchdog_timeout_ms": 1000,
+      "notes": "Parses set_heading, engage, standby, set_mode, set_gains, get_status, calibrate, heartbeat, etc. Updates Jetson heartbeat timestamp."
+    },
+    {
+      "name": "task_compass_reader",
+      "description": "Read BNO085 compass via I2C at 10Hz. Apply IIR filter. Update shared heading (double-buffered).",
+      "priority": 18,
+      "stack_size_bytes": 2048,
+      "core": 0,
+      "period_ms": 100,
+      "watchdog_timeout_ms": 500,
+      "notes": "IIR filter alpha=0.3 (~3Hz cutoff). Double-buffer for atomic PID reads. Checks compass health (rate-of-change sanity). Requires i2c0_mutex."
+    },
+    {
+      "name": "task_rudder_feedback",
+      "description": "Read AS5048A encoder via I2C (or potentiometer via ADC) at 50Hz. Update shared rudder angle.",
+      "priority": 18,
+      "stack_size_bytes": 1024,
+      "core": 0,
+      "period_ms": 20,
+      "watchdog_timeout_ms": 200,
+      "notes": "Median filter (5 samples). Rate limiter rejects >500\u00b0/sec. If AS5048A: read I2C 0x40 reg 0xFE/0xFF. If pot: ADC1_CH5. Requires i2c0_mutex for encoder."
+    },
+    {
+      "name": "task_current_monitor",
+      "description": "Read ACS712 current sensors (drive circuit, clutch) via I2C ADC (ADS1115). Detect overcurrent, stall, clutch engagement.",
+      "priority": 17,
+      "stack_size_bytes": 1024,
+      "core": 0,
+      "period_ms": 50,
+      "watchdog_timeout_ms": 200,
+      "notes": "NEW task (not in Brief 02, required by Brief 03). Reads 2 ACS712 sensors via ADS1115 I2C ADC @0x48. Detects: overcurrent (>4A drive, >3A clutch), stall (high current + no rudder movement), clutch engagement (current >0.5A)."
+    },
+    {
+      "name": "task_button_handler",
+      "description": "Debounce and process physical button inputs. Short/long press detection. Execute actions.",
+      "priority": 15,
+      "stack_size_bytes": 1024,
+      "core": 0,
+      "trigger": "event",
+      "watchdog_timeout_ms": 5000,
+      "notes": "6 buttons (AUTO/STBY, PORT\u00b11/\u00b110, STBD\u00b11/\u00b110, MODE). ISR sets notification bits. 50ms debounce. Long press >1000ms. GPIO35-40 are input-only (external pull-ups required)."
+    },
+    {
+      "name": "task_display_oled",
+      "description": "Update SSD1306 128x64 OLED display. Render pages (status, detailed, calibration, system).",
+      "priority": 12,
+      "stack_size_bytes": 4096,
+      "core": 0,
+      "period_ms": 200,
+      "watchdog_timeout_ms": 5000,
+      "notes": "5Hz refresh. Framebuffer 1024 bytes included in stack. Shares I2C0 with compass/encoder (i2c0_mutex). 4 display pages cycled by MODE long-press."
+    },
+    {
+      "name": "task_mqtt_client",
+      "description": "Optional WiFi telemetry. Publish autopilot state to MQTT broker (Signal K). Remote monitoring via tablet/phone.",
+      "priority": 8,
+      "stack_size_bytes": 4096,
+      "core": 1,
+      "period_ms": 1000,
+      "watchdog_timeout_ms": 10000,
+      "notes": "DISABLED BY DEFAULT. WiFi on Core 1 to avoid PID jitter. Remote commands DISABLED by default (require OLED confirmation). TX power minimum. Auto-disables if PID misses deadline."
+    }
+  ],
+  "queues": {
+    "_comment": "FreeRTOS message queues for structured inter-task data transfer",
+    "jetson_tx_queue": {
+      "description": "Telemetry messages from any task -> task_serial_jetson_tx",
+      "depth": 32,
+      "item_size_bytes": 64,
+      "item_struct": "jetson_tx_msg_t",
+      "writers": [
+        "task_pid_control",
+        "task_compass_reader",
+        "task_rudder_feedback",
+        "task_watchdog",
+        "task_serial_jetson_rx"
+      ],
+      "reader": "task_serial_jetson_tx"
+    },
+    "jetson_rx_queue": {
+      "description": "Parsed commands from task_serial_jetson_rx -> command dispatcher",
+      "depth": 16,
+      "item_size_bytes": 48,
+      "item_struct": "jetson_cmd_t",
+      "writers": [
+        "task_serial_jetson_rx"
+      ],
+      "reader": "task_serial_jetson_rx"
+    },
+    "alarm_queue": {
+      "description": "Alarm events from any task -> task_watchdog + task_display_oled",
+      "depth": 8,
+      "item_size_bytes": 32,
+      "item_struct": "alarm_t",
+      "writers": [
+        "task_pid_control",
+        "task_compass_reader",
+        "task_rudder_feedback",
+        "task_current_monitor",
+        "task_watchdog",
+        "task_nmea_parser"
+      ],
+      "reader": [
+        "task_watchdog",
+        "task_display_oled"
+      ]
+    },
+    "display_queue": {
+      "description": "Display update requests from any task -> task_display_oled",
+      "depth": 4,
+      "item_size_bytes": 16,
+      "item_struct": "display_cmd_t",
+      "writers": [
+        "task_button_handler",
+        "task_watchdog",
+        "task_serial_jetson_rx"
+      ],
+      "reader": "task_display_oled"
+    }
+  },
+  "mutexes": {
+    "i2c0_mutex": {
+      "description": "Protects I2C0 bus access (compass, rudder encoder, OLED display)",
+      "max_hold_time_ms": 5,
+      "users": [
+        "task_compass_reader",
+        "task_rudder_feedback",
+        "task_display_oled"
+      ],
+      "acquire_timeout_ms": 100,
+      "_comment_timeout": "Fix C-06: Mutex acquisition MUST use finite timeout to prevent indefinite blocking if I2C bus is locked."
+    },
+    "nvs_mutex": {
+      "description": "Protects NVS (flash) access for calibration data persistence",
+      "max_hold_time_ms": 100,
+      "users": [
+        "task_button_handler",
+        "task_serial_jetson_rx"
+      ]
+    },
+    "pid_gains_mutex": {
+      "description": "Protects multi-field PID gains update (all gains written atomically)",
+      "max_hold_time_us": 1,
+      "users": [
+        "task_serial_jetson_rx"
+      ],
+      "readers": [
+        "task_pid_control"
+      ]
+    },
+    "heading_mutex": {
+      "description": "Fix C-05: Replaces unprotected double-buffer for heading data. Atomic copy with mutex prevents TOCTOU race condition between compass writer (priority 18) and PID reader (priority 24). Writer acquires lock, writes single buffer, releases. Reader acquires lock, copies to local, releases. Lock hold time < 1\u00b5s \u2014 no impact on PID timing.",
+      "type": "mutex",
+      "max_hold_time_us": 10,
+      "replaces": "volatile double-buffer (heading_buf[2] + heading_active)",
+      "users": [
+        "task_compass_reader",
+        "task_pid_control",
+        "task_mqtt_client"
+      ],
+      "writers": [
+        "task_compass_reader"
+      ],
+      "readers": [
+        "task_pid_control",
+        "task_mqtt_client"
+      ],
+      "memory_attribute": "__attribute__((section(\".dram\")))",
+      "notes": "All shared heading data placed in uncached DRAM to ensure inter-core cache coherence. Double-buffer pattern removed \u2014 single buffer with mutex is safer."
+    }
+  },
+  "semaphores": {
+    "uart1_rx_semaphore": {
+      "description": "NMEA data available on UART1 RX (set by DMA ISR)",
+      "type": "binary",
+      "max_count": 1,
+      " isr_giver": true,
+      "waiter": "task_nmea_parser"
+    },
+    "uart2_rx_semaphore": {
+      "description": "Jetson command data available on UART2 RX (set by DMA ISR)",
+      "type": "binary",
+      "max_count": 1,
+      "isr_giver": true,
+      "waiter": "task_serial_jetson_rx"
+    }
+  },
+  "event_groups": {
+    "system_events": {
+      "description": "System state bit flags for cross-task state awareness",
+      "bits": {
+        "0": {
+          "name": "COMPASS_READY",
+          "description": "Compass data valid and fresh"
+        },
+        "1": {
+          "name": "JETSON_LINK_UP",
+          "description": "Jetson heartbeat received within timeout"
+        },
+        "2": {
+          "name": "GPS_FIX_VALID",
+          "description": "GPS has valid fix (GGA fix_quality >= 1)"
+        },
+        "3": {
+          "name": "RUDDER_CALIBRATED",
+          "description": "Rudder sensor calibration stored in NVS"
+        },
+        "4": {
+          "name": "AUTOPILOT_ENGAGED",
+          "description": "Autopilot is actively controlling heading"
+        },
+        "5": {
+          "name": "CLUTCH_ENGAGED",
+          "description": "Clutch solenoid energized and confirmed"
+        },
+        "6": {
+          "name": "ALARM_ACTIVE",
+          "description": "At least one alarm is active"
+        },
+        "7": {
+          "name": "WATER_SPEED_VALID",
+          "description": "Water speed data received within timeout"
+        }
+      },
+      "setters": [
+        "task_compass_reader",
+        "task_nmea_parser",
+        "task_serial_jetson_rx",
+        "task_button_handler",
+        "task_current_monitor",
+        "task_watchdog"
+      ],
+      "readers": [
+        "task_watchdog",
+        "task_display_oled",
+        "task_pid_control"
+      ]
+    }
+  },
+  "memory": {
+    "_comment": "Memory budget estimates for ESP32-S3 with 8MB PSRAM",
+    "total_sram_bytes": 524288,
+    "total_psram_bytes": 8388608,
+    "estimated_usage": {
+      "freertos_heap": 65536,
+      "task_stacks_total": 28672,
+      "queues_total": 3968,
+      "shared_data_structures": 2048,
+      "i2c_buffers": 1024,
+      "nmea_rx_buffer": 512,
+      "jetson_rx_buffer": 1024,
+      "jetson_tx_buffer": 1024,
+      "display_framebuffer": 1024,
+      "mqtt_buffers": 4096,
+      "misc_safety_margin": 20000,
+      "total_estimated": 106864,
+      "sram_headroom_pct": 79.6,
+      "psram_usage_bytes": 8192,
+      "psram_headroom_pct": 99.9
+    }
+  },
+  "i2c_bus_watchdog": {
+    "_comment": "Fix C-06: I2C bus lockup detection and recovery. If SCL held low >25ms by a stuck slave, bus is locked and all I2C devices stop communicating.",
+    "enabled": true,
+    "scl_low_timeout_ms": 25,
+    "consecutive_failures_before_recovery": 3,
+    "max_recovery_attempts": 5,
+    "recovery_method": "manual_scl_clock_9_cycles_then_bus_reset",
+    "recovery_details": {
+      "step_1": "Detect SCL held low for >25ms via GPIO interrupt on SCL pin",
+      "step_2": "Switch SCL to GPIO mode, manually toggle HIGH-LOW 9 times at ~100kHz",
+      "step_3": "Generate STOP condition (SDA HIGH while SCL HIGH)",
+      "step_4": "Re-initialize I2C peripheral (i2c_driver_delete + i2c_driver_install)",
+      "step_5": "Verify bus recovery by reading a known device (e.g., BNO085 WHO_AM_I register)",
+      "on_failure_after_max_attempts": "Generate I2C_BUS_ERROR alarm, trigger alarm action"
+    },
+    "transaction_timeout_ms": 50,
+    "i2c_health_check_interval_ms": 200,
+    "alarm_on_lockup": "I2C_BUS_ERROR"
+  }
+}

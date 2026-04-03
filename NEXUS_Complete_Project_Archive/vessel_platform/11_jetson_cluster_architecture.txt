@@ -1,0 +1,2132 @@
+================================================================================
+           JETSON ORIN CLUSTER ARCHITECTURE — TECHNICAL BRIEF
+     Commercial Fishing Vessel Autonomous Brain Platform (v1.0)
+================================================================================
+
+Document ID:   VESSEL-ARCH-2024-011
+Classification: Internal Engineering Reference
+Author:        Agent B — Jetson Cluster Architecture Expert
+Target:        3x NVIDIA Jetson Orin Nano Super (8GB) units
+Date:          2024
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. Executive Summary
+  2. Jetson Cluster Architecture
+       2.1 Overview & Physical Deployment
+       2.2 Jetson-Alpha: Navigation Station
+       2.3 Jetson-Bravo: Back Deck / Wheelhouse
+       2.4 Jetson-Charlie: Engine Room / Electronics Bay
+       2.5 Design Rationale: Why Three Jetsons
+  3. Language and Framework Choices
+       3.1 Primary Language: Python 3.11+
+       3.2 Jetson-Optimized Libraries
+       3.3 Communication Framework
+       3.4 MCP Server Implementation
+       3.5 Where C/C++ Is Required
+       3.6 Configuration Strategy
+  4. Model Distribution Strategy
+       4.1 Jetson-Alpha Model Allocation
+       4.2 Jetson-Bravo Model Allocation
+       4.3 Jetson-Charlie Model Allocation
+       4.4 VRAM Budget & Memory Isolation
+       4.5 Boot Loading Strategy
+  5. Cluster Communication
+       5.1 Physical Network Topology
+       5.2 gRPC Inter-Jetson RPC
+       5.3 MQTT Pub/Sub Message Bus
+       5.4 Redis Shared State Store
+       5.5 NMEA 0183 Multiplexer Daemon
+  6. Cluster Failover and Leader Election
+       6.1 Leader Election Mechanism
+       6.2 Failover Scenarios
+       6.3 Autopilot Command Arbitration
+       6.4 State Migration During Failover
+  7. STT/TTS System Design
+       7.1 Whisper Speech-to-Text
+       7.2 Piper Text-to-Speech
+       7.3 Audio Routing
+       7.4 Wake Word Detection
+       7.5 Full Conversation Loop
+       7.6 Latency Budget
+  8. ESP32 Provisioning Server
+       8.1 Firmware Vault Structure
+       8.2 Node Database
+       8.3 Provisioning Workflow
+       8.4 Calibration Data Replication
+  9. Software Package Manifest
+  10. Deployment & Boot Sequence
+  11. ASCII Architecture Diagrams
+  12. Risk Analysis & Mitigations
+  13. Appendices
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+This technical brief defines the architecture for a three-node NVIDIA Jetson Orin
+Nano Super cluster serving as the autonomous brain of a commercial fishing
+vessel. The cluster provides AI-driven navigation assistance, computer vision
+for deck operations, fish species identification, sonar processing, voice-based
+human-machine interaction, and centralized ESP32 sensor node management.
+
+Each Jetson unit is assigned a specialized role with dedicated model loading,
+eliminating runtime model swapping and ensuring deterministic inference latency.
+The cluster communicates over a dedicated Gigabit Ethernet backbone using gRPC
+for RPC calls, MQTT for telemetry pub/sub, and Redis for shared state. A
+leader-election protocol ensures that autopilot control and critical services
+survive any single-node failure.
+
+Key design constraints driving all architectural decisions:
+  - Marine environment: salt, moisture, vibration, EMI from radar/motors
+  - Limited bandwidth: no cloud dependency, all inference is local
+  - Deterministic timing: NMEA sentences, autopilot responses must be <50ms
+  - Parallel workloads: vision, LLM, STT/TTS run concurrently without contention
+  - Physical separation: units in different compartments to survive localized damage
+
+================================================================================
+2. JETSON CLUSTER ARCHITECTURE
+================================================================================
+
+2.1 Overview & Physical Deployment
+-----------------------------------
+
+The cluster comprises three NVIDIA Jetson Orin Nano Super modules, each housed
+in an IP67-rated marine enclosure with passive cooling fins, mounted in
+separate physical compartments of the vessel:
+
+  +---------------------------+---------------------------+---------------------------+
+  |       WHEELHOUSE          |      BACK DECK            |    ENGINE ROOM            |
+  |                           |                           |                           |
+  |  [Jetson-Alpha]           |  [Jetson-Bravo]           |  [Jetson-Charlie]         |
+  |  Nav Station              |  Aft Bulkhead             |  Electronics Bay          |
+  |  IP: 10.0.0.1             |  IP: 10.0.0.2             |  IP: 10.0.0.3             |
+  |                           |                           |                           |
+  |  - OpenCPN display        |  - 4x USB3 cameras       |  - NMEA USB connections   |
+  |  - Helm microphone+spkr   |  - Deck floodlight cam    |  - Radar serial           |
+  |  - USB GPS puck           |  - Trawl cam              |  - Depth sounder serial   |
+  |  - USB compass            |  - Stereo mic array       |  - Engine telemetry CAN   |
+  +---------------------------+---------------------------+---------------------------+
+         |                           |                           |
+         +===========================+===========================+
+                          MARINE GIGABIT ETHERNET BACKBONE
+                          (shielded Cat6, IP-rated glands)
+                                   |
+                          [Managed Gigabit Switch]
+                          (Netgear GS308T or equiv.)
+                          IP: 10.0.0.254
+
+Physical power: Each Jetson is powered from independent DC-DC converters
+(12V → 19V, 60W capacity) connected to separate battery bus segments.
+If one compartment floods or loses power, the other two remain operational.
+
+Each enclosure contains:
+  - Jetson Orin Nano Super module + carrier board (NVIDIA dev kit or custom)
+  - 256GB NVMe SSD (Samsung 980 Pro or marine-grade equivalent)
+  - Real-time clock with battery backup (DS3231)
+  - Status LED cluster (power, network, leader, error)
+  - USB3 hub for peripheral connections
+  - RS-422 adapter for NMEA 0183 listener ports
+
+2.2 Jetson-Alpha: Navigation Station
+-------------------------------------
+
+Role: Primary human interface, autopilot control, LLM voice assistant.
+
+Services:
+  - OpenCPN (v5.8+): Chartplotter with NMEA input, route planning, alerts
+  - Autopilot MCP Server: Model Context Protocol server exposing vessel control
+    tools (rudder angle, throttle, waypoint navigation, MOB activation)
+  - NMEA Multiplexer Daemon (C): Deterministic routing of NMEA 0183 sentences
+    from all sources to all consumers with <1ms forwarding latency
+  - Qwen2.5-7B LLM (via Ollama): Conversational AI for voice assistant,
+    contextual marine awareness (current weather, route status, vessel state)
+  - Redis Server: Shared state store for the cluster
+  - MQTT Broker (Mosquitto): Telemetry message bus
+  - gRPC Server: RPC endpoint for cluster communication
+  - System Monitor: Prometheus node_exporter + Grafana for cluster health
+
+Primary USB Peripherals:
+  - GPS receiver (u-blox NMEA 0183 USB, 10Hz update)
+  - Magnetic compass (NMEA heading, USB serial)
+  - USB audio interface (helm microphone + cockpit speakers, e.g., Focusrite
+    Scarlett Solo or Behringer UMC22)
+  - AIS receiver (optional, USB serial NMEA)
+
+2.3 Jetson-Bravo: Back Deck / Wheelhouse
+-----------------------------------------
+
+Role: Computer vision, speech processing, deck safety monitoring.
+
+Services:
+  - DeepStream Pipeline (v7.0+): Hardware-accelerated video ingestion from
+    4 USB3 cameras (deck overview, trawl monitor, floodlight IR, stern cam)
+  - YOLOv8-nano / YOLOv11-nano: Real-time object detection running via
+    TensorRT, detecting personnel (PPE compliance), deck equipment, nets,
+    obstacles, marine mammals
+  - Whisper-small: Speech-to-text for helmsman voice commands, running on
+    Jetson GPU via faster-whisper with CTranslate2 backend
+  - Piper TTS: Text-to-speech engine for voice assistant responses, running
+    on ARM CPU cores (minimal GPU usage)
+  - Deck Safety Monitor: Analyzes camera feeds for unsafe conditions
+    (person overboard risk, gear malfunction, fire/smoke detection)
+  - gRPC Client/Server: Responds to vision queries from Alpha/Charlie
+  - MQTT Publisher: Streams detection events and camera metadata
+
+Primary USB Peripherals:
+  - 4x USB3 cameras (Arducam OV5647 or IMX477, global shutter preferred)
+  - Stereo microphone array (ReSpeaker Mic Array v2.0 or custom)
+  - Backup audio output (3.5mm to external amplifier for deck speakers)
+
+2.4 Jetson-Charlie: Engine Room / Electronics Bay
+--------------------------------------------------
+
+Role: Sensor data processing, sonar analysis, fish identification, ESP32
+provisioning hub.
+
+Services:
+  - NMEA Listener Daemon: Connects to depth sounder, radar, and any additional
+    serial NMEA devices via RS-422 adapters
+  - Depth Sounder ML Processor: Custom neural network analyzing bathymetric
+    data for bottom type classification, fish school detection, and safe
+    depth alerts
+  - Fish Species ID Model: Fine-tuned YOLOv8-nano trained on underwater
+    camera footage, identifying target species vs. bycatch (runs on
+    underwater trawl camera feed if available)
+  - Radar Target Analyzer: Processes radar returns (via NMEA TLL/TGT
+    sentences) for collision avoidance alerts and target tracking
+  - ESP32 Provisioning Server: Manages firmware vault, node database, OTA
+    updates for all ESP32 sensor nodes on the vessel
+  - Engine Telemetry Processor: CAN bus interface for engine RPM, fuel flow,
+    temperature, alternator status (via CANable USB-CAN adapter)
+  - gRPC Client/Server: Provides sensor data and analysis results to Alpha
+  - MQTT Publisher/Subscriber: Streams telemetry and receives commands
+
+Primary Connections:
+  - RS-422 serial: Depth sounder (Garmin or Simrad, 4800 baud NMEA DBT/DBS)
+  - RS-422 serial: Radar NMEA output (TLL, TTM, RSD sentences)
+  - USB-CAN adapter: Engine ECU CAN bus
+  - USB serial: Water temperature sensor
+  - Ethernet: Primary cluster connection
+
+2.5 Design Rationale: Why Three Jetsons
+----------------------------------------
+
+The decision to use three separate Jetson units rather than a single high-end
+Orin AGX or a cloud-connected solution is driven by multiple factors:
+
+MODEL MEMORY ISOLATION
+  Each Jetson has 8GB of unified LPDDR5 memory. Running a 7B LLM (~4.7GB),
+  a YOLOv8 model (~6MB with runtime buffers ~500MB), and Whisper-small
+  (~500MB with KV cache) simultaneously on a single 8GB device would leave
+  less than 2GB for the OS, TensorRT runtime, DeepStream pipelines, NMEA
+  buffers, and system services. This leads to:
+    - Thrashing: OS swapping to NVMe, killing inference performance
+    - OOM kills: Linux kernel terminating processes under memory pressure
+    - Inconsistent latency: GC pauses, memory allocation failures
+  With three units, each model runs in its own memory space with comfortable
+  headroom. VRAM utilization targets: <6GB per unit, leaving 2GB for OS.
+
+PHYSICAL SEPARATION
+  Commercial fishing vessels are wet, corrosive environments. A single point
+  of failure in the wheelhouse (e.g., a wave through a window, a fire, or
+  equipment rack flooding) would disable ALL vessel intelligence. By placing
+  Jetsons in three separate compartments:
+    - Wheelhouse (Alpha): If compromised, Bravo + Charlie still run vision
+      and sensors. The vessel can still navigate using basic GPS + compass
+      displayed on any tablet connected to the network.
+    - Back Deck (Bravo): If compromised, Alpha still runs navigation and
+      autopilot. Charlie still provides depth and radar data.
+    - Engine Room (Charlie): If compromised, Alpha handles nav and LLM,
+      Bravo handles vision and voice.
+  No single compartment failure disables all intelligence.
+
+PARALLEL INFERENCE
+  The Jetson Orin Nano Super delivers 67 TOPS (INT8). By distributing models
+  across three units, we achieve 201 TOPS of total inference capacity. All
+  three can run inference simultaneously:
+    - Alpha: LLM token generation (~40 tokens/sec) while processing NMEA
+    - Bravo: YOLOv8 at 30fps across 4 cameras while running Whisper STT
+    - Charlie: Fish ID model + depth sounder analysis + radar processing
+  This parallelism would be impossible on a single unit due to GPU contention.
+
+NO SINGLE POINT OF FAILURE
+  The leader election protocol (Section 6) ensures that if any Jetson fails,
+  the remaining units elect a new leader and rehost critical services. The
+  NMEA mux and autopilot MCP server are always running on exactly one unit,
+  preventing conflicting commands to the autopilot.
+
+COST EFFECTIVENESS
+  Three Jetson Orin Nano Super units (~$250 each = $750 total) are
+  significantly cheaper than a single Jetson AGX Orin 64GB ($2,000) while
+  providing superior performance through parallelism and better fault
+  tolerance. The total compute capacity (201 TOPS vs. 275 TOPS) is
+  comparable, and the distributed architecture provides resilience that a
+  single unit cannot match.
+
+
+================================================================================
+3. LANGUAGE AND FRAMEWORK CHOICES
+================================================================================
+
+3.1 Primary Language: Python 3.11+
+-----------------------------------
+
+All application-layer software is written in Python 3.11+, selected for:
+
+  - RAPID DEVELOPMENT: Python's ecosystem allows fast iteration on marine
+    AI features. A new fish species can be added to the ID model and
+    deployed in hours, not weeks.
+
+  - RICH ML ECOSOPY: Virtually every ML framework has first-class Python
+    support: PyTorch, TensorFlow, ONNX Runtime, TensorRT Python bindings,
+    OpenCV, Hugging Face transformers, and domain-specific libraries.
+
+  - ASYNC SUPPORT: Python 3.11's asyncio is mature and performant. The
+    event loop handles concurrent NMEA streams, gRPC calls, MQTT messages,
+    and audio processing without thread management complexity.
+
+  - LLM INTEGRATION: vLLM, Ollama Python client, llama.cpp Python bindings,
+    and Hugging Face transformers are all Python-native. Running an LLM
+    on Jetson requires Python for both model serving and tool calling.
+
+  - VISION PIPELINES: OpenCV (cv2), YOLO (ultralytics), DeepStream Python
+    bindings, and TensorRT Python API all enable GPU-accelerated vision.
+
+  - SPEECH: faster-whisper (CTranslate2), Piper TTS (Python bindings via
+    piper-tts-py), Porcupine wake word (picovoice Python SDK).
+
+  - SERIAL COMMUNICATION: pyserial-asyncio provides non-blocking serial
+    port access for NMEA 0183 devices, essential for real-time sensor data.
+
+  - PROTOBUF/gRPC: Python gRPC tooling generates client/server stubs from
+    .proto files, enabling type-safe inter-Jetson communication.
+
+Runtime version: Python 3.11.x (installed via JetPack SDK, which bundles
+Python 3.10 or 3.11 depending on JetPack version). Target JetPack 6.0+
+(L4T 36.3+) which ships Python 3.10 by default. For Python 3.11+, use
+pyenv or the deadsnakes PPA on Ubuntu 22.04 base.
+
+3.2 Jetson-Optimized Libraries
+-------------------------------
+
+The following libraries are specifically chosen for Jetson Orin optimization:
+
+  TENSORRT (v10.x):
+    NVIDIA's high-performance deep learning inference optimizer and runtime.
+    Converts PyTorch/ONNX models to optimized TensorRT engines targeting
+    the Orin GPU architecture (sm_87). Provides:
+      - INT8/FP16 quantization for 2-4x inference speedup
+      - Dynamic batch sizing for variable camera counts
+      - CUDA graph execution for deterministic latency
+    Usage: All YOLOv8 models, fish ID model, and depth sounder models are
+    exported to TensorRT engines at deployment time.
+
+  DEEPSTREAM SDK (v7.0+):
+    NVIDIA's streaming analytics toolkit for multi-camera video processing.
+    Hardware-accelerated video decode, inference, and encode pipeline.
+    Benefits:
+      - Zero-copy GPU memory between video decode and inference
+      - Batched inference across multiple camera streams
+      - Built-in message broker (Kafka, MQTT) for metadata output
+    Usage: Jetson-Bravo runs a DeepStream pipeline ingesting 4 USB cameras,
+    with YOLOv8-nano TensorRT inference as the primary detector.
+
+  CUDA (v12.x) / cuDNN (v9.x):
+    GPU compute framework. Required by TensorRT and DeepStream.
+    Bundled with JetPack 6.0.
+
+  JETSON-STATS (jtop):
+    System monitoring tool for Jetson devices. Tracks GPU/CPU utilization,
+    memory usage, thermal state, power draw. Essential for runtime monitoring.
+
+3.3 Communication Framework
+----------------------------
+
+The cluster uses multiple communication mechanisms, each chosen for its
+strengths:
+
+  ASYNCIO EVENT LOOP (Python stdlib + aiofiles):
+    Core concurrency model for all Jetson services. Each service runs as an
+    async Python process with a single event loop managing:
+      - Serial port readers (NMEA streams)
+      - gRPC server/client connections
+      - MQTT client subscriptions
+      - Audio stream I/O
+      - Periodic health checks
+    Benefits: No GIL contention for I/O-bound work, clean cancellation
+    semantics, structured concurrency with TaskGroups (Python 3.11+).
+
+  PYSERIAL-ASYNCIO:
+    Non-blocking serial port communication for NMEA 0183 devices.
+    Provides asyncio-compatible Serial objects:
+      ```python
+      reader = asyncio.StreamReader()
+      protocol = asyncio.SerialProtocol(reader)
+      transport, _ = await serial_asyncio.create_serial_connection(
+          loop, lambda: protocol, '/dev/ttyUSB0', baudrate=4800
+      )
+      ```
+    Used for: GPS, compass, depth sounder, radar serial connections.
+
+  GRPC (v1.60+):
+    Google's high-performance RPC framework with:
+      - Protocol Buffers for schema definition and type safety
+      - HTTP/2 transport with multiplexing
+      - Bidirectional streaming for video frames and telemetry
+      - Code generation for Python, C++, and other languages
+    Inter-Jetson services are defined in .proto files:
+      - vessel_nav.proto: Navigation commands, waypoint management
+      - vessel_vision.proto: Detection queries, camera control
+      - vessel_sensor.proto: Depth, radar, engine data requests
+      - vessel_cluster.proto: Health checks, leader election, failover
+
+  MQTT (paho-mqtt v2.0+ via Mosquitto broker):
+    Lightweight pub/sub messaging for telemetry and events.
+    Topics follow a structured hierarchy:
+      vessel/nav/gps/{source}        # GPS position updates
+      vessel/nav/heading/{source}     # Compass heading
+      vessel/nav/depth/{source}       # Depth sounder readings
+      vessel/vision/detection/{cam}   # YOLO detections
+      vessel/vision/safety/{event}    # Safety alerts (man overboard, etc.)
+      vessel/engine/{parameter}       # Engine telemetry
+      vessel/cluster/health/{node}    # Node health status
+      vessel/cluster/leader           # Current leader announcement
+      vessel/esp32/{node_id}/{event}  # ESP32 node events
+    QoS levels:
+      - QoS 0 (at most once): High-frequency telemetry (GPS at 10Hz)
+      - QoS 1 (at least once): Detections, alerts, commands
+      - QoS 2 (exactly once): Configuration changes, firmware update status
+
+3.4 MCP Server Implementation
+-----------------------------
+
+The Model Context Protocol (MCP) server is implemented in Python using the
+official MCP Python SDK. It exposes vessel control tools to the LLM:
+
+  Tools exposed:
+    - set_rudder(angle_degrees: float): Command rudder position
+    - set_throttle(percent: float): Command engine throttle
+    - navigate_to_waypoint(lat: float, lon: float): Set autopilot target
+    - get_current_position() -> {lat, lon, heading, speed, depth}
+    - get_weather_conditions() -> {wind_speed, wind_dir, wave_height}
+    - activate_mob() -> str: Man Overboard emergency procedure
+    - get_fish_detection_report() -> [{species, confidence, count, depth}]
+    - get_deck_status() -> {personnel_detected: int, safety_violations: []}
+    - set_navigation_alarm(type: str, threshold: float): Configure alerts
+
+  MCP Server implementation outline:
+    ```python
+    from mcp.server.fastmcp import FastMCP
+
+    mcp = FastMCP("vessel-autopilot")
+
+    @mcp.tool()
+    async def set_rudder(angle_degrees: float) -> str:
+        """Set the autopilot rudder angle. Range: -45 to +45 degrees."""
+        if not -45 <= angle_degrees <= 45:
+            return "ERROR: Rudder angle must be between -45 and +45 degrees"
+        # Publish to NMEA via the NMEA mux
+        nmea_sentence = f"$APRSA,{angle_degrees:.1f}*{checksum}"
+        await n_mux.send(nmea_sentence)
+        return f"Rudder set to {angle_degrees:.1f} degrees"
+
+    @mcp.tool()
+    async def get_current_position() -> dict:
+        """Get current vessel position, heading, speed, and depth."""
+        state = await redis.hgetall("vessel:current_state")
+        return {
+            "lat": float(state.get("lat", 0)),
+            "lon": float(state.get("lon", 0)),
+            "heading": float(state.get("heading", 0)),
+            "speed_knots": float(state.get("sog", 0)),
+            "depth_meters": float(state.get("depth", 0)),
+            "timestamp": state.get("timestamp", "")
+        }
+    ```
+
+  The MCP server runs ONLY on the current cluster leader. If leadership
+  changes, the MCP server is stopped on the old leader and started on the
+  new leader. This prevents conflicting autopilot commands.
+
+3.5 Where C/C++ Is Required
+----------------------------
+
+While Python is the primary language, one critical component is implemented
+in C for deterministic performance:
+
+  NMEA 0183 MULTIPLEXER DAEMON (C, ~2000 lines):
+
+  Why C:
+    - NMEA 0183 is a time-sensitive serial protocol at 4800 baud.
+    - Each sentence must be forwarded within 1ms of receipt to prevent
+      stale position data reaching the autopilot (10Hz GPS update cycle
+      allows only 100ms between sentences).
+    - Python's asyncio adds ~0.5-2ms of overhead per serial read cycle due
+      to interpreter dispatch and GIL scheduling.
+    - A C daemon with select()/poll() on multiple serial file descriptors
+      achieves sub-100µs forwarding latency.
+    - The daemon must handle 5+ concurrent serial ports (GPS, compass,
+      depth, radar, AIS) and multiplex to 3+ TCP clients (the three
+      Jetsons) plus any NMEA listeners (OpenCPN, autopilot controller).
+
+  Architecture:
+    - Single-threaded event loop using epoll() on Linux
+    - Zero-copy buffer management: read from serial fd, forward to all
+      TCP client fds without copying
+    - NMEA sentence validation: checksum verification, sentence parsing
+    - Source tagging: Each sentence is tagged with its source device ID
+      before forwarding (e.g., "GPS:GGA", "DPT:DBT")
+    - Watchdog timer: If a source stops producing sentences, log an error
+      and notify the cluster via MQTT
+
+  Build system: Meson or CMake
+  Dependencies: libserialport, OpenSSL (for TCP TLS if needed)
+  Installation: systemd service, starts at boot, restarts on failure
+
+  All other components remain Python. The NMEA mux is the ONLY component
+  where C's performance advantage is meaningful.
+
+3.6 Configuration Strategy
+---------------------------
+
+  YAML FOR SERVICE DEFINITIONS (/opt/vessel/config/services.yaml):
+    ```yaml
+    cluster:
+      node_id: "alpha"
+      ip_address: "10.0.0.1"
+      role: "navigation"
+      is_leader_default: true
+
+    services:
+      nmea_mux:
+        enabled: true
+        executable: /opt/vessel/bin/nmea_mux
+        ports:
+          - device: /dev/ttyUSB0
+            baud: 4800
+            source: "gps"
+          - device: /dev/ttyUSB1
+            baud: 4800
+            source: "compass"
+          - device: /dev/ttyUSB2
+            baud: 4800
+            source: "depth"
+        tcp_listen: "0.0.0.0:10110"
+        mqtt_topic: "vessel/nmea/{source}/{sentence_type}"
+
+      ollama:
+        enabled: true
+        model: "qwen2.5:7b"
+        gpu_layers: 35
+        ctx_size: 4096
+        endpoint: "http://127.0.0.1:11434"
+
+      redis:
+        enabled: true
+        port: 6379
+        persist: true
+        dump_interval: 300
+
+      mosquitto:
+        enabled: true
+        port: 1883
+        max_connections: 100
+
+      deepstream:
+        enabled: false  # Only on Bravo
+        cameras: 4
+        model: "/opt/vessel/models/yolov8n.trt"
+        fps: 30
+    ```
+
+  JSON FOR RUNTIME STATE (/opt/vessel/state/runtime_state.json):
+    ```json
+    {
+      "node_id": "alpha",
+      "timestamp": "2024-01-15T14:30:00Z",
+      "is_leader": true,
+      "uptime_seconds": 86400,
+      "gpu_utilization_pct": 45,
+      "memory_used_mb": 5200,
+      "memory_total_mb": 8192,
+      "temperature_c": 52,
+      "services": {
+        "nmea_mux": "running",
+        "ollama": "running",
+        "redis": "running",
+        "mosquitto": "running",
+        "mcp_server": "running"
+      },
+      "connected_devices": {
+        "gps": "/dev/ttyUSB0",
+        "compass": "/dev/ttyUSB1",
+        "depth": "/dev/ttyUSB2"
+      }
+    }
+    ```
+
+  All configuration files are version-controlled in a Git repository at
+  /opt/vessel/config/ with automatic backup to all three Jetsons via rsync.
+
+
+================================================================================
+4. MODEL DISTRIBUTION STRATEGY
+================================================================================
+
+4.1 Jetson-Alpha Model Allocation
+----------------------------------
+
+  QWEN2.5-7B (via Ollama):
+    - Purpose: Conversational voice assistant, contextual marine AI
+    - Size: ~4.7GB (4-bit quantized, Q4_K_M)
+    - VRAM usage: ~4.7GB (model) + ~0.5GB (KV cache, ctx=4096) = ~5.2GB
+    - Inference engine: Ollama (llama.cpp backend) with Jetson GPU support
+    - Performance: ~35-45 tokens/sec on Orin Nano Super GPU
+    - Boot time: ~8 seconds to load model into VRAM
+    - Quantization: 4-bit (Q4_K_M) for optimal quality/speed ratio
+    - Install: ollama pull qwen2.5:7b
+    - Customization: Custom system prompt with vessel-specific context:
+        "You are HELM, the AI assistant on the fishing vessel F/V Example.
+         Current position: {lat}, {lon}. Heading: {hdg}. Speed: {sog}.
+         Active gear: {gear_type}. Target species: {species}.
+         Provide concise, actionable responses. Prioritize safety."
+
+4.2 Jetson-Bravo Model Allocation
+----------------------------------
+
+  YOLOV8-NANO / YOLOV11-NANO (TensorRT):
+    - Purpose: Real-time object detection across 4 camera streams
+    - Model size: ~6.3MB (YOLOv8n) / ~2.6MB (YOLOv11n) - FP16 TensorRT
+    - Runtime VRAM: ~6MB model + ~400MB DeepStream buffers + ~200MB batch
+      buffers (4 cameras, batch=4) = ~600MB
+    - Performance: 30+ FPS per camera stream (120+ total detections/sec)
+    - Detection classes (COCO + custom):
+        0: person (deck crew)
+        1: person_PPE_vest (safety compliance)
+        2: person_no_PPE (safety violation - alert)
+        3: fishing_net
+        4: trawl_door
+        5: crane/hoist
+        6: marine_mammal (dolphin, whale - regulatory alert)
+        7: fire
+        8: obstacle
+    - Export command:
+        yolo export model=yolov8n.pt format=engine device=0 half=True
+    - Fine-tuning: Custom dataset of ~5000 images from fishing vessel deck
+
+  WHISPER-SMALL (faster-whisper with CTranslate2):
+    - Purpose: Speech-to-text for voice commands
+    - Model size: ~244MB (small, FP16)
+    - VRAM usage: ~500MB (model + KV cache for audio buffer)
+    - Performance: ~3x real-time on Jetson GPU (~9 seconds of audio
+      processed in 3 seconds)
+    - Language: English (primary), with marine vocabulary tuning
+    - Install: pip install faster-whisper
+    - VAD: Silero VAD for voice activity detection (ignores engine noise)
+
+  PIPER TTS:
+    - Purpose: Text-to-speech for voice assistant responses
+    - Model size: ~15-50MB per voice model
+    - Runtime: CPU-only (ARM Cortex-A78AE cores) - minimal GPU impact
+    - Performance: <200ms to generate 1 second of audio
+    - Voice: "en_US-lessac-medium" (clear, professional male voice) or
+      custom marine voice trained on vessel-appropriate recordings
+    - Install: pip install piper-tts-py
+    - Audio output: 22kHz, 16-bit PCM via ALSA/PulseAudio
+
+4.3 Jetson-Charlie Model Allocation
+-------------------------------------
+
+  FISH SPECIES ID MODEL (Custom YOLOv8-nano, fine-tuned):
+    - Purpose: Identify fish species from underwater/trawl camera
+    - Model size: ~50MB (fine-tuned YOLOv8n with custom head)
+    - VRAM usage: ~200MB (model + inference buffers)
+    - Classes: 20+ target species (e.g., cod, haddock, pollock, hake,
+      flounder, monkfish) + "bycatch" category + "unknown"
+    - Training data: 10,000+ annotated images from underwater cameras
+    - Performance: 15+ FPS on single camera stream
+    - Export: TensorRT FP16 for Jetson GPU inference
+
+  DEPTH SOUNDER ML PROCESSOR (Custom 1D CNN):
+    - Purpose: Analyze bathymetric profiles for bottom classification and
+      fish school detection
+    - Model size: ~10MB (lightweight 1D convolutional network)
+    - Input: Depth readings over time (window of 200 readings)
+    - Output: Bottom type (rock/sand/mud/weed), fish school probability,
+      recommended depth alerts
+    - VRAM usage: ~50MB
+    - Training: Custom dataset from vessel's historical depth logs
+
+  RADAR TARGET ANALYZER (Rule-based + lightweight ML):
+    - Purpose: Process radar NMEA data (TLL, TTM sentences) for collision
+      avoidance and target tracking
+    - Implementation: Primarily rule-based (CPA/TCPA calculations) with
+      a small ML classifier for target type prediction
+    - VRAM usage: ~30MB
+    - Alerts: Closest Point of Approach (CPA) < threshold, target on
+      collision course, new target acquisition
+
+4.4 VRAM Budget & Memory Isolation
+------------------------------------
+
+  JETSON-ALPHA (8GB total):
+    +------------------------------------------+
+    | OS + System Services         | ~800 MB   |
+    | JetPack runtime libraries    | ~400 MB   |
+    | Qwen2.5-7B (Q4_K_M)         | 4700 MB   |
+    | KV Cache (ctx=4096)          | 500 MB    |
+    | Redis + MQTT buffers         | 200 MB    |
+    | gRPC + network buffers       | 150 MB    |
+    | NMEA mux (TCP clients)       | 100 MB    |
+    |------------------------------------------|
+    | TOTAL ALLOCATED              | ~6850 MB  |
+    | FREE HEADROOM                | ~1342 MB  |
+    +------------------------------------------+
+    Target: <6.5GB used, ~1.5GB free for peak loads
+
+  JETSON-BRAVO (8GB total):
+    +------------------------------------------+
+    | OS + System Services         | ~800 MB   |
+    | DeepStream SDK               | ~300 MB   |
+    | YOLOv8n TensorRT (4 streams)| 600 MB    |
+    | Whisper-small                | 500 MB    |
+    | Piper TTS (CPU, minimal GPU) |  50 MB    |
+    | Camera frame buffers (4x)    | 800 MB    |
+    | gRPC + network buffers       | 150 MB    |
+    |------------------------------------------|
+    | TOTAL ALLOCATED              | ~3200 MB  |
+    | FREE HEADROOM                | ~4992 MB  |
+    +------------------------------------------+
+    Target: <4GB used, significant headroom for additional cameras
+
+  JETSON-CHARLIE (8GB total):
+    +------------------------------------------+
+    | OS + System Services         | ~800 MB   |
+    | Fish ID model (TensorRT)     | 200 MB    |
+    | Depth sounder ML             |  50 MB    |
+    | Radar analyzer               |  30 MB    |
+    | Camera buffers (underwater)  | 400 MB    |
+    | Engine telemetry processing  | 100 MB    |
+    | ESP32 provisioning server    |  50 MB    |
+    | SQLite databases             | 100 MB    |
+    | gRPC + network buffers       | 150 MB    |
+    |------------------------------------------|
+    | TOTAL ALLOCATED              | ~1880 MB  |
+    | FREE HEADROOM                | ~6312 MB  |
+    +------------------------------------------+
+    Target: <2.5GB used, large headroom for model updates
+
+4.5 Boot Loading Strategy
+--------------------------
+
+All models are loaded at boot time and remain resident in VRAM for the
+duration of the voyage. No runtime model swapping occurs.
+
+Boot sequence (systemd service ordering):
+
+  1. jetson-boot-init.service (Priority: boot)
+     - Mount NVMe, check filesystem integrity
+     - Load JetPack power mode: MAXN (60W) or MODE_15W_2CORE
+     - Set GPU clocks to maximum: sudo jetson_clocks
+
+  2. network.service (Priority: basic)
+     - Configure static IP (10.0.0.x)
+     - Verify Ethernet link to cluster switch
+     - Start chrony time sync (NTP from GPS via GPSD)
+
+  3. redis.service (Priority: networking, on Alpha only)
+     - Start Redis server
+     - Load persisted state from /opt/vessel/data/redis/
+     - Verify cluster connectivity
+
+  4. mosquitto.service (Priority: networking, on Alpha only)
+     - Start MQTT broker
+     - Load ACL configuration
+
+  5. nmea-mux.service (Priority: networking, on Alpha only if leader)
+     - Start C-based NMEA multiplexer daemon
+     - Open all serial ports
+     - Begin forwarding NMEA sentences
+
+  6. ollama.service (Priority: after redis, on leader only)
+     - Start Ollama server
+     - Load Qwen2.5-7B model into VRAM (takes ~8 seconds)
+     - Model stays loaded; no unload during operation
+
+  7. deepstream.service (Priority: after network, on Bravo only)
+     - Initialize DeepStream pipeline
+     - Open 4 camera streams
+     - Load YOLOv8n TensorRT engine into GPU memory
+
+  8. whisper.service (Priority: after deepstream, on Bravo only)
+     - Load Whisper-small model
+     - Initialize audio input stream
+     - Start VAD (Voice Activity Detection)
+
+  9. piper.service (Priority: after whisper, on Bravo only)
+     - Load voice model into CPU memory
+     - Initialize ALSA audio output
+
+  10. fish-id.service (Priority: after network, on Charlie only)
+      - Load fish species ID TensorRT engine
+      - Open underwater camera stream (if available)
+
+  11. depth-processor.service (Priority: after network, on Charlie only)
+      - Load depth sounder ML model
+      - Connect to NMEA depth data source
+
+  12. esp32-provisioner.service (Priority: after network, on all Jetsons)
+      - Start provisioning HTTP server on port 8080
+      - Load node database
+      - Ready to accept ESP32 connections
+
+  13. mcp-server.service (Priority: after ollama + nmea-mux, leader only)
+      - Start MCP server exposing vessel control tools
+      - Connect to Ollama for LLM inference
+      - Register tools: rudder, throttle, navigation, etc.
+
+  14. cluster-health.service (Priority: last)
+      - Start health monitoring loop
+      - Publish node status to MQTT every 5 seconds
+      - Participate in leader election
+
+Total boot time target: <45 seconds from power-on to all services ready.
+
+
+================================================================================
+5. CLUSTER COMMUNICATION
+================================================================================
+
+5.1 Physical Network Topology
+------------------------------
+
+The three Jetson units communicate over a dedicated Gigabit Ethernet backbone:
+
+  +--------------+     Cat6 Shielded     +------------------+
+  | Jetson-Alpha |---------.------------->| Managed Switch   |
+  | 10.0.0.1     |         |              | Netgear GS308T   |
+  | eth0         |         |              | 10.0.0.254      |
+  +--------------+         |              +--------+---------+
+                           |                       |
+  +--------------+         |              +--------+---------+
+  | Jetson-Bravo  |--------'              | Jetson-Charlie  |
+  | 10.0.0.2     |                        | 10.0.0.3       |
+  | eth0         |                        | eth0            |
+  +--------------+                        +----------------+
+
+  Cable specifications:
+    - Shielded Cat6 (STP/FTP) marine-grade Ethernet cable
+    - IP67-rated RJ45 connectors at each end
+    - Cable runs through sealed cable glands at compartment boundaries
+    - Maximum run length: <100m (typical vessel <50m between compartments)
+    - Redundant path: Second cable run between Alpha and Bravo for link
+      aggregation (LACP) if switch supports it
+
+  Network configuration (Netplan):
+    ```yaml
+    network:
+      version: 2
+      ethernets:
+        eth0:
+          addresses:
+            - 10.0.0.1/24  # Changed per node: .2 for Bravo, .3 for Charlie
+          routes:
+            - to: default
+              via: 10.0.0.254
+          nameservers:
+            addresses: []
+          # Disable IPv6 (not needed, reduces latency)
+          dhcp6: false
+          accept-ra: false
+    ```
+
+  DNS resolution: /etc/hosts entries for cluster nodes:
+    ```
+    10.0.0.1    alpha.vessel.local  alpha
+    10.0.0.2    bravo.vessel.local   bravo
+    10.0.0.3    charlie.vessel.local charlie
+    ```
+
+  Network latency baseline: <0.5ms round-trip between any two Jetsons
+  (measured with ping on Gigabit Ethernet, typical: 0.1-0.3ms)
+
+5.2 gRPC Inter-Jetson RPC
+---------------------------
+
+gRPC is used for synchronous request-response communication between Jetsons.
+All inter-Jetson services are defined in Protocol Buffer files:
+
+  Core proto definitions:
+
+  ```protobuf
+  // vessel_cluster.proto
+  syntax = "proto3";
+  package vessel;
+
+  service ClusterService {
+    // Health check between nodes
+    rpc Ping(PingRequest) returns (PingResponse);
+    // Request leader status
+    rpc GetLeaderStatus(Empty) returns (LeaderStatus);
+    // Transfer leadership
+    rpc TransferLeadership(TransferRequest) returns (TransferResponse);
+    // Get node capabilities
+    rpc GetNodeCapabilities(Empty) returns (NodeCapabilities);
+  }
+
+  // vessel_vision.proto
+  service VisionService {
+    // Get current detections from all cameras
+    rpc GetDetections(DetectionRequest) returns (DetectionResponse);
+    // Stream video frames from specific camera
+    rpc StreamCamera(CameraRequest) returns (stream VideoFrame);
+    // Request detection for a specific region of interest
+    rpc DetectROI(ROIRequest) returns (DetectionResponse);
+  }
+
+  // vessel_sensor.proto
+  service SensorService {
+    // Get current depth reading
+    rpc GetDepth(Empty) returns (DepthReading);
+    // Get radar targets
+    rpc GetRadarTargets(Empty) returns (RadarTargets);
+    // Get engine telemetry
+    rpc GetEngineTelemetry(Empty) returns (EngineData);
+    // Subscribe to depth alerts stream
+    rpc SubscribeDepthAlerts(Empty) returns (stream DepthAlert);
+  }
+  ```
+
+  gRPC server implementation pattern (Python):
+    ```python
+    import grpc
+    from concurrent import futures
+    import vessel_vision_pb2
+    import vessel_vision_pb2_grpc
+
+    class VisionServicer(vessel_vision_pb2_grpc.VisionServiceServicer):
+        def __init__(self, detector):
+            self.detector = detector  # YOLOv8 TensorRT detector
+
+        def GetDetections(self, request, context):
+            detections = self.detector.get_all_detections()
+            return vessel_vision_pb2.DetectionResponse(
+                timestamp=time.time(),
+                detections=[
+                    vessel_vision_pb2.Detection(
+                        camera_id=d.cam_id,
+                        class_name=d.label,
+                        confidence=d.confidence,
+                        bbox=vessel_vision_pb2.BBox(
+                            x1=d.x1, y1=d.y1, x2=d.x2, y2=d.y2
+                        )
+                    )
+                    for d in detections
+                ]
+            )
+
+    def serve():
+        server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=10),
+            options=[
+                ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+            ]
+        )
+        vessel_vision_pb2_grpc.add_VisionServiceServicer_to_server(
+            VisionServicer(detector), server
+        )
+        server.add_insecure_port('[::]:50051')
+        server.start()
+        server.wait_for_termination()
+    ```
+
+5.3 MQTT Pub/Sub Message Bus
+------------------------------
+
+MQTT (via Eclipse Mosquitto broker running on Jetson-Alpha) provides the
+asynchronous event backbone for the cluster:
+
+  Broker configuration (/etc/mosquitto/mosquitto.conf):
+    ```
+    listener 1883 10.0.0.1
+    protocol mqtt
+    allow_anonymous false
+    password_file /etc/mosquitto/passwd
+    max_connections 100
+    max_queued_messages 1000
+
+    # Persistence
+    persistence true
+    persistence_location /var/lib/mosquitto/
+    autosave_interval 1800
+
+    # Logging
+    log_type error
+    log_type warning
+    log_dest file /var/log/mosquitto/mosquitto.log
+    ```
+
+  Topic hierarchy and data flows:
+
+    PUBLISHERS                    TOPIC                       SUBSCRIBERS
+    -----------------------------------------------------------------------
+    Alpha (NMEA mux)        -> vessel/nmea/gps/gga     -> Alpha (OpenCPN)
+    Alpha (NMEA mux)        -> vessel/nmea/gps/rmc     -> Charlie (logger)
+    Alpha (NMEA mux)        -> vessel/nmea/hdw/hdm     -> Alpha (autopilot)
+    Alpha (NMEA mux)        -> vessel/nmea/dpt/dbt     -> Charlie (depth ML)
+    Bravo (YOLOv8)          -> vessel/vision/det/*     -> Alpha (safety)
+    Bravo (YOLOv8)          -> vessel/vision/safety/*  -> Alpha (alerts)
+    Charlie (depth ML)      -> vessel/sensor/depth/*   -> Alpha (chatbot)
+    Charlie (radar)         -> vessel/sensor/radar/*   -> Alpha (collision)
+    Charlie (engine)        -> vessel/engine/*         -> Alpha (monitoring)
+    Alpha (health)          -> vessel/cluster/health/* -> Bravo, Charlie
+    Any (leader election)   -> vessel/cluster/leader   -> All nodes
+    Any (ESP32 provisioner) -> vessel/esp32/*/status   -> Alpha (dashboard)
+
+  Python MQTT publisher pattern:
+    ```python
+    import paho.mqtt.client as mqtt
+    import json
+
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.connect("10.0.0.1", 1883, 60)
+
+    def publish_detection(camera_id, detections):
+        payload = {
+            "camera_id": camera_id,
+            "timestamp": time.time(),
+            "detections": [
+                {
+                    "class": d.label,
+                    "confidence": float(d.confidence),
+                    "bbox": [d.x1, d.y1, d.x2, d.y2]
+                }
+                for d in detections
+            ]
+        }
+        client.publish(
+            f"vessel/vision/detection/{camera_id}",
+            json.dumps(payload),
+            qos=1
+        )
+    ```
+
+5.4 Redis Shared State Store
+------------------------------
+
+Redis (v7.x) runs on Jetson-Alpha as the cluster's shared state store.
+All three Jetsons read from and write to Redis for shared operational state:
+
+  Redis keyspace organization:
+
+    vessel:position          -> HASH {lat, lon, sog, cog, timestamp}
+    vessel:heading           -> HASH {true_heading, mag_heading, source}
+    vessel:depth             -> HASH {depth_m, depth_ft, source, timestamp}
+    vessel:engine:*          -> HASH {rpm, fuel_flow, temp, oil_pressure}
+    vessel:waypoints         -> LIST [ {lat, lon, name, radius} ]
+    vessel:active_route      -> HASH {waypoints: [...], current_wp: int}
+    vessel:alerts            -> LIST [ {type, message, severity, time} ]
+    vessel:detections:latest -> HASH {cam_0: JSON, cam_1: JSON, ...}
+    vessel:cluster:leader    -> STRING "alpha" | "bravo" | "charlie"
+    vessel:cluster:health:*  -> HASH {node, cpu, mem, gpu, temp, uptime}
+    vessel:esp32:nodes       -> HASH {node_id: JSON {status, role, ...}}
+    vessel:conversation:ctx  -> LIST [ {role, content, timestamp} ]
+
+  Redis persistence configuration:
+    ```
+    save 300 10       # Save every 5 min if >=10 keys changed
+    save 60 1000      # Save every 1 min if >=1000 keys changed
+    appendonly yes    # AOF persistence for crash recovery
+    appendfsync everysec
+    dir /opt/vessel/data/redis/
+    ```
+
+  Python Redis usage:
+    ```python
+    import redis.asyncio as redis
+
+    r = redis.Redis(host='10.0.0.1', port=6379, decode_responses=True)
+
+    async def update_position(lat, lon, sog, cog):
+        await r.hset("vessel:position", mapping={
+            "lat": str(lat), "lon": str(lon),
+            "sog": str(sog), "cog": str(cog),
+            "timestamp": str(time.time())
+        })
+
+    async def get_current_state():
+        pos = await r.hgetall("vessel:position")
+        hdg = await r.hgetall("vessel:heading")
+        dep = await r.hgetall("vessel:depth")
+        return {**pos, **hdg, **dep}
+    ```
+
+5.5 NMEA 0183 Multiplexer Daemon
+----------------------------------
+
+The NMEA multiplexer is the critical data backbone connecting all navigation
+sensors to all consumers. Implemented in C for deterministic timing:
+
+  Architecture:
+    ```
+    +----------+    +----------+    +----------+    +----------+
+    | GPS USB  |    | Compass  |    | Depth    |    | Radar    |
+    | ttyUSB0  |    | ttyUSB1  |    | ttyUSB2  |    | ttyUSB3  |
+    +----+-----+    +----+-----+    +----+-----+    +----+-----+
+         |               |               |               |
+         v               v               v               v
+    +------------------------------------------------------------+
+    |              NMEA MULTIPLEXER DAEMON (C)                    |
+    |                                                            |
+    |  epoll() event loop                                        |
+    |  +--------+  +--------+  +---------+  +--------+          |
+    |  | Reader |  | Reader |  | Reader  |  | Reader |          |
+    |  | GPS    |  | HDG    |  | DPT     |  | TLL    |          |
+    |  +---+----+  +---+----+  +----+----+  +---+----+          |
+    |      |           |             |           |               |
+    |      v           v             v           v               |
+    |  +--------------------------------------------------+     |
+    |  |         NMEA SENTENCE VALIDATOR                  |     |
+    |  |  - Checksum verification ($...*HH)               |     |
+    |  |  - Source tagging (prefix source ID)             |     |
+    |  |  - Sentence type filtering (allow/block lists)   |     |
+    |  +--------------------------------------------------+     |
+    |      |           |             |           |               |
+    |      v           v             v           v               |
+    |  +--------------------------------------------------+     |
+    |  |         TCP SERVER (port 10110)                  |     |
+    |  |  Client 1: OpenCPN (Alpha)                       |     |
+    |  |  Client 2: gRPC bridge (Alpha)                   |     |
+    |  |  Client 3: DeepStream (Bravo)                    |     |
+    |  |  Client 4: Depth ML (Charlie)                    |     |
+    |  |  Client 5: Autopilot controller                  |     |
+    |  +--------------------------------------------------+     |
+    |                                                            |
+    |  MQTT Publisher: vessel/nmea/{source}/{type}               |
+    +------------------------------------------------------------+
+    ```
+
+  Key design decisions:
+    - Single-threaded: No threading overhead, no lock contention, fully
+      deterministic forwarding order
+    - Zero-copy forwarding: Serial read buffer is forwarded directly to
+      all TCP clients via writev() without intermediate copies
+    - Sub-millisecond latency: Typical forwarding latency <100µs from
+      serial receive to TCP send
+    - Watchdog: Each source has a timeout (default: 5 seconds). If no
+      sentence received, publish MQTT alert: vessel/nmea/{source}/status
+      with value "TIMEOUT"
+    - Source priority: GPS sentences (GGA, RMC) are tagged as
+      high-priority and forwarded before lower-priority sentences
+
+
+================================================================================
+6. CLUSTER FAILOVER AND LEADER ELECTION
+================================================================================
+
+6.1 Leader Election Mechanism
+------------------------------
+
+The cluster uses Redis-based leader election with a simple, battle-tested
+algorithm:
+
+  Algorithm: Redis SET NX EX (set-if-not-exists with expiration)
+
+    ```python
+    import redis.asyncio as redis
+    import asyncio
+    import time
+
+    class LeaderElection:
+        def __init__(self, node_id, redis_host="10.0.0.1"):
+            self.node_id = node_id
+            self.redis = redis.Redis(host=redis_host, port=6379)
+            self.is_leader = False
+            self.lease_ttl = 10  # seconds
+            self.renewal_interval = 3  # seconds
+            self.election_key = "vessel:cluster:leader"
+
+        async def campaign(self):
+            """Attempt to become leader. Called every renewal_interval."""
+            # Try to acquire leadership
+            acquired = await self.redis.set(
+                self.election_key,
+                self.node_id,
+                nx=True,  # Only set if not exists
+                ex=self.lease_ttl  # Expire in 10 seconds
+            )
+
+            if acquired:
+                if not self.is_leader:
+                    print(f"[{self.node_id}] Became LEADER")
+                    self.is_leader = True
+                    await self.on_become_leader()
+            else:
+                # Check if we are still the leader (renewal)
+                current = await self.redis.get(self.election_key)
+                if current == self.node_id:
+                    # Renew our lease
+                    await self.redis.expire(
+                        self.election_key, self.lease_ttl
+                    )
+                else:
+                    if self.is_leader:
+                        print(f"[{self.node_id}] Lost leadership to {current}")
+                        self.is_leader = False
+                        await self.on_lose_leader()
+
+        async def on_become_leader(self):
+            """Start leader-only services."""
+            await self.start_nmea_mux()
+            await self.start_mcp_server()
+            await self.start_ollama()
+            await self.redis.publish(
+                "vessel/cluster/leader",
+                json.dumps({"leader": self.node_id, "event": "elected"})
+            )
+
+        async def on_lose_leader(self):
+            """Stop leader-only services."""
+            await self.stop_mcp_server()
+            await self.stop_nmea_mux()
+            # Ollama stays running (can serve local queries)
+
+        async def run(self):
+            """Main election loop."""
+            while True:
+                try:
+                    await self.campaign()
+                except redis.ConnectionError:
+                    print(f"[{self.node_id}] Redis unavailable, waiting...")
+                await asyncio.sleep(self.renewal_interval)
+    ```
+
+  Election behavior:
+    - Default leader at boot: Jetson-Alpha (configured in services.yaml)
+    - Alpha gets priority: lower node_id = higher priority in tie-breaking
+    - Lease TTL: 10 seconds (must renew every 3 seconds)
+    - If Alpha fails: After 10 seconds, its lease expires. Bravo or Charlie
+      acquires leadership.
+    - If Redis fails: All nodes detect connection error, keep running
+      their local services. Manual intervention required (or fallback to
+      etcd-based election if configured).
+
+6.2 Failover Scenarios
+------------------------
+
+  SCENARIO 1: Jetson-Alpha fails (power loss, hardware fault)
+
+    Timeline:
+    T+0s:   Alpha loses power. Redis becomes unavailable.
+    T+0s:   Bravo and Charlie detect Redis connection loss.
+    T+0s:   Bravo starts embedded Redis replica (if configured) or
+            Charlie starts Redis (failover Redis config).
+    T+3s:   Redis available on new node. Leader election resumes.
+    T+10s:  Alpha's leader lease expires in Redis.
+    T+13s:  Bravo (or Charlie) acquires leadership.
+    T+13s:  New leader starts NMEA mux, MCP server, Ollama.
+    T+20s:  All services operational on remaining nodes.
+    T+30s:  System fully recovered. Vessel continues with 2 nodes.
+
+    Lost capabilities: OpenCPN display at nav station (can be viewed on
+    any tablet/browser on the vessel network), helm audio interface
+    (backup audio on Bravo can be used).
+
+  SCENARIO 2: Jetson-Bravo fails
+
+    Timeline:
+    T+0s:   Bravo loses power. Vision services stop.
+    T+0s:   Charlie detects Bravo missing via health check (MQTT).
+    T+1s:   Alpha logs vision system offline. Deck cameras unavailable.
+    T+2s:   STT/TTS moves to Charlie (if STT model available) or
+            voice assistant degrades to text-only interface on Alpha.
+    T+5s:   System stable with reduced capabilities.
+
+    Lost capabilities: Camera-based safety monitoring, voice commands
+    (unless STT model replicated on Charlie), deck obstacle detection.
+
+  SCENARIO 3: Jetson-Charlie fails
+
+    Timeline:
+    T+0s:   Charlie loses power. Sensor processing stops.
+    T+1s:   Alpha detects Charlie missing. Logs sensor failure.
+    T+2s:   Depth and radar data unavailable. Navigation continues with
+            GPS and compass only.
+    T+3s:   ESP32 provisioning handled by Alpha or Bravo.
+
+    Lost capabilities: Fish species ID, depth sounder ML analysis,
+    radar target analysis, engine telemetry processing.
+
+  SCENARIO 4: All three Jetsons fail
+
+    Result: Full autonomous system failure. The vessel falls back to
+    traditional navigation (paper charts, magnetic compass, VHF radio).
+    The autopilot controller (standalone hardware, not Jetson-dependent)
+    continues to maintain last commanded course. Manual helm control
+    is always available.
+
+    Recovery: Power cycle Jetsons. Boot sequence restores all services.
+    Redis persistence ensures state recovery (waypoints, routes, alerts).
+
+6.3 Autopilot Command Arbitration
+-----------------------------------
+
+Critical safety rule: Only the LEADER Jetson sends commands to the
+autopilot. This prevents conflicting commands (e.g., Alpha saying "steer
+port" while Charlie says "steer starboard").
+
+  Implementation:
+    - The MCP server (which exposes autopilot tools to the LLM) only runs
+      on the leader.
+    - The NMEA multiplexer only forwards autopilot sentences (APB, BOD,
+      XTE) from the leader.
+    - The autopilot controller (e.g., Simrad AP28 or Course Computer)
+      accepts NMEA sentences over a dedicated serial port. Only the
+      leader's NMEA mux connects to this port.
+    - If leadership changes mid-manoeuvre, the new leader receives the
+      current autopilot state from Redis and can continue seamlessly.
+
+  Safety interlocks:
+    - Maximum rudder rate: 5 degrees/second (prevents violent maneuvers)
+    - Maximum throttle change: 10%/second (prevents sudden acceleration)
+    - MOB activation always works: Even if LLM is unavailable, the MOB
+      button (physical or digital) bypasses the MCP server and sends
+      a direct NMEA sentence to the autopilot.
+    - Dead man's switch: If no heartbeat from any Jetson for 30 seconds,
+      the autopilot sounds an alarm and disengages to manual mode.
+
+6.4 State Migration During Failover
+-------------------------------------
+
+When leadership transfers, certain state must migrate to the new leader:
+
+  State that migrates:
+    - vessel:active_route (current route and active waypoint index)
+    - vessel:conversation:ctx (last 10 turns of voice conversation)
+    - MCP server session (tool call state, pending operations)
+    - NMEA mux source table (which serial ports are active)
+
+  State that does NOT migrate (stays on originating node):
+    - Camera calibration data (Bravo-specific)
+    - Fish ID model weights (Charlie-specific)
+    - ESP32 node database (replicated across all nodes)
+
+  Migration mechanism:
+    1. New leader reads state from Redis (already shared)
+    2. New leader starts services with restored state
+    3. No explicit "migration" needed — Redis IS the shared state
+
+
+================================================================================
+7. STT/TTS SYSTEM DESIGN
+================================================================================
+
+7.1 Whisper Speech-to-Text
+----------------------------
+
+Implementation: faster-whisper (CTranslate2 backend) on Jetson-Bravo GPU.
+
+  ```python
+  from faster_whisper import WhisperModel
+
+  # Load model on GPU
+  model = WhisperModel(
+      "small",
+      device="cuda",
+      compute_type="float16",
+      cuda_devices=[0]  # Jetson GPU
+  )
+
+  def transcribe_audio(audio_data: bytes, sample_rate: int = 16000) -> str:
+      """Transcribe audio buffer to text."""
+      segments, info = model.transcribe(
+          audio_data,
+          language="en",
+          beam_size=5,
+          vad_filter=True,           # Use Silero VAD
+          vad_parameters=dict(
+              min_silence_duration_ms=500,
+              speech_pad_ms=400
+          ),
+          initial_prompt="Fishing vessel navigation commands. "
+                        "Keywords: rudder, throttle, waypoint, anchor, "
+                        "MOB, depth, heading, speed, port, starboard."
+      )
+      return " ".join(segment.text for segment in segments)
+  ```
+
+  Performance characteristics on Jetson Orin Nano Super:
+    - Model load time: ~3 seconds
+    - Inference speed: ~3x real-time (9 seconds of audio in 3 seconds)
+    - VRAM usage: ~500MB (model + KV cache)
+    - Accuracy: WER ~8% on clean speech, ~15% with engine noise
+      (mitigated by noise-canceling microphone array)
+
+7.2 Piper Text-to-Speech
+--------------------------
+
+Implementation: Piper TTS running on ARM CPU cores (minimal GPU impact).
+
+  ```python
+  import piper
+
+  # Load voice model
+  voice = piper.PiperVoice.load(
+      "/opt/vessel/models/piper/en_US-lessac-medium.onnx",
+      config_path="/opt/vessel/models/piper/en_US-lessac-medium.onnx.json"
+  )
+
+  def speak(text: str, output_file: str = "/tmp/tts_output.wav"):
+      """Convert text to speech audio file."""
+      voice.synthesize(text, output_file)
+      return output_file
+  ```
+
+  Voice customization:
+    - Default voice: "en_US-lessac-medium" (clear American English male)
+    - Custom voice: Can be trained on 1-2 hours of target speaker audio
+      using Piper's training pipeline (requires a desktop GPU for training,
+      not Jetson)
+    - Marine vocabulary: Add pronunciation dictionary entries for nautical
+      terms (e.g., "forecastle" -> "FOK-sul", "leeward" -> "LOO-ard")
+
+  Audio output routing:
+    - ALSA device: USB audio interface on Bravo (or Alpha if leader)
+    - Sample rate: 22050 Hz, 16-bit PCM
+    - Format: WAV (pipelined to ALSA aplay for low latency)
+    - Volume: Controlled via ALSA mixer, calibrated for cockpit noise level
+
+7.3 Audio Routing
+-------------------
+
+  Physical audio paths:
+
+    HELM MICROPHONE:
+      [Microphone] -> [USB Audio Interface] -> [Jetson-Bravo USB]
+                                                    |
+                                              [ALSA capture]
+                                                    |
+                                              [VAD: Silero]
+                                                    |
+                                              [Wake: Porcupine]
+                                                    |
+                                              [STT: Whisper]
+                                                    |
+                                              [gRPC to Alpha LLM]
+                                                    |
+                                              [Response from Alpha]
+                                                    |
+                                              [TTS: Piper]
+                                                    |
+                                              [ALSA playback]
+                                                    |
+                                              [USB Audio Interface]
+                                                    |
+                                              [Cockpit Speakers]
+
+    Wake word audio loop:
+      Audio from USB interface is continuously monitored by a lightweight
+      wake word engine (Porcupine). When "Hey Helm" is detected, the
+      subsequent audio buffer (up to 10 seconds) is captured and sent to
+      Whisper for transcription.
+
+7.4 Wake Word Detection
+-------------------------
+
+  Implementation: Picovoice Porcupine (custom wake word)
+
+  ```python
+  import pvporcupine
+  import pyaudio
+
+  porcupine = pvporcupine.create(
+      access_key="YOUR_PORCUPINE_KEY",  # Or self-hosted engine
+      keyword_paths=["/opt/vessel/models/porcupine/hey_helm.ppn"],
+      sensitivities=[0.5]  # 0.0 (least) to 1.0 (most sensitive)
+  )
+
+  # In audio processing loop:
+  def audio_callback(in_data, frame_count, time_info, status):
+      pcm = struct.unpack_from("h" * porcupine.frame_length, in_data)
+      keyword_index = porcupine.process(pcm)
+      if keyword_index >= 0:
+          # "Hey Helm" detected! Start recording for Whisper
+          start_recording()
+      return (in_data, pyaudio.paContinue)
+  ```
+
+  Custom wake word training:
+    - Picovoice web console: Upload 20+ recordings of "Hey Helm"
+    - Training produces a .ppn model file (~2MB)
+    - Deploy to /opt/vessel/models/porcupine/hey_helm.ppn
+    - Alternative: Self-hosted Porcupine engine for offline operation
+      (no cloud dependency)
+
+  Performance:
+    - CPU usage: ~2-5% of one ARM core
+    - Memory: ~20MB
+    - Latency: <200ms from utterance to detection
+    - False positive rate: <1 per 24 hours (with sensitivity=0.5)
+
+7.5 Full Conversation Loop
+----------------------------
+
+  Sequence diagram:
+
+    HELMSMAN        PORCUPINE       WHISPER        gRPC         LLM (Alpha)     PIPER         SPEAKERS
+       |                |               |             |              |             |              |
+       | "Hey Helm,     |               |             |              |             |              |
+       |  what's the    |               |             |              |             |              |
+       |  depth?"       |               |             |              |             |              |
+       |--------------->|               |             |              |             |              |
+       |                | Wake detected |             |              |             |              |
+       |                |--------------->|             |              |             |              |
+       |                |               | Transcribe  |              |             |              |
+       |                |               | audio buffer|              |             |              |
+       |                |               |             |              |             |              |
+       |                |               | "what's the |              |             |              |
+       |                |               |  depth"     |              |             |              |
+       |                |               |------------>|              |             |              |
+       |                |               |             | LLM request  |             |              |
+       |                |               |             | + context    |             |              |
+       |                |               |             |------------->|             |              |
+       |                |               |             |              | Generate    |             |
+       |                |               |             |              | response    |             |
+       |                |               |             |              | with tools  |             |
+       |                |               |             |              |             |              |
+       |                |               |             | "Current     |             |              |
+       |                |               |             |<-------------| depth is    |             |
+       |                |               |             |  42 meters,  |             |              |
+       |                |               |             |  bottom type |             |              |
+       |                |               |             |  is sandy."  |             |              |
+       |                |               |             |              |             |              |
+       |                |               |             | TTS request  |             |              |
+       |                |               |             |------------->|------------>|              |
+       |                |               |             |              | Synthesize  |              |
+       |                |               |             |              | audio       |              |
+       |                |               |             |              |             | Play audio   |
+       |                |               |             |              |             |------------->|
+       | <--- "Current depth is 42 meters, bottom type is sandy." ---|             |              |
+       |                                                                   |              |
+       | TOTAL LATENCY: <3 seconds                                        |              |
+
+7.6 Latency Budget
+--------------------
+
+  Target: <3 seconds from end of speech to start of audio response
+
+    Wake word detection:          200ms
+    Audio buffer capture:         500ms  (wait for end of speech)
+    Whisper transcription:       1000ms  (typical 3-second utterance / 3x)
+    gRPC to Alpha:                10ms   (local network)
+    LLM inference (Qwen2.5-7B):  800ms  (~40 tok/s, 30-token response)
+    gRPC back to Bravo:           10ms
+    Piper TTS synthesis:         300ms   (3-second response / 10x realtime)
+    Audio playback start:         50ms
+    -----------------------------------
+    TOTAL:                       ~2870ms
+
+  With optimization:
+    - Reduce audio buffer to 300ms (more aggressive VAD)
+    - Use 4-bit quantized Whisper (medium model at small speed)
+    - Reduce LLM max tokens to 50 for voice responses
+    - Optimized target: <2.5 seconds
+
+
+================================================================================
+8. ESP32 PROVISIONING SERVER
+================================================================================
+
+8.1 Firmware Vault Structure
+-----------------------------
+
+Each Jetson maintains a complete copy of the ESP32 firmware vault:
+
+  /opt/vessel/firmware/
+  +-- esp32/
+  |   +-- deck_sensor/
+  |   |   +-- v1.0.0/
+  |   |   |   +-- firmware.bin
+  |   |   |   +-- firmware.bin.sha256
+  |   |   |   +-- manifest.json
+  |   |   +-- v1.1.0/
+  |   |       +-- firmware.bin
+  |   |       +-- ...
+  |   +-- tank_level/
+  |   |   +-- v1.0.0/
+  |   |       +-- ...
+  |   +-- environmental/
+  |       +-- v1.0.0/
+  |           +-- ...
+  +-- provisioning/
+      +-- config_templates/
+          +-- deck_sensor.yaml
+          +-- tank_level.yaml
+          +-- environmental.yaml
+
+  Firmware manifest example (manifest.json):
+    ```json
+    {
+      "role": "deck_sensor",
+      "version": "1.1.0",
+      "built": "2024-01-10T14:00:00Z",
+      "builder": "vessel-build-server",
+      "firmware_hash": "sha256:abc123...",
+      "target_chip": "esp32-s3",
+      "flash_size_mb": 4,
+      "partition_table": "single_app",
+      "ota_partitions": ["ota_0", "ota_1"],
+      "changelog": [
+        "Fix: Accel calibration drift at low temperatures",
+        "Add: MQTT LWT for offline detection",
+        "Update: Sensor sampling rate 10Hz -> 20Hz"
+      ]
+    }
+    ```
+
+8.2 Node Database
+-------------------
+
+  SQLite database: /opt/vessel/data/esp32_nodes.db
+
+  Schema:
+    ```sql
+    CREATE TABLE nodes (
+        node_id TEXT PRIMARY KEY,          -- e.g., "deck_sensor_01"
+        hardware_mac TEXT NOT NULL UNIQUE, -- e.g., "AA:BB:CC:DD:EE:FF"
+        hardware_type TEXT NOT NULL,       -- "esp32-s3", "esp32-c3"
+        role TEXT NOT NULL,                -- "deck_sensor", "tank_level"
+        firmware_version TEXT,             -- "1.1.0"
+        config_json TEXT,                  -- Role-specific config (JSON)
+        calibration_json TEXT,             -- Calibration data (JSON)
+        status TEXT DEFAULT 'unknown',     -- 'unknown', 'provisioned',
+                                           -- 'online', 'offline', 'error'
+        last_seen TEXT,                    -- ISO 8601 timestamp
+        last_ip TEXT,                      -- IP address on vessel network
+        battery_pct REAL,                  -- Battery level (if applicable)
+        signal_strength_dbm INTEGER,       -- WiFi RSSI
+        provisioned_by TEXT,               -- Which Jetson provisioned it
+        provisioned_at TEXT,               -- ISO 8601 timestamp
+        notes TEXT                         -- Operator notes
+    );
+
+    CREATE TABLE provision_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id TEXT NOT NULL,
+        action TEXT NOT NULL,              -- 'identify', 'flash', 'verify',
+                                           -- 'configure', 'error'
+        detail TEXT,                       -- Action-specific details
+        timestamp TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (node_id) REFERENCES nodes(node_id)
+    );
+
+    CREATE TABLE firmware_versions (
+        role TEXT NOT NULL,
+        version TEXT NOT NULL,
+        firmware_hash TEXT NOT NULL,
+        uploaded_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (role, version)
+    );
+    ```
+
+8.3 Provisioning Workflow
+---------------------------
+
+When a new ESP32 powers on and connects to the vessel WiFi network:
+
+  Step 1: IDENTIFY
+    ESP32 sends MQTT message: vessel/esp32/register
+    Payload: {"mac": "AA:BB:CC:DD:EE:FF", "chip": "esp32-s3", "hw_rev": "2.1"}
+    Provisioning server receives, checks node database:
+      - If MAC known (re-provisioning): Load existing config
+      - If MAC unknown: Create new node entry with status "unprovisioned"
+
+  Step 2: ASSIGN ROLE
+    Operator assigns role via web UI or CLI:
+      ```
+      vessel-provision assign --mac AA:BB:CC:DD:EE:FF --role deck_sensor
+      ```
+    Or automatic assignment based on physical switch position (if ESP32
+    has DIP switches for role selection).
+
+  Step 3: OTA FLASH
+    ```
+    Provisioning server -> ESP32: HTTP POST /ota/start
+    Body: {"firmware_url": "http://10.0.0.x:8080/firmware/deck_sensor/v1.1.0/firmware.bin",
+           "firmware_hash": "sha256:abc123..."}
+
+    ESP32 -> Provisioning server: HTTP POST /ota/progress
+    Body: {"progress_pct": 50, "status": "downloading"}
+
+    ESP32 -> Provisioning server: HTTP POST /ota/complete
+    Body: {"status": "success", "new_version": "1.1.0"}
+    ```
+    ESP32 uses built-in OTA update mechanism (two partitions, A/B swap).
+
+  Step 4: VERIFY
+    ESP32 sends MQTT: vessel/esp32/{node_id}/status
+    Payload: {"firmware_version": "1.1.0", "status": "running", "uptime": 10}
+    Provisioning server verifies firmware hash matches expected.
+
+  Step 5: PUSH CONFIG
+    ```
+    Provisioning server -> ESP32: MQTT vessel/esp32/{node_id}/config
+    Payload: {
+      "mqtt_broker": "10.0.0.1",
+      "mqtt_port": 1883,
+      "sample_rate_hz": 20,
+      "calibration": { ... },
+      "alert_thresholds": { ... }
+    }
+    ```
+    ESP32 acknowledges: vessel/esp32/{node_id}/config/ack
+
+  Step 6: REPORT SUCCESS
+    ESP32 sends periodic heartbeats: vessel/esp32/{node_id}/heartbeat
+    Every 60 seconds: {"battery_pct": 85, "signal_dbm": -55, "uptime_s": 3600}
+    Provisioning server updates node database: last_seen, battery, signal.
+
+  CLI tool for provisioning:
+    ```
+    # List all nodes
+    vessel-provision list
+
+    # Show node details
+    vessel-provision show deck_sensor_01
+
+    # Assign role to new node
+    vessel-provision assign --mac AA:BB:CC:DD:EE:FF --role tank_level
+
+    # Trigger OTA update for specific node
+    vessel-provision update deck_sensor_01 --version 1.2.0
+
+    # Update all nodes of a role
+    vessel-provision update --role deck_sensor --version 1.2.0
+
+    # Calibrate a node
+    vessel-provision calibrate deck_sensor_01 --type accel --data '{"bias_x": 0.01, "bias_y": -0.02}'
+    ```
+
+8.4 Calibration Data Replication
+----------------------------------
+
+Calibration data is critical and must survive any single Jetson failure:
+
+  Replication method: SQLite WAL mode + rsync every 5 minutes
+
+  ```bash
+  # Cron job on all Jetsons (every 5 minutes)
+  # Alpha syncs to Bravo and Charlie
+  */5 * * * * rsync -avz --delete /opt/vessel/data/esp32_nodes.db bravo:/opt/vessel/data/
+  */5 * * * * rsync -avz --delete /opt/vessel/data/esp32_nodes.db charlie:/opt/vessel/data/
+
+  # Bravo syncs to Alpha and Charlie (if Alpha is down)
+  */5 * * * * rsync -avz --delete /opt/vessel/data/esp32_nodes.db alpha:/opt/vessel/data/
+  */5 * * * * rsync -avz --delete /opt/vessel/data/esp32_nodes.db charlie:/opt/vessel/data/
+
+  # Charlie syncs to Alpha and Bravo (if Alpha and Bravo are down)
+  */5 * * * * rsync -avz --delete /opt/vessel/data/esp32_nodes.db alpha:/opt/vessel/data/
+  */5 * * * * rsync -avz --delete /opt/vessel/data/esp32_nodes.db bravo:/opt/vessel/data/
+  ```
+
+  Conflict resolution: Last-write-wins based on file modification time.
+  For production: Use Litestream (SQLite streaming replication) for
+  real-time replication with automatic conflict resolution.
+
+  Backup: SQLite database is backed up daily to NVMe and weekly to an
+  external USB drive that the captain rotates off the vessel.
+
+
+================================================================================
+9. SOFTWARE PACKAGE MANIFEST
+================================================================================
+
+  SYSTEM PACKAGES (apt):
+    - jetson-pack: 6.0+ (includes L4T 36.3, CUDA 12, TensorRT 10, cuDNN 9)
+    - python3.11: via deadsnakes PPA or pyenv
+    - redis-server: 7.2+
+    - mosquitto: 2.0.18+
+    - nvidia-container-runtime: for containerized deployments (optional)
+    - chrony: NTP time synchronization from GPS
+    - systemd: service management
+    - udev: USB device management
+    - netplan.io: network configuration
+
+  PYTHON PACKAGES (pip):
+    - ollama: 0.1.x (LLM runtime)
+    - faster-whisper: 1.0.x (STT)
+    - piper-tts-py: 0.1.x (TTS)
+    - pvporcupine: 3.0.x (wake word)
+    - ultralytics: 8.1.x (YOLOv8/YOLOv11)
+    - opencv-python-headless: 4.9.x (computer vision)
+    - numpy: 1.26.x (numerical)
+    - grpcio: 1.60.x (gRPC runtime)
+    - grpcio-tools: 1.60.x (protobuf code generation)
+    - protobuf: 4.25.x
+    - paho-mqtt: 2.0.x (MQTT client)
+    - redis: 5.0.x (Redis client, includes asyncio support)
+    - pyserial: 3.5.x (serial communication)
+    - pyserial-asyncio: 0.6.x (async serial)
+    - pyyaml: 6.0.x (YAML configuration)
+    - aiofiles: 23.2.x (async file I/O)
+    - mcp: 0.1.x (Model Context Protocol SDK)
+    - prometheus-client: 0.20.x (metrics)
+    - jtop: 4.0.x (Jetson monitoring)
+    - onnx: 1.16.x (model interchange)
+    - onnxruntime-gpu: 1.17.x (ONNX inference)
+    - tensorrt: 10.x (bundled with JetPack, pip install for Python API)
+    - pyaudio: 0.2.x (audio I/O)
+    - deepstream-python: 7.0.x (DeepStream Python bindings)
+
+  C/C++ BUILD DEPENDENCIES:
+    - gcc: 13.x (C compiler)
+    - meson: 1.2+ (build system)
+    - libserialport-dev: 0.1.x (serial port library)
+    - libssl-dev: 3.0.x (TLS support)
+
+  ESP32 PROVISIONING:
+    - Flask: 3.0.x (HTTP API for OTA)
+    - sqlalchemy: 2.0.x (SQLite ORM, optional)
+
+  CONFIGURATION & DEPLOYMENT:
+    - docker-compose: 2.23+ (optional containerized deployment)
+    - git: version control for configuration
+
+
+================================================================================
+10. DEPLOYMENT & BOOT SEQUENCE
+================================================================================
+
+  System image build:
+    ```bash
+    # On development machine (x86):
+    # 1. Flash JetPack 6.0 to Orin Nano via NVIDIA SDK Manager
+    # 2. Boot Jetson, run initial setup
+    # 3. Clone vessel platform repository
+    git clone https://github.com/yourorg/vessel-platform /opt/vessel
+    cd /opt/vessel
+
+    # 4. Run deployment script
+    sudo ./deploy/install.sh --node alpha --ip 10.0.0.1
+
+    # install.sh performs:
+    #   - Python 3.11 setup (pyenv)
+    #   - pip install all requirements
+    #   - Build NMEA mux C daemon (meson setup build && meson compile -C build)
+    #   - Install systemd services
+    #   - Configure network (netplan)
+    #   - Set up Redis persistence directory
+    #   - Configure Mosquitto broker
+    #   - Download and set up Ollama + Qwen2.5-7B model
+    #   - Export YOLOv8n to TensorRT engine
+    #   - Download Whisper-small model
+    #   - Download Piper voice model
+    #   - Download Porcupine wake word model
+    #   - Set up ESP32 provisioning directories
+    #   - Configure chrony NTP
+    #   - Set up log rotation
+    #   - Run smoke tests
+    ```
+
+  Service management:
+    ```bash
+    # Check all vessel services
+    sudo systemctl status 'vessel-*'
+
+    # View logs
+    sudo journalctl -u vessel-nmea-mux -f
+    sudo journalctl -u vessel-ollama -f
+
+    # Restart a service
+    sudo systemctl restart vessel-deepstream
+
+    # Check cluster health
+    vessel-cli cluster status
+    # Output:
+    # Node       IP          Status   Leader  GPU%  MEM%  TEMP
+    # alpha      10.0.0.1    ONLINE   YES     45%   63%   52°C
+    # bravo      10.0.0.2    ONLINE   NO      38%   41%   48°C
+    # charlie    10.0.0.3    ONLINE   NO      12%   23%   41°C
+    ```
+
+  Health check endpoints (HTTP):
+    - http://10.0.0.1:9090/health  (Alpha)
+    - http://10.0.0.2:9090/health  (Bravo)
+    - http://10.0.0.3:9090/health  (Charlie)
+    Response: {"status": "healthy", "node": "alpha", "leader": true, "uptime_s": 86400}
+
+
+================================================================================
+11. ASCII ARCHITECTURE DIAGRAMS
+================================================================================
+
+  11.1 FULL SYSTEM ARCHITECTURE
+  ===============================
+
+  +======================================================================+
+  |                    FISHING VESSEL F/V EXAMPLE                         |
+  |======================================================================|
+  |                                                                      |
+  |  +-------------------+    +-------------------+    +---------------+ |
+  |  |   WHEELHOUSE      |    |   BACK DECK       |    | ENGINE ROOM   | |
+  |  |                   |    |                   |    |               | |
+  |  |  +-------------+  |    |  +-------------+  |    | +-----------+ | |
+  |  |  | JETSON-ALPHA|  |    |  | JETSON-BRAVO|  |    | |JETSON-    | | |
+  |  |  | 10.0.0.1    |  |    |  | 10.0.0.2    |  |    | |CHARLIE    | | |
+  |  |  |             |  |    |  |             |  |    | |10.0.0.3   | | |
+  |  |  | [LEADER]    |  |    |  |             |  |    | |           | | |
+  |  |  |             |  |    |  |             |  |    | |           | | |
+  |  |  | OpenCPN     |  |    |  | DeepStream  |  |    | | Depth ML  | | |
+  |  |  | MCP Server  |  |    |  | YOLOv8n     |  |    | | Fish ID   | | |
+  |  |  | NMEA Mux(C) |  |    |  | Whisper STT |  |    | | Radar     | | |
+  |  |  | Ollama LLM  |  |    |  | Piper TTS   |  |    | | Engine    | | |
+  |  |  | Redis       |  |    |  | Wake Word   |  |    | | ESP32     | | |
+  |  |  | Mosquitto   |  |    |  | 4x Cameras  |  |    | | Provision | | |
+  |  |  +------+------+  |    |  +------+------+  |    | +-----+-----+ | |
+  |  |        |          |    |        |          |    |       |       | |
+  |  |  +-----+-----+    |    |  +-----+-----+    |    | +-----+-----+ | |
+  |  |  | Peripherals|   |    |  | Peripherals|   |    | | Peripherals|| |
+  |  |  | GPS puck   |   |    |  | Cam 0-3    |   |    | | Depth sndr || |
+  |  |  | Compass    |   |    |  | Mic array  |   |    | | Radar serial| |
+  |  |  | Mic+Spkr   |   |    |  | Spkr (bkp) |   |    | | CAN bus    | |
+  |  |  +------------+    |    |  +------------+    |    | +-----------+ | |
+  |  +--------|-----------+    +--------|-----------+    +-------|-------+ |
+  |           |                       |                       |          |
+  |           +----------+------------+-----------+-----------+          |
+  |                      |                        |                      |
+  |              +-------v--------+       +-------v--------+             |
+  |              | MANAGED SWITCH |       |  POWER SYSTEM  |             |
+  |              | 10.0.0.254     |       | 12V DC Bus     |             |
+  |              | Netgear GS308T |       | 3x DC-DC conv  |             |
+  |              +----------------+       | (separate fused)|             |
+  |                                        +----------------+             |
+  |                                                                      |
+  |  +------------------------------------------------------------------+|
+  |  |              ESP32 SENSOR NETWORK (WiFi 2.4GHz)                  ||
+  |  |                                                                   ||
+  |  |  [Deck_Sensor_01] [Deck_Sensor_02] [Tank_01] [Env_01] [Env_02]  ||
+  |  +------------------------------------------------------------------+|
+  +======================================================================+
+
+  11.2 COMMUNICATION FLOW DIAGRAM
+  =================================
+
+                    +------------------+
+                    |  MQTT (Mosquitto) |
+                    |  Pub/Sub Events  |
+                    +--------+---------+
+                             |
+         +-------------------+-------------------+
+         |                   |                   |
+    +----v-----+        +----v-----+        +----v-----+
+    |  Alpha   |<--gRPC-->|  Bravo   |<--gRPC-->|  Charlie |
+    |          | RPC calls|          | RPC calls|          |
+    |  Redis   |--------->|          |--------->|          |
+    | (shared  | read/write          | read/write          |
+    |  state)  |          |          |          |          |
+    +----+-----+          +----+-----+          +----+-----+
+         |                     |                     |
+         | NMEA sentences      | Vision events       | Sensor data
+         | (via NMEA mux)      | (via MQTT)          | (via MQTT)
+         v                     v                     v
+    +----------+          +----------+          +----------+
+    | OpenCPN  |          | Deck UI  |          | Engine   |
+    | Autopilot|          | Alerts   |          | Monitor  |
+    +----------+          +----------+          +----------+
+
+  11.3 VOICE ASSISTANT PIPELINE
+  ===============================
+
+  +--------+   +-----------+   +----------+   +-------+   +-------+   +---------+
+  | Micro- |-->| Porcupine |-->| Whisper  |-->|  gRPC |-->| Qwen  |-->| Piper   |
+  | phone  |   | Wake Word |   | STT      |   | Alpha |   | 2.5-7B|   | TTS     |
+  +--------+   +-----------+   +----------+   +-------+   +-------+   +---------+
+       ^                                                                     |
+       |                    <3 second latency                               |
+       +----------------------Speakers <-------------------------------------+
+
+
+================================================================================
+12. RISK ANALYSIS & MITIGATIONS
+================================================================================
+
+  RISK                    | LIKELIHOOD | IMPACT | MITIGATION
+  -------------------------|------------|--------|------------------------------------------
+  Single Jetson failure    | Medium     | Medium | Leader election, service
+                           |            |        | migration, physical separation
+  Redis data corruption    | Low        | High   | AOF persistence, daily backups,
+                           |            |        | rsync replication
+  NMEA mux crash           | Low        | Critical| systemd auto-restart,
+                           |            |        | watchdog timer, C for reliability
+  LLM hallucination        | High       | Medium | Tool calling constraints,
+  (dangerous nav advice)   |            |        | safety interlocks on rudder/
+                           |            |        | throttle rates, human approval
+                           |            |        | for MOB activation
+  Saltwater corrosion      | High       | High   | IP67 enclosures, conformal coating,
+  (electronics damage)     |            |        | desiccant packs, annual inspection
+  Engine EMI interference  | Medium     | Medium | Shielded cabling, ferrite chokes,
+  (NMEA data corruption)   |            |        | checksum validation, source filtering
+  Wi-Fi congestion         | Medium     | Low    | Dedicated SSID for ESP32s, 2.4GHz
+  (ESP32 connectivity)     |            |        | only, MQTT QoS 1 for commands
+  Thermal throttling       | Medium     | Medium | Passive cooling fins, MAXN power
+  (GPU performance drop)   |            |        | mode, jtop monitoring, thermal alerts
+  Firmware update failure  | Low        | Low    | A/B partition OTA, rollback on
+  (ESP32 bricked)          |            |        | failure, physical reset button
+  GPS signal loss          | Medium     | Medium | INS dead reckoning fallback,
+                           |            |        | last known position, anchor alert
+
+
+================================================================================
+13. APPENDICES
+================================================================================
+
+  APPENDIX A: JETSON ORIN NANO SUPER SPECIFICATIONS
+  --------------------------------------------------
+    GPU: NVIDIA Ampere architecture, 1024 CUDA cores
+    AI Performance: 67 TOPS (INT8), 40 TOPS (FP16)
+    CPU: 6-core ARM Cortex-A78AE v8.2 64-bit, 1.5MHz max
+    Memory: 8GB LPDDR5, 102GB/s bandwidth
+    Storage: NVMe SSD (via M.2 Key M slot)
+    Video Encode: 1x 4K60 or 4x 1080p30 (AV1, H.265, H.264)
+    Video Decode: 2x 4K60 or 8x 1080p30
+    Connectivity: Gigabit Ethernet, USB 3.2, PCIe Gen 4, HDMI 2.1
+    Power: 15W (default) to 25W (MAXN mode)
+    OS: Ubuntu 22.04 + JetPack 6.0 (Linux for Tegra 36.3)
+    Price: ~$249 (developer kit)
+
+  APPENDIX B: NETWORK ADDRESS ALLOCATION
+  ----------------------------------------
+    10.0.0.1      Jetson-Alpha (eth0)
+    10.0.0.2      Jetson-Bravo (eth0)
+    10.0.0.3      Jetson-Charlie (eth0)
+    10.0.0.10-99  ESP32 sensor nodes (DHCP from dnsmasq on Alpha)
+    10.0.0.100    OpenCPN display (if separate)
+    10.0.0.101    Captain's tablet
+    10.0.0.254    Managed switch (management interface)
+
+  APPENDIX C: PORT ALLOCATION
+  -----------------------------
+    1883          MQTT (Mosquitto broker, Alpha only)
+    6379          Redis (Alpha only)
+    10110         NMEA multiplexer TCP (Alpha only, leader only)
+    50051         gRPC server (all Jetsons)
+    8080          ESP32 provisioning HTTP (all Jetsons)
+    9090          Health check HTTP (all Jetsons)
+    11434         Ollama LLM server (Alpha only, leader only)
+    3000          Grafana dashboard (Alpha only, optional)
+    54321         OpenCPN NMEA connection
+
+  APPENDIX D: GIT REPOSITORY STRUCTURE
+  --------------------------------------
+    vessel-platform/
+    +-- config/
+    |   +-- services.yaml        # Service definitions per node
+    |   +-- nmea_mux.conf        # NMEA mux configuration
+    |   +-- mosquitto.conf       # MQTT broker config
+    |   +-- redis.conf           # Redis configuration
+    |   +-- netplan/             # Network configs per node
+    |       +-- alpha.yaml
+    |       +-- bravo.yaml
+    |       +-- charlie.yaml
+    +-- proto/
+    |   +-- vessel_cluster.proto
+    |   +-- vessel_vision.proto
+    |   +-- vessel_sensor.proto
+    |   +-- vessel_nav.proto
+    +-- python/
+    |   +-- vessel_cluster/      # Cluster management package
+    |   |   +-- leader_election.py
+    |   |   +-- health_monitor.py
+    |   |   +-- failover.py
+    |   +-- vessel_mcp/          # MCP server package
+    |   |   +-- server.py
+    |   |   +-- tools/
+    |   |       +-- autopilot.py
+    |   |       +-- navigation.py
+    |   |       +-- sensors.py
+    |   +-- vessel_vision/       # Vision pipeline package
+    |   |   +-- deepstream_pipeline.py
+    |   |   +-- detector.py
+    |   |   +-- safety_monitor.py
+    |   +-- vessel_stt_tts/      # Speech pipeline package
+    |   |   +-- stt.py
+    |   |   +-- tts.py
+    |   |   +-- wake_word.py
+    |   |   +-- audio_router.py
+    |   +-- vessel_sensor/       # Sensor processing package
+    |   |   +-- depth_processor.py
+    |   |   +-- radar_analyzer.py
+    |   |   +-- fish_id.py
+    |   |   +-- engine_telemetry.py
+    |   +-- vessel_provision/    # ESP32 provisioning package
+    |       +-- server.py
+    |       +-- firmware_vault.py
+    |       +-- node_db.py
+    +-- c/
+    |   +-- nmea_mux/            # C NMEA multiplexer daemon
+    |       +-- src/
+    |       |   +-- main.c
+    |       |   +-- serial.c
+    |       |   +-- nmea_parser.c
+    |       |   +-- tcp_server.c
+    |       +-- meson.build
+    +-- models/
+    |   +-- yolov8n.pt           # YOLOv8-nano PyTorch model
+    |   +-- fish_id.pt           # Custom fish ID model
+    |   +-- depth_cnn.pt         # Depth sounder ML model
+    |   +-- piper/               # Piper voice models
+    |   +-- porcupine/           # Wake word models
+    +-- deploy/
+    |   +-- install.sh           # Main deployment script
+    |   +-- setup_alpha.sh       # Alpha-specific setup
+    |   +-- setup_bravo.sh       # Bravo-specific setup
+    |   +-- setup_charlie.sh     # Charlie-specific setup
+    |   +-- systemd/             # systemd service files
+    +-- tests/
+        +-- test_leader_election.py
+        +-- test_nmea_parser.py
+        +-- test_vision_pipeline.py
+        +-- test_provisioning.py
+
+  APPENDIX E: TROUBLESHOOTING GUIDE
+  -----------------------------------
+    Problem: Jetson-Alpha not becoming leader
+    Check:    redis-cli ping (should return PONG)
+              redis-cli get vessel:cluster:leader
+              systemctl status vessel-leader-election
+    Fix:      If Redis is down: sudo systemctl restart redis
+              If stale leader key: redis-cli del vessel:cluster:leader
+
+    Problem: YOLO detections are slow (<10fps)
+    Check:    sudo jtop (GPU utilization, thermal throttling)
+              nvidia-smi (should show TensorRT using GPU)
+    Fix:      Ensure MAXN power mode: sudo nvpmodel -m 0
+              Ensure clocks maxed: sudo jetson_clocks
+              Check camera USB bandwidth: lsusb -t
+
+    Problem: Whisper transcription is inaccurate
+    Check:    Audio input levels: arecord -l, arecord -d 5 test.wav
+              Noise floor with engine running
+    Fix:      Adjust microphone gain, enable noise cancellation
+              Move mic away from engine air intake
+
+    Problem: ESP32 not connecting to provisioning server
+    Check:    WiFi signal: vessel-cli esp32 scan
+              DHCP: journalctl -u dnsmasq -f
+              Provisioning port: curl http://10.0.0.1:8080/health
+    Fix:      Restart dnsmasq, check WiFi password in ESP32 firmware
+              Verify ESP32 is using correct SSID
+
+================================================================================
+END OF TECHNICAL BRIEF
+================================================================================
+
+Document version: 1.0
+Total word count: ~5,500
+Next review date: Pre-sea-trial
+Approved by: [Captain / Systems Engineer / Naval Architect]
+
+================================================================================

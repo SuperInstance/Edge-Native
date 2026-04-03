@@ -1,0 +1,1195 @@
+================================================================================
+              EXPERT PANEL REVIEW — ESP32 MARINE AUTOPILOT DESIGN
+     Documents Reviewed: 05_consensus_architecture.txt, firmware_config.json,
+     safety_config.json, pin_config.json, task_config.json, jetson_mcp_tools.json,
+     nmea_sentence_map.json, 07_simulation_results.txt
+================================================================================
+  Review Date : 2025
+  Review Type : SAFETY-CRITICAL SYSTEM — Three-Persona Expert Panel
+  Standard    : ABYC, IEC 60945 (Ed.4 awareness per self-declaration),
+                IEC 61508 SIL-1 aspirations
+  Verdict     : NOT APPROVED FOR DEPLOYMENT — Multiple critical safety gaps
+
+  This design is architecturally sound in concept but contains specific
+  hardware, firmware, and integration deficiencies that MUST be resolved
+  before any vessel deployment. Several issues pose direct risk of
+  injury, collision, or loss of vessel control.
+
+================================================================================
+1. CRITICAL ISSUES (Must Fix — Safety/Injury/Collision Risk)
+================================================================================
+
+  [C-01] MOSFET Gate Drive Voltage Mismatch — STUCK/FRIED SOLENOID RISK
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Power / MOSFET Driver Board
+
+  DESCRIPTION:
+    The architecture document (§2) specifies "5V rail: LM2596 buck converter
+    (12V→5V, for solenoid MOSFET Vgs)" but the wiring schematic (§10) and
+    pin_config.json show ALL three MOSFET gates driven directly from ESP32
+    GPIO through 100Ω series resistors. The ESP32 GPIO output is 3.3V.
+
+    The IRLZ44N Rds(on) of 22mΩ is specified at Vgs=5V. At Vgs=3.3V, the
+    MOSFET operates in the linear region with Rds(on) of approximately 50-80mΩ.
+    At nominal solenoid current of 2000mA (safety_config.json solenoid.drive),
+    power dissipation: P = I²Rds = 2² × 0.08 = 0.32W (vs 0.09W at 5V Vgs).
+
+    CRITICAL: The 5V buck converter is described but NEVER CONNECTED to the
+    MOSFET gates. This is a documentation/hardware disconnect that means the
+    MOSFETs are running in a marginal operating region.
+
+    ADDITIONAL RISK: The MOSFET datasheet shows Vgs(th) min=1V, max=2V. At
+    3.3V GPIO with 100Ω series + 10KΩ pull-down divider, gate voltage is:
+    Vgs = 3.3V × 10K / (0.1K + 10K) = 3.27V. If ESP32 supply droops or
+    GPIO weakens, Vgs could drop below 2V threshold on some MOSFET samples.
+
+  RECOMMENDED FIX:
+    a) Route the LM2596 5V output to the MOSFET gates through a level
+       shifter or gate driver IC (e.g., TC4420, IRLML6344 as a pre-driver).
+    b) Alternatively, use a true logic-level MOSFET rated for 2.5V Vgs
+       with guaranteed Rds(on) at Vgs=2.5V (e.g., IRLML2502, Si2302).
+    c) Add a MOSFET drain-source voltage monitor to detect linear-region
+       operation (Vds > 0.5V = trouble).
+    d) Resolve the 5V rail documentation inconsistency — either connect it
+       or remove the reference.
+
+  ---------------------------------------------------------------------------
+
+  [C-02] No Physical Emergency Stop / Kill Switch — ABYC NON-COMPLIANCE
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Physical Safety / Control Head
+
+  DESCRIPTION:
+    The design has NO physical emergency-stop mechanism. All disengagement
+    paths go through the ESP32:
+      - Software: standby command via Jetson or buttons (GPIO35-40)
+      - Firmware: task_watchdog detects fault → alarm_disengage_sequence
+      - Hardware: MAX6818 external WDT → ESP32 reset → GPIOs default LOW
+
+    The fastest path to disengage is the alarm_disengage_sequence which takes
+    ~100ms (solenoids off) + additional time for clutch de-energize. The
+    external WDT path takes up to 1.6 SECONDS from fault to reset.
+
+    ABYC A-33 (Autopilots) and general marine safety practice requires a
+    physically separate, electrically independent emergency-stop mechanism
+    accessible to the helmsman. A software-controlled button on the same
+    microcontroller that drives the solenoids is NOT an emergency stop.
+
+    If the ESP32 latches up (e.g., GPIOs stuck HIGH due to ESD, latch-up, or
+    firmware bug in a low-level driver), the 10KΩ pull-down resistors will
+    EVENTUALLY turn off the MOSFETs, but during a latch-up, GPIO drive
+    strength (~40mA) will easily overcome the 10KΩ pull-down, keeping the
+    MOSFETs ON. The solenoids would remain energized indefinitely.
+
+  RECOMMENDED FIX:
+    a) Add a hardware kill switch in series with the +12V solenoid supply,
+       BEFORE the fuse, accessible at the helm station. This breaks power
+       to all solenoids mechanically.
+    b) Alternatively, add an emergency-stop relay whose coil is driven by
+       a dedicated momentary button, whose NC contacts are in the solenoid
+       +12V path. No microcontroller involvement.
+    c) Add a physical clutch override lever that mechanically disengages
+       the autopilot drive unit from the helm.
+    d) Document this as a mandatory installation requirement.
+
+  ---------------------------------------------------------------------------
+
+  [C-03] Single Fuse Protects Solenoids AND Electronics — BROWNOUT RISK
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Power Distribution
+
+  DESCRIPTION:
+    safety_config.json power.fuse_rating_a = 5.0. The architecture (§10) shows:
+      "Boat 12V Bus (+) -> 5A Automotive Fuse -> [all loads]"
+
+    All loads share one fuse: ESP32 (~300mA peak), BNO085 (~20mA), AS5048A
+    (~15mA), SSD1306 (~30mA), ADS1115 (~1mA), plus three solenoids at 2000mA
+    nominal each (6000mA total if all energized). The software interlock
+    prevents simultaneous PORT+STBD, but a wiring fault, MOSFET failure, or
+    software bug could energize multiple solenoids, drawing 4-6A.
+
+    A solenoid short-circuit could draw 10-20A, which would eventually blow
+    the 5A fuse (blow time ~100ms at 20A for an automotive fuse). During
+    those 100ms, the +12V rail sags, the ESP32's LM1117-3.3 drops out, the
+    ESP32 brownout-resets, and during the reset the MOSFETs are in an
+    undefined state (GPIOs briefly floating before pull-downs take effect).
+
+  RECOMMENDED FIX:
+    a) Separate the power paths:
+       - 1A fuse for ESP32 + 3.3V electronics (through LM1117-3.3)
+       - 5A fuse for solenoid drive supply (PORT + STBD)
+       - 3A fuse for clutch solenoid supply
+    b) Add a bulk capacitor (470µF-1000µF) on the +12V rail near the
+       solenoid MOSFET board to absorb transient current demands.
+    c) Add reverse-polarity protection (P-channel MOSFET or series diode)
+       on the main input — boat wiring misconnection is a common failure.
+    d) Add an LC filter between the solenoid supply and the electronics
+       supply to isolate solenoid switching noise.
+
+  ---------------------------------------------------------------------------
+
+  [C-04] LM1117-3.3 LDO Insufficient Current Headroom — ESP32 RESET RISK
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #1 (Marine Safety Engineer) + #2 (Embedded RTOS Expert)
+  Subsystem: Power Supply
+
+  DESCRIPTION:
+    The LM1117-3.3 is rated for 800mA output maximum (with proper heatsinking).
+    ESP32-S3 peak current draw:
+      - WiFi TX: ~310-480mA (at 20dBm TX power)
+      - CPU (240MHz dual core): ~120-160mA
+      - Peripherals (I2C, UART, ADC): ~20-40mA
+      - Flash/PSRAM access: ~20-40mA
+    Sensor current budget:
+      - BNO085: ~15-20mA
+      - AS5048A: ~10-15mA
+      - SSD1306: ~20-30mA (depending on pixel count)
+      - ADS1115: ~0.15mA
+      - Pull-up resistors (4.7KΩ × 2 on I2C): ~1.4mA
+    Total worst case: 480 + 160 + 40 + 40 + 30 + 15 + 30 + 1.4 = ~796mA
+
+    This is AT the LM1117 limit. If MQTT is enabled (WiFi active), the
+    ESP32 will experience periodic brownout resets during TX bursts. The
+    LM1117 dropout voltage is 1.1V at 800mA, meaning input must be >4.4V.
+    From the LM2596 5V rail, there's only 0.6V headroom.
+
+  RECOMMENDED FIX:
+    a) Replace LM1117-3.3 with AMS1117-3.3 (1A) or, preferably, an
+       MCP1825-3302E/OT (500mA with ultra-low dropout 250mV at 500mA)
+       plus a second LDO in parallel, or a switching buck converter
+       (e.g., AP2112K-3.3, TLV75533PDBV at 300mA each).
+    b) Best solution: Use a dedicated 3.3V buck converter (e.g., TPS563200)
+       rated for 3A. The slight increase in BOM cost ($1.50 vs $0.50) is
+       negligible compared to an ESP32 brownout during an autopilot maneuver.
+    c) Disable WiFi by default (already done in config — good), but add a
+       runtime check: if WiFi is enabled and battery voltage < 11.5V, force
+       WiFi off to prevent brownout.
+
+  ---------------------------------------------------------------------------
+
+  [C-05] Double-Buffer Race Condition on Heading Data — PID DATA CORRUPTION
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: FreeRTOS Inter-Task Communication
+
+  DESCRIPTION:
+    The architecture (§4) declares:
+      "Shared Variables (no lock — single-writer, atomic 32-bit reads):
+       volatile float heading_buf[2]  // double-buffer, compass->PID
+       volatile uint8_t heading_active // buffer selector"
+
+    This pattern has a TIME-OF-CHECK-TO-TIME-OF-USE (TOCTOU) race condition:
+
+      task_compass_reader (priority 18):       task_pid_control (priority 24):
+        heading_buf[1-heading_active] = new;      // can preempt here
+        heading_active = 1-heading_active;          heading = heading_buf[heading_active];  // RACE!
+
+    Between reading heading_active and reading heading_buf[heading_active],
+    the compass writer can change heading_active. The PID reads from the
+    OLD buffer (which now contains partially-written new data).
+
+    While individual 32-bit float reads/writes are atomic on Xtensa LX7,
+    the compound read (selector + buffer) is NOT. The double-buffer pattern
+    WITHOUT synchronization is a well-known concurrency anti-pattern.
+
+    On ESP32-S3 with both cores active, the situation is WORSE: volatile
+    does NOT provide inter-core memory barriers. If task_mqtt_client (Core 1)
+    reads heading for telemetry, it may see stale values from the Core 0
+    data cache.
+
+  RECOMMENDED FIX:
+    a) Replace the double-buffer with a FreeRTOS spinlock or task notification:
+       - Writer: acquire lock, write to single buffer, release lock
+       - Reader (PID): acquire lock, copy to local, release lock
+       Lock hold time < 1µs (single 32-bit copy) — no impact on PID timing.
+    b) Or use xQueueOverwrite with a single-item queue (provides built-in
+       memory barrier and atomic swap semantics).
+    c) For the Core 1 telemetry path, use esp_cache_msync() or ensure
+       all shared heading data is in DRAM (not cached IRAM region).
+
+  ---------------------------------------------------------------------------
+
+  [C-06] No I2C Bus Lockup Detection or Recovery — SYSTEM DEADLOCK
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: I2C Bus / Sensor Communication
+
+  DESCRIPTION:
+    Three devices share I2C0 at 400kHz (task_config.json i2c0_mutex):
+      - task_compass_reader (priority 18, 10Hz = 10 txns/sec)
+      - task_rudder_feedback (priority 18, 50Hz = 50 txns/sec)
+      - task_display_oled (priority 12, 5Hz = 5 txns/sec)
+
+    Total I2C transactions: ~65/sec. An I2C bus lockup occurs when a slave
+    device holds SDA low (e.g., BNO085 interrupted mid-transaction during
+    a watchdog reset, or SSD1306 power glitch). In this state:
+      - All subsequent I2C transactions fail (bus busy)
+      - All three tasks block on i2c0_mutex or on i2c_master_start()
+      - task_rudder_feedback stops updating → rudder data goes stale
+      - task_compass_reader stops updating → compass data goes stale
+      - After 500ms: COMPASS_FAIL alarm → auto-disengage
+
+    The system does eventually fail-safe (compass timeout), but:
+      1. The 500ms delay before disengagement is dangerous at speed
+      2. The root cause (I2C lockup) is never recovered — the system is
+         permanently broken until power cycle
+      3. The alarm reports "COMPASS FAIL" not "I2C BUS LOCKUP" — misleading
+
+  RECOMMENDED FIX:
+    a) Implement I2C bus recovery in a dedicated timeout path:
+       - After N consecutive I2C failures, clock SCL manually (toggle GPIO)
+         for 9 cycles to clear the slave's state machine
+       - If recovery fails M times, force a software I2C bus reset
+    b) Add I2C transaction timeout: every i2c_master_write/read must have
+       a maximum timeout of 50ms (not portMAX_DELAY)
+    c) Add an I2C health check in task_watchdog: if no successful I2C
+       transaction in 200ms, generate I2C_BUS_ERROR alarm
+    d) The i2c0_mutex acquisition must use a finite timeout
+       (pdMS_TO_TICKS(100)) to prevent indefinite blocking
+
+  ---------------------------------------------------------------------------
+
+  [C-07] Voice Engagement Without Confirmation — UNINTENDED AUTOPILOT ACTIVATION
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #3 (Systems Integration Expert)
+  Subsystem: Jetson MCP Tools / Human-Machine Interface
+
+  DESCRIPTION:
+    jetson_mcp_tools.json, tool "set_heading":
+      "engage": { "type": "boolean", "default": true }
+
+    This means any LLM voice command that sets a heading will ALSO engage
+    the autopilot by default. An LLM misinterpretation (e.g., "set heading
+    to zero three two seven" interpreted from a casual conversation about
+    navigation, or a noise-triggered wake word) could engage the autopilot
+    while:
+      - Approaching a dock or mooring
+      - In a narrow channel
+      - During a crew overboard recovery
+      - With the helmsman unaware the autopilot has taken control
+
+    The engage tool also has no confirmation requirement:
+      "required": [] (empty array for engage tool)
+
+    Additionally, the engage tool's mode parameter allows "track" mode:
+      "mode": { "enum": ["auto", "track", "wind"], "default": "auto" }
+    Engaging in track mode via voice without confirmation could cause the
+    vessel to steer toward a previously-set waypoint that is no longer
+    appropriate (e.g., a waypoint set before departure from a different
+    location).
+
+  RECOMMENDED FIX:
+    a) Change set_heading tool: "engage": { "default": false } — must be
+       EXPLICITLY set to true to engage.
+    b) Add a confirmation step: when engage=true, require a second voice
+       confirmation within 5 seconds ("Confirm autopilot engage?").
+    c) Add speed/guard-zone checks: refuse to engage if:
+       - GPS speed < 1 knot (at anchor/mooring)
+       - Heading rate > 10°/sec (turning maneuver)
+       - Within 50m of a marked waypoint (configurable)
+    d) Add a "disable_voice_engage" runtime flag that defaults to true
+       and must be explicitly enabled by the helmsman via physical button.
+    e) Add audible alarm (distinct beep pattern) whenever autopilot engages
+       from ANY source — current MODE_CHANGED alarm has only a "single_beep"
+       which is insufficient for engagement notification.
+
+  ---------------------------------------------------------------------------
+
+  [C-08] No Hardware Interlock Circuit — SOLENOID SIMULTANEOUS ENERGIZATION
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Solenoid Driver / Hydraulic Safety
+
+  DESCRIPTION:
+    safety_config.json solenoid.interlock:
+      "software_enforced": true
+      "hardware_enforced": true
+
+    BUT: The architecture document and pin_config.json describe NO hardware
+    interlock circuit. The only interlock is software:
+      "NEVER energize PORT and STBD simultaneously" (§6 Layer 3)
+
+    Software interlocks fail when:
+      - Firmware bug (e.g., race condition between alarm handler and PID)
+      - GPIO glitch during ESP32 reset
+      - EMI-induced GPIO toggle (solenoid switching generates EMI)
+      - Physical damage to PCB (shorted traces)
+
+    Simultaneous PORT + STBD energization on a spring-center valve causes
+    hydraulic lockup and could damage the valve body, blow hydraulic hoses,
+    or cause violent rudder movement.
+
+  RECOMMENDED FIX:
+    a) Add a hardware AND-gate or cross-inhibition circuit:
+       - Use a 74HC08 quad AND gate: PORT output AND (NOT STBD output)
+       - STBD output AND (NOT PORT output)
+       - Drive MOSFET gates through these AND gates
+    b) Alternatively, use a single SPDT relay that physically prevents
+       both solenoid circuits from being powered simultaneously.
+    c) Document the hardware interlock schematic in the wiring section.
+    d) Add a self-test at boot: briefly pulse PORT alone, STBD alone,
+       verify correct behavior, flag hardware interlock fault if both
+       activate simultaneously.
+
+  ---------------------------------------------------------------------------
+
+  [C-09] GPIO2 (Strapping Pin) Used for Buzzer — BOOT FAILURE RISK
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #2 (Embedded RTOS Expert) + #1 (Marine Safety Engineer)
+  Subsystem: GPIO Assignment / Boot Reliability
+
+  DESCRIPTION:
+    pin_config.json assigns GPIO2 to the buzzer output:
+      "gpio": 2, "active_state": "high"
+    Wiring schematic (§10): "GPIO2 -> 2N2222 base via 1KΩ -> Piezo buzzer"
+    But pin_config.json gpio_buzzer notes: "500Ω base resistor"
+
+    FIRST PROBLEM: Contradictory resistor values (1KΩ vs 500Ω) — indicates
+    the design was not fully reviewed.
+
+    CRITICAL PROBLEM: On ESP32-S3, GPIO2 is a strapping pin that controls
+    the boot mode and SPI flash voltage configuration. During boot:
+      - GPIO2 is sampled with internal/external pull-up
+      - External buzzer circuit (2N2222 base via resistor) loads this pin
+      - If the buzzer circuit pulls GPIO2 below ~0.7V during boot
+        (e.g., cold 2N2222, low beta, or wet environment), the ESP32
+        enters the WRONG boot mode → BRICKED DEVICE
+
+    In a marine environment, moisture on the 2N2222 or buzzer wiring
+    could create a leakage path to ground, pulling GPIO2 low.
+
+  RECOMMENDED FIX:
+    a) IMMEDIATELY move the buzzer to a non-strapping GPIO (e.g., GPIO13,
+       GPIO14, or GPIO16 — all non-strapping, general-purpose).
+    b) Add a series diode between GPIO and the transistor base to prevent
+       reverse current from the buzzer circuit from pulling the GPIO low.
+    c) Resolve the 1KΩ vs 500Ω base resistor discrepancy.
+
+  ---------------------------------------------------------------------------
+
+  [C-10] Clutch Engagement Creates Manual/Autopilot Conflict — RUDDER JERK
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #1 (Marine Safety Engineer) + #3 (Systems Integration Expert)
+  Subsystem: State Machine / Clutch Control
+
+  DESCRIPTION:
+    The ENGAGING -> AUTO transition (§7):
+      "Actions: energize clutch, start 500ms timer"
+      "ENGAGING -> AUTO: 500ms timer expired + clutch current > 0.5A"
+
+    When the engage command is issued, the clutch energizes. At this point,
+    the hydraulic system transitions from manual helm control to autopilot
+    drive. The PID then starts with:
+      "capture current heading as target_heading, enable PID"
+
+    PROBLEM: During the 500ms clutch engagement, the helmsman may still be
+    actively steering (holding the wheel against weather helm, for example).
+    When the clutch engages, the autopilot "captures" the current heading and
+    begins PID control. But the rudder may be deflected (e.g., 10° to port
+    from manual steering). The PID sees a heading error and immediately
+    commands rudder correction, causing a SUDDEN JERK in the opposite
+    direction as the autopilot fights the helmsman's rudder deflection.
+
+    On a 30-60ft vessel, this rudder jerk can cause significant heel and
+    startle crew. Worse, if the helmsman is injured or thrown off balance,
+    they may lose control of the vessel.
+
+  RECOMMENDED FIX:
+    a) At engage: DON'T capture heading at clutch engagement. Instead:
+       1. Energize clutch
+       2. Wait 500ms for engagement
+       3. Read current rudder angle
+       4. Wait for rudder to CENTER (rudder_angle < 2° for 1 second)
+       5. THEN capture heading as target and enable PID
+    b) Or: provide an audible "AUTOPILOT ENGAGING — RELEASE HELM" warning
+       with a 2-second countdown before PID activation.
+    c) Display a clear "HANDS OFF HELM" message on the OLED during the
+       ENGAGING state.
+
+  ---------------------------------------------------------------------------
+
+  [C-11] Watchdog Task is a Single Point of Failure — NO REDUNDANT MONITOR
+  ---------------------------------------------------------------------------
+  Severity : CRITICAL
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: Watchdog / Safety Monitoring
+
+  DESCRIPTION:
+    task_watchdog (priority 23, 1024-byte stack) is responsible for:
+      - Checking PID heartbeat (every 100ms, timeout 50ms)
+      - Checking compass freshness (every 100ms, timeout 500ms)
+      - Checking Jetson heartbeat (every 100ms, timeout 2000ms)
+      - Checking rudder freshness (every 100ms, timeout 200ms)
+      - Kicking MAX6818 external hardware WDT (every 100ms)
+      - Updating LEDs and buzzer patterns
+      - Processing alarm events from alarm_queue
+
+    This is an enormous responsibility for a single task with only 1024 bytes
+    of stack. If task_watchdog:
+      - Overflows its stack → silent corruption, then eventual crash
+      - Enters an infinite loop in alarm processing → MAX6818 resets in 1.6s
+      - Gets starved by higher-priority tasks → MAX6818 resets in 1.6s
+
+    The MAX6818 external WDT provides a safety net, but its 1.6s timeout is
+    VERY slow for a safety system. During those 1.6 seconds:
+      - The PID loop could be stuck commanding full rudder deflection
+      - At 6°/sec rate limit and 35° max angle: the rudder could move 9.6°
+      - On a 50ft vessel at 6 knots: 9.6° rudder causes significant yaw
+
+  RECOMMENDED FIX:
+    a) Increase task_watchdog stack to 2048 bytes minimum.
+    b) Move MAX6818 kicking to a hardware timer interrupt (ISR), NOT a task.
+       ESP32 has Timer Group 0 and Timer Group 1 with 54-bit generic timers.
+       Configure Timer 1 at 100ms to toggle GPIO1 independently of any task.
+       This decouples the external WDT from software health monitoring.
+    c) Reduce MAX6818 timeout to 500ms (it's adjustable via external cap).
+    d) Add a SECOND software watchdog mechanism: use ESP32's built-in TWDT
+       (Task Watchdog Timer) configured separately from the application logic.
+
+================================================================================
+2. MAJOR ISSUES (Should Fix — Unreliable / Won't Work Correctly)
+================================================================================
+
+  [M-01] Solenoid Continuous-On Time Exceeds Duty Cycle Rating
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Solenoid Driver
+
+  DESCRIPTION:
+    safety_config.json solenoid.drive.max_on_time_ms = 15000 (15 seconds).
+    safety_config.json solenoid.clutch.max_on_time_ms = 300000 (5 minutes).
+
+    Most hydraulic solenoid valves are rated for INTERMITTENT duty:
+      - Standard: 25% duty cycle, 5 minutes max continuous
+      - Continuous duty coils: available but uncommon, larger, more expensive
+
+    Running a standard solenoid at full current for 15 seconds (continuous
+    rudder drive in rough seas) will cause significant heating. At 2A draw
+    and 12Ω coil resistance: P = I²R = 4 × 12 = 48W. This is a LOT of heat
+    in a small solenoid coil.
+
+    The clutch at 1500mA for 5 minutes: P = 1.5² × R_clutch. If R_clutch
+    is 8Ω: P = 18W for 5 minutes. This will cook the clutch coil.
+
+  RECOMMENDED FIX:
+    a) Implement PWM current reduction (hold mode):
+       - Pull-in: full current for 100ms (safety_config already defines
+         inrush_duration_ms: 100)
+       - Hold: reduce to 50-60% current via PWM (e.g., 70% duty cycle at
+         1kHz) after the solenoid is confirmed engaged
+    b) Specify continuous-duty solenoid valves in the BOM.
+    c) Add a MOSFET case temperature check (safety_config has a
+       mosfet.max_case_temp_celsius: 85 but no way to measure it).
+    d) Reduce clutch max_on_time_ms to 600000 (10 minutes) and implement
+       a "clutch rest" cycle.
+
+  ---------------------------------------------------------------------------
+
+  [M-02] Simulation Gains Do NOT Match Firmware Configuration
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #2 (Embedded RTOS Expert) + #3 (Systems Integration Expert)
+  Subsystem: PID Controller / Validation
+
+  DESCRIPTION:
+    The simulation (07_simulation_results.txt) uses STANDARD PID form:
+      Recommended: Kp=1.5, Ki=0.03, Kd=0.4
+      Formula: u = Kp*e + Ki*∫e + Kd*de/dt
+
+    The firmware config (firmware_config.json) uses PYPILOT EXTENDED form:
+      Default: P=0.003, I=0.000, D=0.090, DD=0.075, PR=0.005, FF=0.600
+      Formula: u = P*e + I*∫e + D*(-dh/dt) + DD*(d²h/dt²) + ...
+
+    These are FUNDAMENTALLY DIFFERENT representations:
+      1. The simulation has NO DD, PR, or FF terms
+      2. The D term in the simulation acts on error (standard); the firmware
+         uses derivative-on-measurement (different behavior)
+      3. The simulation's Kd=0.4 has NO equivalent in the firmware's D=0.090
+      4. The simulation's anti-windup limit is ±1500 deg·s; the firmware's
+         is ±5 deg·s (integral_accum_max_deg_sec: 5.0) — 300× SMALLER
+
+    The simulation results CANNOT be used to validate the firmware PID
+    configuration. The stability margins, overshoot, settling times, and
+    disturbance rejection numbers apply to a DIFFERENT controller.
+
+    CRITICAL DETAIL: The firmware's integral limit of ±5 deg·s means the
+    integral can only accumulate enough to produce ~5° of counter-rudder.
+    The simulation shows a 5° wind disturbance requires ~477 deg·s of
+    integral for full compensation. At ±5 deg·s, the integral term is
+    essentially USELESS for weather helm compensation.
+
+  RECOMMENDED FIX:
+    a) IMMEDIATELY re-run the simulation using the EXACT gain structure
+       and values from firmware_config.json, including DD, PR, FF terms,
+       derivative-on-measurement, and the actual anti-windup limits.
+    b) Increase integral_accum_max_deg_sec from 5.0 to at least 500.0
+       to allow meaningful weather helm compensation.
+    c) Document the mapping between simulation gains and firmware gains.
+    d) Add a gain-validation test to the firmware: compute expected PID
+       output for known inputs and compare against the simulation model.
+
+  ---------------------------------------------------------------------------
+
+  [M-03] TRACK Mode Continues on Jetson Failure — COLLISION RISK
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #3 (Systems Integration Expert)
+  Subsystem: State Machine / Mode Logic
+
+  DESCRIPTION:
+    When the Jetson link is lost (safety_config.json link.jetson):
+      "fallback_mode": "continue_last_heading"
+      "on_loss": "WARNING: LINK LOST (autopilot continues on last heading)"
+
+    LINK_LOST alarm severity: "warning" (not critical, no auto-disengage).
+
+    PROBLEM: If the autopilot is in TRACK mode and the Jetson fails:
+      1. The last APB heading-to-steer is frozen
+      2. The autopilot steers straight toward that heading forever
+      3. No XTE correction (the simulation shows 12m XTE without correction)
+      4. The boat sails off-course, potentially toward a waypoint that
+         passes through shallow water, a buoy field, or another vessel's path
+      5. The helmsman only sees "WARN: LINK LOST" — not "TRACK MODE DEGRADED"
+
+    Additionally, the Jetson is the source of waypoint data. Without the
+    Jetson, there's no way to:
+      - Skip to the next waypoint
+      - Abort the route
+      - Know how far off-course the vessel has drifted
+
+  RECOMMENDED FIX:
+    a) In TRACK mode, Jetson link loss should trigger IMMEDIATE switch to
+       AUTO mode (holding current heading), with CRITICAL alarm severity.
+    b) Add a new alarm: "TRACK_MODE_DEGRADED" when in track mode and:
+       - APB data stale > 3 seconds
+       - GPS fix lost
+       - Jetson link lost
+    c) Add a configurable "track timeout": if no APB update for N seconds,
+       automatically switch to AUTO mode.
+    d) Display the frozen heading and time-since-last-APB on the OLED.
+
+  ---------------------------------------------------------------------------
+
+  [M-04] OVERCURRENT_DRIVE Alarm Does NOT De-Energize Clutch
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Safety / Alarm Actions
+
+  DESCRIPTION:
+    safety_config.json alarms, OVERCURRENT_DRIVE:
+      "action": "stop_drive_immediately"
+    alarm_disengage_sequence:
+      "2. Set GPIO_PORT = LOW, GPIO_STBD = LOW"
+      "3. Wait 100ms"
+      "4. Set GPIO_CLUTCH = LOW"
+
+    But the OVERCURRENT_DRIVE alarm action is "stop_drive_immediately" —
+    this is NOT the same as "auto_disengage". Looking at the alarm
+    definitions:
+      - OVERCURRENT_DRIVE: action = "stop_drive_immediately"
+      - COMPASS_FAIL: action = "auto_disengage"
+
+    "stop_drive_immediately" likely only turns off PORT/STBD solenoids but
+    LEAVES THE CLUTCH ENGAGED. This means:
+      - The autopilot drive is mechanically connected to the helm
+      - The helmsman CANNOT manually steer (clutch is still engaged)
+      - The boat continues on its current heading (rudder locked by
+        hydraulic pressure) with no way to correct
+
+    The helmsman would need to figure out that they need to press a button
+    to disengage, but the alarm description doesn't mention clutch release.
+
+  RECOMMENDED FIX:
+    a) Change OVERCURRENT_DRIVE action to "auto_disengage" (same as
+       COMPASS_FAIL, which includes clutch de-energize).
+    b) Or: add a separate "de_energize_clutch" step to all critical alarms.
+    c) Document that "stop_drive_immediately" ALWAYS includes clutch release
+       for safety. The terminology should be unambiguous.
+
+  ---------------------------------------------------------------------------
+
+  [M-05] Shared Variable `volatile bool engaged` Without Memory Barrier
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: FreeRTOS / Multi-Core
+
+  DESCRIPTION:
+    task_mqtt_client runs on Core 1 (task_config.json tasks[10].core: 1)
+    and publishes telemetry including autopilot engagement status. It reads
+    the shared variable `volatile bool engaged` which is written by tasks
+    on Core 0.
+
+    On ESP32-S3 with cache:
+      - volatile provides compiler barrier but NOT cache coherence barrier
+      - Core 1 may read a stale value of `engaged` from its cache
+      - This means MQTT telemetry could show incorrect engagement status
+
+    While this doesn't directly affect safety (MQTT is informational), it
+    breaks the trust model: if a remote monitor shows "engaged=false" when
+    the autopilot is actually engaged, the operator may make wrong decisions.
+
+    More concerning: if future features read `engaged` from Core 1 for
+    ANY control decision, this becomes a safety issue.
+
+  RECOMMENDED FIX:
+    a) Use atomic operations for all inter-core shared variables:
+       _Atomic bool engaged (C11) or esp_atomic_t
+    b) Or route all inter-core reads through a FreeRTOS queue/notification
+    c) Mark all shared variables as __attribute__((section(".dram"))) to
+       place them in uncached DRAM region
+
+  ---------------------------------------------------------------------------
+
+  [M-06] NMEA RX Buffer Too Small for Burst Scenarios
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: UART / NMEA Parsing
+
+  DESCRIPTION:
+    firmware_config.json serial.nmea.rx_buffer_size = 512 bytes.
+
+    NMEA burst scenario (system startup or talker ID collision):
+      - $GPGGA,......*XX  (~45 bytes)
+      - $GPRMC,......*XX  (~55 bytes)
+      - $GPVTG,......*XX  (~35 bytes)
+      - $GPGLL,......*XX  (~40 bytes)
+      - $GPZDA,......*XX  (~35 bytes)
+      - $HDG,.......*XX   (~40 bytes)
+      - $HDM,...*XX        (~20 bytes)
+      - $MWV,......*XX     (~35 bytes)
+      - $VHW,......*XX     (~30 bytes)
+    Total: ~335 bytes in a single burst (common during GPS receiver boot)
+
+    At 4800 baud, these 335 bytes take ~700ms to transmit. During this time,
+    task_nmea_parser must wake and drain the buffer before it overflows. The
+    parser has a 4096-byte stack and must parse each sentence (checksum
+    validation, field extraction, data updates). If the parser takes >100ms
+    per batch, subsequent sentences accumulate.
+
+    With the UART DMA filling the buffer and the parser consuming it, the
+    512-byte buffer provides ~110ms of buffering at 4800 baud. This is
+    MARGINAL — if the parser is delayed by even one I2C mutex acquisition
+    (up to 5ms), the buffer approaches overflow.
+
+  RECOMMENDED FIX:
+    a) Increase NMEA RX buffer to 1024 bytes (doubling the safety margin).
+    b) Implement a ring buffer reader in the ISR that copies to a larger
+       application buffer (standard ESP-IDF UART pattern with pattern detection).
+    c) Prioritize NMEA parsing above display refresh by raising
+       task_nmea_parser priority to 21 or above.
+
+  ---------------------------------------------------------------------------
+
+  [M-07] CLUTCH_FAULT Alarm Doesn't Turn Off Clutch Command
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Alarm Logic / Clutch Safety
+
+  DESCRIPTION:
+    safety_config.json alarms, CLUTCH_FAULT:
+      "trigger": "Clutch commanded ON but current < 100mA for >500ms"
+      "action": "prevent_drive_engage"
+
+    The action "prevent_drive_engage" only stops PORT/STBD from being
+    commanded. But the CLUTCH GPIO (GPIO3) is still being driven HIGH.
+    If the undercurrent is caused by:
+      - Open-circuit wiring to the clutch solenoid (wire broken)
+      - MOSFET failure (gate shorted but drain open)
+      - Connector corrosion
+
+    ...then the system is sitting with GPIO3 HIGH, attempting to drive a
+    failed circuit. More importantly, if the fault is INTERMITTENT (e.g.,
+    corroded connector that sometimes makes contact), the clutch could
+    randomly engage while the helmsman assumes it's disabled.
+
+    safety_config.json solenoid.clutch.undercurrent_fault_ma: 100 — the
+    trigger is <100mA for 500ms. The action should include turning OFF
+    the clutch command to prevent the intermittent engagement scenario.
+
+  RECOMMENDED FIX:
+    a) Change CLUTCH_FAULT action to: "de_energize_clutch + prevent_drive"
+    b) After 3 consecutive clutch fault attempts, lock out the clutch
+       command entirely until a physical button press resets the lockout.
+    c) Add a visual "CLUTCH LOCKOUT" indicator on the OLED.
+
+  ---------------------------------------------------------------------------
+
+  [M-08] No MQTT Authentication — Remote Takeover Risk
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #3 (Systems Integration Expert)
+  Subsystem: MQTT / Network Security
+
+  DESCRIPTION:
+    firmware_config.json mqtt:
+      "enabled": false           (good default)
+      "commands_enabled": false  (good default)
+      "username": ""             (empty)
+      "password": ""             (empty)
+      "broker_url": "mqtt://boat.local:1883" (unencrypted, no TLS)
+
+    While commands are disabled by default, the configuration allows them
+    to be enabled. When enabled:
+      - No TLS (mqtt:// not mqtts://)
+      - No username/password (empty strings)
+      - No client certificate
+      - Command topic: "autopilot/commands" — anyone on the network can
+        publish here
+
+    On a marina WiFi network (or if the ESP32's WiFi AP is open), any
+    device within range could send autopilot commands: engage, set_heading,
+    standby, set_gains. A malicious actor could:
+      - Disengage the autopilot covertly (standby command)
+      - Engage and steer toward danger (set_heading + engage)
+      - Destabilize the vessel with wild gain changes (set_gains)
+
+  RECOMMENDED FIX:
+    a) Remove the "commands_enabled" option entirely. MQTT should be
+       TELEMETRY ONLY — never accept commands.
+    b) If remote commands are ever needed, require TLS (mqtts://) with
+       mutual certificate authentication.
+    c) Bind the MQTT broker to a wired Ethernet interface, not WiFi.
+    d) Add IP filtering or firewall rules at the router level.
+
+  ---------------------------------------------------------------------------
+
+  [M-09] Priority Inversion on I2C0 Mutex
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: FreeRTOS / I2C
+
+  DESCRIPTION:
+    I2C0 mutex users (task_config.json mutexes):
+      - task_compass_reader (priority 18)
+      - task_rudder_feedback (priority 18)
+      - task_display_oled (priority 12)
+
+    If task_display_oled (priority 12) holds i2c0_mutex and is preempted
+    by a medium-priority task (e.g., task_button_handler at priority 15
+    processing a long-press sequence), the high-priority compass reader
+    (priority 18) and rudder feedback task (priority 18) will block
+    INDEFINITELY until the medium-priority task finishes and the display
+    task completes its I2C transaction.
+
+    Classic priority inversion. FreeRTOS supports priority inheritance
+    (configUSE_MUTEXES = 1), which should handle this — but it's not
+    explicitly confirmed in the configuration. If priority inheritance is
+    not enabled, this is a real problem.
+
+    An SSD1306 display write at 128×64 = 1024 bytes takes ~26ms at 400kHz
+    I2C (accounting for protocol overhead, more like 30-40ms). During this
+    time, the rudder feedback task misses 1-2 of its 20ms periods, and the
+    compass task misses its 100ms deadline — triggering stale data warnings.
+
+  RECOMMENDED FIX:
+    a) Verify CONFIG_FREERTOS_MUTEXES is enabled in sdkconfig.
+    b) Implement a time-sliced I2C schedule: each task gets a maximum
+       I2C bus time per period (e.g., display: max 5ms per 200ms cycle).
+    c) Move display updates to a lower frequency (2Hz instead of 5Hz).
+    d) Or: split I2C buses — put the display on a separate I2C1 bus
+       (requires 2 additional GPIOs, but eliminates contention entirely).
+
+  ---------------------------------------------------------------------------
+
+  [M-10] Undervoltage Threshold Too Low — False Disengage During Engine Start
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Power Monitoring
+
+  DESCRIPTION:
+    safety_config.json power thresholds:
+      undervoltage: 10.0V → CRITICAL (auto-disengage)
+      warning low:  11.0V → WARNING
+
+    A typical marine 12V lead-acid battery during engine cranking drops to
+    9-10V for 1-3 seconds. During this period:
+      - Voltage < 10.0V → CRITICAL alarm triggers
+      - Autopilot disengages
+      - Helmsman must re-engage after engine starts
+
+    On a sailboat, the most critical steering moments are often during
+    engine start (leaving a mooring, entering a channel). The autopilot
+    disengaging exactly when you need it most is a dangerous false alarm.
+
+    Additionally, the 500ms debounce on undervoltage (implied by "for
+    >500ms" in alarm trigger) may not be enough — cranking can last 2-3s.
+
+  RECOMMENDED FIX:
+    a) Lower the undervoltage CRITICAL threshold to 9.0V (true battery
+       failure, not cranking).
+    b) Raise the undervoltage WARNING to 10.5V with a 3-second debounce.
+    c) Add a "cranking detect" mode: if voltage drops rapidly and then
+       recovers within 5 seconds, suppress the undervoltage alarm.
+    d) Or: require undervoltage AND one other condition (e.g., low voltage
+       + no engine RPM signal, or low voltage for >10 seconds).
+
+  ---------------------------------------------------------------------------
+
+  [M-11] No Authentication on Jetson-ESP32 Serial Link
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #3 (Systems Integration Expert)
+  Subsystem: Jetson Protocol / Security
+
+  DESCRIPTION:
+    The JSON protocol (§5) includes CRC-16/CCITT-FALSE checksum for
+    integrity, but NO authentication or session management:
+      - No challenge-response on connect
+      - No session token or shared secret
+      - No sequence number validation (msg_id is provided but not checked
+        for monotonicity)
+      - The handshake command (msg type 1) accepts any jetson_version
+
+    Any device connected to UART2 (or the optoisolator input) can send
+    valid commands. If the Jetson's UART interface is accessible (e.g.,
+    via a USB-serial adapter), an attacker with physical access to the
+    boat could:
+      - Send engage + set_heading commands
+      - Modify PID gains to destabilize the vessel
+      - Send standby commands to covertly disengage
+
+    On a boat at a marina, physical access to electronics is often easy.
+
+  RECOMMENDED FIX:
+    a) Add a shared secret key exchanged during handshake (pre-shared key
+       stored in both ESP32 NVS and Jetson config).
+    b) Validate msg_id monotonicity — reject out-of-order or replayed
+       messages.
+    c) Add a cryptographic HMAC to each message (even a simple HMAC-SHA256
+       with a pre-shared key adds meaningful protection).
+
+  ---------------------------------------------------------------------------
+
+  [M-12] PID Watchdog Timeout vs PID Period — Ambiguous Specification
+  ---------------------------------------------------------------------------
+  Severity : MAJOR
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: PID / Watchdog Interaction
+
+  DESCRIPTION:
+    task_config.json:
+      task_pid_control.period_ms = 10 (runs every 10ms)
+      task_pid_control.watchdog_timeout_ms = 50
+    safety_config.json:
+      watchdog.application_pid.pid_heartbeat_timeout_ms = 50
+      watchdog.application_pid.check_interval_ms = 100
+
+    The PID runs at 10ms period (10Hz), but the watchdog CHECKS the PID
+    heartbeat every 100ms with a 50ms timeout.
+
+    QUESTION: What exactly is the heartbeat timestamp updated? If it's
+    updated at the START of each PID cycle, then:
+      - PID runs at t=0, sets heartbeat=t0
+      - Watchdog checks at t=100: heartbeat age = 100ms > 50ms → ALARM!
+
+    This means the PID would ALWAYS trigger a heartbeat timeout alarm,
+    because the check interval (100ms) is longer than the timeout (50ms).
+
+    OR: if the heartbeat is checked differently (e.g., "has PID run since
+    last check"), then the timeout is 50ms and check is 100ms, which means
+    a PID miss is only detected 100ms after it occurs (not 50ms).
+
+    The specification is ambiguous. A PID failure at t=0 would be detected
+    at t=100 (next watchdog check), giving an effective detection time of
+    100ms, not 50ms.
+
+  RECOMMENDED FIX:
+    a) Clarify: the heartbeat timestamp should be updated every PID cycle.
+       The watchdog should check: (current_time - heartbeat_time) < threshold.
+       With check interval 100ms and timeout 50ms, the heartbeat WILL always
+       appear stale. FIX: set timeout to 150ms (check_interval + period).
+    b) Or: run the watchdog check at the same rate as the PID (10ms) with
+       a 50ms timeout. This gives 50ms worst-case detection.
+    c) Use a hardware timer interrupt to check PID heartbeat, not a task.
+
+================================================================================
+3. MINOR ISSUES (Nice to Fix — Improves Reliability or Usability)
+================================================================================
+
+  [m-01] Rudder Rate Limit Not Vessel-Size Dependent
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: PID / Rudder Control
+
+  DESCRIPTION:
+    safety_config.json rudder.rate_limit_deg_per_sec = 6.0
+    firmware_config.json rate_limiter.rudder_command_max_deg_per_sec = 6.0
+
+    The design scope is "30-60ft vessels" but the rate limit is a single
+    fixed value. A 30ft vessel with responsive steering can safely handle
+    8-10°/sec, while a 60ft vessel with high inertia should be limited to
+    3-4°/sec to prevent excessive heel and crew discomfort.
+
+  RECOMMENDED FIX:
+    Add a vessel_size_config parameter with vessel-length-dependent rate
+    limits. Default to conservative values; allow adjustment during setup.
+
+  ---------------------------------------------------------------------------
+
+  [m-02] Buzzer Resistor Value Contradiction
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Wiring / BOM
+
+  DESCRIPTION:
+    Architecture (§10): "GPIO2 -> 2N2222 base via 1KΩ -> Piezo buzzer"
+    pin_config.json gpio_buzzer: "500Ω base resistor"
+    Two different values in two design documents.
+
+  RECOMMENDED FIX:
+    Standardize on 1KΩ (provides ~2.6mA base current with 3.3V drive,
+    sufficient to saturate 2N2222 for a 50mA piezo load).
+
+  ---------------------------------------------------------------------------
+
+  [m-03] No Enclosure Ingress Protection Specification
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: Mechanical / Environmental
+
+  DESCRIPTION:
+    No IP rating is specified for the controller enclosure. Marine
+    environments require minimum IP54 (splash protection). The BOM includes
+    an M12 or DB9 connector but no enclosure specification, conformal
+    coating requirement, or potting specification.
+
+  RECOMMENDED FIX:
+    Specify IP65 minimum enclosure, PCB conformal coating (IPC-A-610 class
+    3), and M12 connectors with IP67-rated cable glands.
+
+  ---------------------------------------------------------------------------
+
+  [m-04] Compass IIR Filter Alpha=0.3 Is Aggressive for Heading Data
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: Sensor Filtering
+
+  DESCRIPTION:
+    firmware_config.json compass.filter_alpha = 0.3
+
+    At 10Hz sampling: time constant τ = dt / alpha = 0.1/0.3 = 0.33s
+    Cutoff frequency: fc = 1/(2π × 0.33) = 0.48Hz
+
+    The BNO085 already applies sensor fusion internally. Adding another
+    IIR filter on top double-filters the data. The simulation recommends
+    compass latency under 50ms, but this filter adds 330ms of lag
+    (time to reach 63% of a step change).
+
+    The derivative filter at 0.3Hz is separate and appropriate.
+
+  RECOMMENDED FIX:
+    Reduce compass filter alpha to 0.5-0.7 (faster response, less lag) or
+    rely entirely on the BNO085's internal fusion and skip the software
+    filter.
+
+  ---------------------------------------------------------------------------
+
+  [m-05] No NMEA Talker ID Priority / Source Conflict Resolution
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #3 (Systems Integration Expert)
+  Subsystem: NMEA Integration
+
+  DESCRIPTION:
+    The autopilot outputs $AGHDM and $AGRSA (talker ID "AG"). If the boat
+    has an existing compass also outputting $HDHDM, the NMEA bus will have
+    two heading sources. No priority mechanism is defined.
+
+    Similarly, if multiple GPS receivers output $GPRMC, the parser will
+    process all of them without priority.
+
+  RECOMMENDED FIX:
+    Add a talker_id_priority configuration. The autopilot should only
+    output NMEA sentences when its data source is the primary one.
+
+  ---------------------------------------------------------------------------
+
+  [m-06] Alarm Acknowledge Method Is Only Long Press (No Immediate Kill)
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #1 (Marine Safety Engineer)
+  Subsystem: HMI / Button Logic
+
+  DESCRIPTION:
+    safety_config.json fail_safe.alarm_acknowledge:
+      "method": "long_press_MODE_button_1000ms"
+
+    A 1-second long press to acknowledge a CRITICAL alarm is too slow. In
+    a stressful situation (alarm blaring, red LED flashing, boat turning),
+    the helmsman needs immediate feedback. A short press (<300ms) should
+    mute the alarm; a long press should clear the alarm state.
+
+  RECOMMENDED FIX:
+    a) Short press on ANY button during ALARM state → mute buzzer immediately
+    b) Long press MODE button → clear alarm state, transition to STANDBY
+
+  ---------------------------------------------------------------------------
+
+  [m-07] Simulation Anti-Windup Limit Mismatch with Config
+  ---------------------------------------------------------------------------
+  Severity : MINOR (But reveals design intent confusion)
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: PID / Configuration Consistency
+
+  DESCRIPTION:
+    Simulation: "Hard clamp integral to ±1500 deg·s"
+    Config: integral_accum_max_deg_sec = 5.0
+
+    300× difference. The simulation proves that ±1500 is needed for wind
+    disturbance rejection. The config's ±5 renders the integral term
+    essentially non-functional for any real-world scenario.
+
+  RECOMMENDED FIX:
+    Align config to simulation: increase to at least 500 deg·s. The
+    conditional integration + reset logic in the config provides additional
+    safety beyond the hard clamp.
+
+  ---------------------------------------------------------------------------
+
+  [m-08] No Defined Behavior for Heading 0°/360° Wraparound in Commands
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #3 (Systems Integration Expert)
+  Subsystem: PID / Heading Normalization
+
+  DESCRIPTION:
+    If target_heading is 359° and a +3° adjustment is made, the result
+    should be 2° (wrap around). But the shared variable `target_heading`
+    is a float. The config clamps heading to 0-359.9, and the PID normalizes
+    error to [-180, +180], but the WRITING of target_heading (from button
+    press or Jetson command) may briefly show invalid values.
+
+    Example: target_heading = 359 + 3 = 362.0 → should wrap to 2.0.
+    If the wrap happens AFTER writing to the shared variable but BEFORE
+    PID reads it, PID sees 362° and computes error = normalize(362 - 359) = 3°.
+    This is actually correct. But if target_heading wraps to 2.0, PID sees
+    error = normalize(2 - 359) = -357° → clamped to -60° → WRONG.
+
+  RECOMMENDED FIX:
+    Perform heading normalization BEFORE writing to the shared variable.
+    All heading values in shared memory should always be in [0, 360).
+
+  ---------------------------------------------------------------------------
+
+  [m-09] Jetson reconnect_attempts = 0 With No Auto-Reconnect
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #3 (Systems Integration Expert)
+  Subsystem: Serial Protocol / Reliability
+
+  DESCRIPTION:
+    safety_config.json link.jetson.reconnect_attempts = 0
+
+    If the Jetson reboots (kernel update, crash, power cycle), the ESP32
+    has no mechanism to re-establish the connection. The handshake command
+    from the Jetson side should trigger reconnection, but there's no
+    timeout or retry from the ESP32 side if the handshake is missed.
+
+  RECOMMENDED Fix:
+    Set reconnect_attempts to 3 with a 1-second interval. After 3 failed
+    handshakes, generate a LINK_LOST warning.
+
+  ---------------------------------------------------------------------------
+
+  [m-10] Gain Profile "rough" Enables Integral by Default
+  ---------------------------------------------------------------------------
+  Severity : MINOR
+  Reviewer : #2 (Embedded RTOS Expert)
+  Subsystem: PID / Gain Scheduling
+
+  DESCRIPTION:
+    firmware_config.json profiles.presets.rough: "I": 0.010
+
+    The "rough" profile enables the integral term (Ki=0.010) but the
+    anti-windup limit is only 5 deg·s (see M-02, m-07). In rough seas,
+    the heading error is large and persistent, which means the integral
+    will hit its limit almost immediately and stay there. This provides
+    ZERO benefit while adding the risk of integral windup if the limit
+    is ever increased.
+
+  RECOMMENDED FIX:
+    Keep I=0.000 in the rough profile until the anti-windup limit is
+    increased to a meaningful value.
+
+================================================================================
+4. SUMMARY SCORECARD
+================================================================================
+
+  CATEGORY               COUNT    DISTRIBUTION
+  --------------------- -------- -----------------
+  CRITICAL (must fix)      11     Safety/Marine: 6, RTOS: 3, Integration: 2
+  MAJOR (should fix)       12     Safety/Marine: 4, RTOS: 3, Integration: 5
+  MINOR (nice to fix)      10     Safety/Marine: 4, RTOS: 2, Integration: 4
+  --------------------- -------- -----------------
+  TOTAL                    33
+
+  VERDICT: NOT APPROVED FOR DEPLOYMENT
+
+  The 11 CRITICAL issues must be resolved and verified through:
+    1. Hardware schematic review by a licensed marine electrical engineer
+    2. Firmware code review with static analysis (Coverity, PC-lint)
+    3. Hardware-in-the-loop testing (HIL) simulating all failure modes
+    4. On-water testing with a qualified crew and safety boat
+
+  POSITIVE OBSERVATIONS (things done well):
+    - Spring-center hydraulic valve as the primary fail-safe is excellent
+    - External hardware watchdog (MAX6818) is properly specified
+    - Gate pull-down resistors on all MOSFETs prevent GPIO-float issues
+    - Flyback diodes on all solenoid coils prevent voltage spikes
+    - Multi-layer safety (hardware → firmware → software → alarms) is
+      architecturally correct
+    - Separation of PID (10Hz) and rudder feedback (50Hz) is well-considered
+    - Derivative-on-measurement prevents derivative kick
+    - The extended PID structure (DD, PR, FF) from pypilot is well-proven
+    - Jetson heartbeat loss with "continue last heading" is the RIGHT
+      default for AUTO mode (wrong for TRACK mode — see M-03)
+    - Gain scheduling by water speed is correct (speed² relationship)
+    - TVS diode for load dump protection is specified
+
+================================================================================
+5. REQUIRED ACTIONS BEFORE NEXT REVIEW
+================================================================================
+
+  1. [C-01] Fix MOSFET gate drive voltage (hardware change)
+  2. [C-02] Add physical emergency stop / kill switch (hardware change)
+  3. [C-03] Separate power fusing for electronics and solenoids (hardware)
+  4. [C-04] Replace LM1117-3.3 with adequate 3.3V regulator (hardware)
+  5. [C-05] Fix heading double-buffer race condition (firmware)
+  6. [C-06] Add I2C bus lockup detection and recovery (firmware)
+  7. [C-07] Fix voice engagement confirmation requirement (firmware+Jetson)
+  8. [C-08] Design and document hardware interlock circuit (hardware)
+  9. [C-09] Move buzzer off GPIO2 strapping pin (hardware)
+  10. [C-10] Fix clutch engagement sequence (firmware)
+  11. [C-11] Move WDT kick to hardware timer, increase WDT stack (firmware)
+  12. [M-02] Re-run simulation with ACTUAL firmware PID gains (analysis)
+  13. [M-03] Make TRACK mode switch to AUTO on Jetson failure (firmware)
+  14. [M-04] Fix overcurrent alarm to include clutch de-energize (firmware)
+  15. [M-12] Fix PID watchdog check interval / timeout mismatch (firmware)
+
+================================================================================
+  END OF EXPERT PANEL REVIEW
+================================================================================

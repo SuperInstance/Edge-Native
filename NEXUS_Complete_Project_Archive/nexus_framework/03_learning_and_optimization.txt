@@ -1,0 +1,1377 @@
+================================================================================
+  NEXUS FRAMEWORK — DOCUMENT 03
+  LEARNING AND OPTIMIZATION ARCHITECTURE
+  The Jetson "Cortex" as System Improver
+================================================================================
+  Version: 0.9.0-draft
+  Classification: Core Architecture Specification
+  Date: 2025-07-12
+  Author: NEXUS Architecture Working Group
+  Dependencies: 01_distributed_intelligence_framework.txt, 02_nexuslink_protocol.txt
+================================================================================
+
+FOREWORD: CODE AS HYPOTHESIS
+================================================================================
+
+Every line of control code running on an ESP32 artifact in the NEXUS system is
+not a finished product. It is a HYPOTHESIS — a proposed relationship between
+sensor inputs and actuator outputs that the system believes will produce good
+outcomes. The human operator accepted that hypothesis when they approved the
+artifact for deployment. The ocean accepted it when it didn't break anything.
+But neither acceptance constitutes proof.
+
+Traditional marine automation writes control code once, tests it in a basin or
+a short sea trial, and then freezes it. Firmware updates are rare, expensive,
+and risky. Operators develop workaround habits — "always switch to manual when
+heading into following seas in fourth gear" — that never make it back into the
+code. The system and its operator slowly diverge, creating an invisible
+competence gap.
+
+NEXUS inverts this model. The Jetson "Cortex" is a research scientist
+embedded on the vessel. It observes the human operator's decisions, the
+environmental conditions, and the artifact's behavior. It discovers patterns
+in those observations. It generates new hypotheses — proposed improvements to
+the control code — and presents them to the human as peer-reviewed proposals
+with evidence. The human, as peer reviewer, accepts, rejects, or requests
+modifications. If accepted, the new artifact is A/B tested against the old
+one. Only after statistical validation does it become the new baseline.
+
+This document specifies the complete architecture for this learning and
+optimization pipeline, from raw sensor telemetry to approved code changes.
+
+TABLE OF CONTENTS
+================================================================================
+
+  1. Observation Pipeline
+  2. Pattern Discovery
+  3. Hypothesis Generation and Code Synthesis
+  4. Simulation Before Deployment
+  5. A/B Testing Protocol
+  6. Human Approval Interface
+  7. Cloud Enhancement via Starlink
+  8. Provenance and Audit Trail
+
+================================================================================
+  SECTION 1: OBSERVATION PIPELINE
+================================================================================
+
+The observation pipeline is the foundational data collection layer that feeds
+every downstream learning process. It must be comprehensive, efficient,
+privacy-respecting, and resilient. It operates continuously as a background
+service on the Jetson, independent of any active learning or optimization
+task.
+
+1.1 DATA SOURCES AND SAMPLE RATES
+--------------------------------------------------------------------------------
+
+The pipeline observes four categories of data, each with appropriate sample
+rates balanced between information density and storage efficiency:
+
+CATEGORY A: TELEMETRY (1-10 Hz continuous)
+  - IMU data: 3-axis accelerometer, gyroscope, magnetometer (10 Hz)
+  - GPS: position, speed over ground, course over ground (5 Hz)
+  - Engine: RPM, throttle position, coolant temp, oil pressure (2 Hz)
+  - Environmental: wind speed/direction, barometric pressure, air temp (1 Hz)
+  - Electrical: bus voltage, current draw per circuit, battery state (1 Hz)
+  - Network: NexusLink latency, packet loss, connection state (1 Hz)
+
+CATEGORY B: COMMAND STREAM (event-driven)
+  - Every command sent from Helm UI to any artifact
+  - Every mode change (auto/manual/override)
+  - Every parameter adjustment via touchscreen or voice
+  - Every A/B test switch event
+  - Timestamped with millisecond precision
+
+CATEGORY C: HUMAN INPUT BEHAVIORAL CLONING (10 Hz during manual control)
+  - Throttle position setpoint (what the human is requesting)
+  - Steering position setpoint
+  - Trim/tab position setpoint
+  - Mode selection and timing
+  - Override initiation and termination events
+  - Emergency stop events
+  - Verbal commands (transcribed and timestamped)
+
+CATEGORY D: ENVIRONMENTAL CONTEXT (0.1-1 Hz)
+  - Sea state estimate (derived from IMU heave/pitch analysis)
+  - Wave direction estimate (derived from IMU + heading)
+  - Current estimate (GPS SOG vs water speed if available)
+  - Vessel loading state (from known fuel/water/cargo levels)
+  - Time of day, tidal state (from GPS position + almanac)
+  - Crew fatigue proxy (hours since last rest period, if provided)
+
+1.2 DATA FORMAT: UNIFIED OBSERVATION RECORDS
+--------------------------------------------------------------------------------
+
+All observations are stored as unified time-series records in a compressed
+columnar format optimized for both real-time streaming and historical analysis.
+The format is intentionally simple to avoid dependency on complex databases on
+the Jetson:
+
+  struct observation_t {
+      uint64_t timestamp_us;      // microseconds since epoch
+      uint16_t source_id;         // enum: TELEM=0x01, CMD=0x02, HUMAN=0x03, ENV=0x04
+      uint16_t field_count;
+      float   fields[32];         // variable-length, packed
+      char    flags[8];           // bitmask for metadata (manual_override, etc.)
+  };
+
+Records are batched into 60-second chunks and written to a ring buffer on the
+Jetson's NVMe storage. With typical vessel operations generating approximately
+50 KB/s of observation data, a 500 GB drive retains over 100 days of
+continuous observations. Chunks older than the retention period are
+automatically compressed with zstd and archived to USB storage if present.
+
+1.3 BEHAVIORAL CLONING RECORDS
+--------------------------------------------------------------------------------
+
+A specialized record type captures the paired state-action data needed for
+behavioral cloning. Every N milliseconds (configurable, default 100ms) during
+periods when the human is actively controlling the vessel (manual mode or
+override), the system captures:
+
+  struct behavioral_clone_record_t {
+      uint64_t timestamp_us;
+      // STATE: what the world looked like
+      float vessel_speed;
+      float vessel_heading;
+      float vessel_roll_rate;
+      float vessel_pitch_rate;
+      float wind_speed;
+      float wind_direction_relative;
+      float sea_state_estimate;
+      float engine_rpm;
+      float throttle_position;
+      // ACTION: what the human did
+      float human_throttle_command;
+      float human_steering_command;
+      float human_trim_command;
+      // CONTEXT
+      uint8_t mode;               // manual, override, auto-assist
+      float seconds_in_mode;
+      char   annotation[64];      // optional human voice note, transcribed
+  };
+
+These records are the primary training data for pattern discovery. The key
+insight is that we are NOT trying to learn "what the human does" in isolation.
+We are trying to learn "in what situations does the human disagree with what
+the artifact would do?" — and then understanding WHY.
+
+1.4 PRIVACY AND DATA MINIMIZATION
+--------------------------------------------------------------------------------
+
+The observation pipeline operates under strict data minimization principles:
+
+  - NO audio is stored. Voice commands are transcribed on-device (Whisper
+    tiny.en model, ~40 MB) and only the text transcript is retained.
+  - NO camera data enters the learning pipeline. If cameras are present for
+    navigation, their data is handled by a separate, isolated pipeline.
+  - NO personal information about crew is recorded beyond role (operator,
+    passenger) and fatigue proxy (hours of operation).
+  - All data is stored locally on the Jetson. Nothing is transmitted off-vessel
+    without explicit human approval and Starlink connectivity.
+  - Data retention is configurable. Default is 90 days of raw, 2 years of
+    aggregated summaries.
+  - A physical data disconnect switch cuts power to the observation pipeline's
+    storage, providing hardware-enforced privacy.
+
+1.5 RESILIENCE AND DATA INTEGRITY
+--------------------------------------------------------------------------------
+
+The observation pipeline must survive Jetson reboots, power failures, and
+NexusLink outages without data loss:
+
+  - Write-ahead log: All records are first written to a small (4 GB) UPS-backed
+    ramdisk, then flushed to NVMe in batches. On clean shutdown, the ramdisk
+    is fully flushed. On unclean shutdown, the ramdisk is recovered on boot.
+  - Checksums: Every 60-second chunk is checksummed with xxHash64. Corrupted
+    chunks are marked but not deleted.
+  - Clock synchronization: The Jetson maintains a PPS-disciplined clock from
+    GPS. If GPS is lost, it falls back to internal RTC and marks timestamps
+    as "estimated" in the record flags.
+  - Storage monitoring: If storage exceeds 85% capacity, the system reduces
+    sample rates proportionally rather than deleting data.
+
+================================================================================
+  SECTION 2: PATTERN DISCOVERY
+================================================================================
+
+Pattern discovery is the analytical engine that transforms raw observations
+into actionable insights. It runs as a periodic batch process on the Jetson
+(typically every 6-12 hours, configurable) and also on-demand when triggered
+by the human or by specific events.
+
+2.1 PATTERN TYPES
+--------------------------------------------------------------------------------
+
+The system discovers four types of patterns, each requiring different
+analytical approaches:
+
+TYPE 1: DISAGREEMENT PATTERNS
+  "The human consistently overrides the autopilot in condition X"
+  
+  Definition: Situations where the human's control input significantly differs
+  from what the artifact would have produced in the same state. These are the
+  most valuable patterns because they represent known deficiencies in the
+  current control logic.
+
+  Detection method: For each observation window where the human is in manual
+  or override mode, compute what the artifact would have commanded given the
+  observed state. Measure the discrepancy (absolute difference and direction).
+  Aggregate by environmental conditions and look for statistically significant
+  clusters of disagreement.
+
+TYPE 2: PERFORMANCE PATTERNS
+  "Fuel efficiency drops by 15% when sea state exceeds 3 in head seas"
+  
+  Definition: Relationships between environmental conditions and performance
+  metrics (fuel consumption, speed efficiency, ride comfort, actuator wear).
+  
+  Detection method: Compute performance metrics over sliding windows.
+  Regress metrics against environmental features. Identify conditions where
+  performance degrades beyond expected baselines.
+
+TYPE 3: TEMPORAL PATTERNS
+  "The operator consistently reduces speed 30 minutes before arriving at the
+   dock, regardless of conditions"
+  
+  Definition: Time-dependent behaviors that correlate with route position,
+  time of day, or operational phase rather than environmental conditions.
+  
+  Detection method: Decompose behavioral time series into route-phase
+  segments. Compare behavior across repeated trips on the same route. Identify
+  consistent deviations from artifact behavior that correlate with route
+  position.
+
+TYPE 4: CORRELATION PATTERNS
+  "Ride comfort improves when trim is set 2 degrees higher than the artifact's
+   default for this loading condition"
+  
+  Definition: Relationships between parameter settings and outcomes that the
+  artifact's current logic does not capture.
+  
+  Detection method: When the human adjusts a parameter, track the subsequent
+  change in relevant metrics (comfort, efficiency, stability). Use causal
+  inference techniques (Granger causality, interrupted time series) to
+  distinguish correlation from causation.
+
+2.2 STATISTICAL FRAMEWORK
+--------------------------------------------------------------------------------
+
+Every pattern must meet rigorous statistical standards before it is considered
+a valid finding:
+
+  MINIMUM SAMPLE SIZE (N >= 10):
+    Each pattern must be observed in at least 10 independent episodes. An
+    episode is defined as a continuous period of operation under similar
+    conditions (within a defined tolerance band on environmental features).
+    This prevents the system from proposing changes based on anecdotal evidence.
+
+  STATISTICAL SIGNIFICANCE (p < 0.05):
+    Patterns must achieve p < 0.05 using an appropriate test:
+    - For continuous outcomes: two-sample t-test (disagreement magnitude) or
+      Mann-Whitney U test (if distributions are non-normal)
+    - For categorical outcomes: chi-squared test or Fisher's exact test
+    - For time-series effects: change-point detection with bootstrap
+      confidence intervals
+    - Effect size must also be reported (Cohen's d or equivalent) to
+      distinguish statistical significance from practical significance.
+      Minimum effect size threshold: d >= 0.5 (medium effect).
+
+  CONFIDENCE INTERVALS:
+    All reported metrics include 95% confidence intervals. If the confidence
+    interval includes zero effect, the pattern is flagged as "borderline" and
+    requires additional data before action.
+
+  BONFERRONI CORRECTION:
+    When multiple patterns are tested simultaneously (e.g., a batch analysis
+    run), the significance threshold is adjusted using the Bonferroni method:
+      alpha_adjusted = 0.05 / num_tests
+    This controls the family-wise error rate and prevents false discoveries
+    from the multiple comparisons problem.
+
+2.3 ON-DEVICE MODEL: LIGHTWEIGHT XGBOOST
+--------------------------------------------------------------------------------
+
+Pattern discovery uses a lightweight XGBoost model running on the Jetson's
+GPU-accelerated inference engine. The model is NOT used for real-time control
+— only for offline analysis. This is a critical architectural decision: the
+learning model is strictly an analysis tool, never a control authority.
+
+  MODEL ARCHITECTURE:
+    - Algorithm: XGBoost regression (for continuous outcomes) and XGBoost
+      classification (for discrete decisions)
+    - Input features: 24 engineered features derived from telemetry:
+        [speed, heading, heading_rate, roll, roll_rate, pitch, pitch_rate,
+         wind_speed, wind_dir_rel, sea_state, sea_state_rate, wave_dir_rel,
+         engine_rpm, throttle_pos, throttle_rate, trim_pos, battery_v,
+         current_draw, vessel_mass_estimate, cog_offset, time_on_route,
+         hours_since_rest, tidal_flow]
+    - Output: predicted human command (throttle, steering, trim) OR
+      predicted disagreement magnitude
+    - Training: nightly batch training on accumulated behavioral clone records
+    - Model size: ~2 MB (100 trees, max depth 6, optimized for inference)
+
+  FEATURE IMPORTANCE ANALYSIS:
+    After training, the model's feature importance scores (SHAP values) are
+    extracted to identify which environmental factors drive human disagreements.
+    This is the primary mechanism for generating actionable hypotheses.
+
+    Example output:
+      "SHAP analysis shows that sea_state (importance=0.31) and
+       wind_dir_rel (importance=0.22) are the primary predictors of
+       throttle override events. The human reduces throttle by an average
+       of 12% (CI: 8-16%, p<0.001, N=47) when sea_state > 2.5 AND
+       wind_dir_rel is within 30 degrees of head seas."
+
+  RESOURCE BUDGET:
+    - Training: < 30 seconds of Jetson GPU time per nightly run
+    - Inference: < 1 ms per record (used only during analysis, not control)
+    - Memory: < 100 MB peak during training
+    - Storage: 2 MB per model snapshot, 10 snapshots retained
+
+2.4 PATTERN REPORT FORMAT
+--------------------------------------------------------------------------------
+
+When a pattern is discovered and meets the statistical thresholds, it is
+formatted as a structured report for presentation to the human:
+
+  {
+    "pattern_id": "PAT-2025-0712-003",
+    "type": "disagreement",
+    "discovered_at": "2025-07-12T14:30:00Z",
+    "description": "Human overrides throttle in moderate head seas",
+    "conditions": {
+      "sea_state_min": 2.5,
+      "sea_state_max": 4.0,
+      "wind_dir_rel_center": 0,   // head seas
+      "wind_dir_rel_tolerance": 30,
+      "speed_range": [8, 15]
+    },
+    "human_behavior": {
+      "action": "reduce_throttle",
+      "mean_reduction_pct": 12.3,
+      "ci_95": [8.1, 16.5],
+      "effect_size_d": 1.2
+    },
+    "artifact_behavior": {
+      "action": "maintain_throttle",
+      "mean_throttle_pct": 65.0
+    },
+    "statistics": {
+      "n_episodes": 47,
+      "p_value": 0.0003,
+      "test_used": "two_sample_t_test",
+      "bonferroni_adjusted_alpha": 0.003,
+      "passed": true
+    },
+    "impact_estimate": {
+      "comfort_improvement": "+18% (estimated)",
+      "fuel_efficiency_change": "-3% (estimated)",
+      "speed_impact": "-1.2 knots average"
+    },
+    "proposed_improvement_level": 2,
+    "requires_cloud_llm": false
+  }
+
+================================================================================
+  SECTION 3: HYPOTHESIS GENERATION AND CODE SYNTHESIS
+================================================================================
+
+When a valid pattern is discovered, the system must translate it into a
+concrete, testable proposal for improving the artifact's control code. This
+process is structured into four levels of increasing complexity and impact.
+
+3.1 THE HYPOTHESIS FRAMEWORK
+--------------------------------------------------------------------------------
+
+Every proposed improvement is framed as a formal hypothesis:
+
+  HYPOTHESIS: "If the artifact reduces throttle by 12% when sea_state > 2.5
+  AND wind is within 30 degrees of head AND speed > 8 knots, THEN ride comfort
+  will improve by approximately 18% with an acceptable fuel efficiency trade-
+  off of approximately 3%."
+
+  NULL HYPOTHESIS: "The proposed change will produce no statistically
+  significant improvement in ride comfort compared to the current artifact."
+
+  ACCEPTANCE CRITERIA:
+    - Primary metric (comfort) improves by > 10% with p < 0.05
+    - No secondary metric degrades by > 5% with p < 0.05
+    - No safety metric degrades at all (hard constraint)
+
+  REJECTION CRITERIA:
+    - Primary metric does not improve significantly
+    - Any safety metric degrades
+    - Human operator reports subjective worsening
+
+This formal structure ensures that every proposed change is falsifiable and
+that the A/B test has clear success/failure criteria defined BEFORE the test
+begins.
+
+3.2 LEVEL 1: PARAMETER MODIFICATION
+--------------------------------------------------------------------------------
+
+Level 1 changes are the simplest and safest. They modify numeric parameters
+in the artifact's JSON configuration without changing any control logic.
+
+  SCOPE:
+    - Adjusting threshold values (e.g., sea_state override threshold)
+    - Modifying gain/scale factors (e.g., throttle reduction percentage)
+    - Changing timing parameters (e.g., debounce delays, ramp rates)
+    - Updating default positions (e.g., trim default per loading state)
+
+  SYNTHESIS METHOD:
+    The system directly generates a JSON diff:
+    
+    {
+      "hypothesis_id": "HYP-2025-0712-003-L1",
+      "pattern_ref": "PAT-2025-0712-003",
+      "level": 1,
+      "artifact_target": "ride_control_v2.3",
+      "diff": {
+        "parameters.throttle.sea_state_head_sea_reduction_pct": {
+          "old": 0.0,
+          "new": 12.0
+        },
+        "parameters.throttle.sea_state_head_sea_threshold": {
+          "old": 4.0,
+          "new": 2.5
+        },
+        "parameters.throttle.head_sea_angle_tolerance_deg": {
+          "old": 15.0,
+          "new": 30.0
+        }
+      },
+      "estimated_impact": "Comfort +18%, Fuel -3%, Speed -1.2kn",
+      "safety_review": "PASSED — no safety-critical parameters affected",
+      "code_review_required": false
+    }
+
+  SAFETY REVIEW (automatic):
+    A static analysis tool checks that the proposed parameter changes:
+    1. Do not exceed defined safe bounds (min/max for every parameter)
+    2. Do not affect safety-critical parameters (engine shutdown thresholds,
+       steering limits, emergency stop behavior) without explicit safety
+       override
+    3. Are within the "known good" range if historical data exists for similar
+       operating conditions
+
+  APPROVAL PATH:
+    Level 1 changes can be auto-approved for A/B testing if they pass the
+    automatic safety review AND all parameter values are within the validated
+    range. They still require human approval for permanent adoption.
+
+3.3 LEVEL 2: CONDITIONAL LOGIC ADDITION
+--------------------------------------------------------------------------------
+
+Level 2 changes add conditional branches to the control logic. This is where
+the local LLM (running on the Jetson) becomes essential.
+
+  SCOPE:
+    - Adding if/else conditions based on newly discovered environmental factors
+    - Adding mode-dependent behavior (different gains for different conditions)
+    - Adding hysteresis to prevent oscillation between modes
+    - Adding rate limits or ramp functions for smoother transitions
+
+  SYNTHESIS METHOD:
+    The pattern discovery output is formatted as a prompt for the local LLM
+    (a quantized 7B parameter model running in 4-bit, approximately 4 GB VRAM
+    on the Jetson Orin NX):
+
+    SYSTEM PROMPT:
+      "You are a marine control systems engineer. Given the following pattern
+       discovered from vessel telemetry, generate a C code diff that modifies
+       the artifact's control logic. The diff must:
+       1. Add ONLY the minimum logic needed to address the pattern
+       2. Preserve all existing behavior for conditions NOT covered by the
+          pattern
+       3. Include safety bounds on all new calculations
+       4. Be compatible with the ESP32-S3 artifact runtime (no floating point
+          in control loops — use fixed-point or integer math with appropriate
+          scaling)
+       5. Include a comment explaining the hypothesis this code tests"
+
+    USER PROMPT:
+      "Pattern: Human overrides throttle by avg 12% (CI: 8-16%, p<0.001, N=47)
+       when sea_state > 2.5 AND wind within 30 deg of head AND speed > 8 kn.
+       Current code maintains constant throttle regardless of sea state and
+       wind direction. Current function: throttle_control.c, line 142-168.
+       [Current code attached]"
+
+    The LLM generates a diff in unified diff format:
+
+    --- a/throttle_control.c
+    +++ b/throttle_control.c
+    @@ -145,6 +145,22 @@
+      int16_t compute_throttle_setpoint(vessel_state_t* state) {
+        int16_t base_throttle = state->desired_throttle;
+     +  
+     +  // HYP-2025-0712-003-L2: Reduce throttle in head seas for comfort
+     +  // Condition: sea_state > 2.5 AND head wind component > 0.87 (cos30)
+     +  int16_t sea_state_fp = state->sea_state * 10;  // fixed-point x10
+     +  if (sea_state_fp > 25) {  // sea_state > 2.5
+     +    int16_t wind_cos = cosine_fp(state->wind_dir_rel);
+     +    if (wind_cos > 87) {  // within 30 degrees of head
+     +      int16_t speed_fp = state->speed_knots * 10;
+     +      if (speed_fp > 80) {  // speed > 8 knots
+     +        // Reduce throttle by 12% (120 per 1000 in fixed-point)
+     +        int16_t reduction = (base_throttle * 120) / 1000;
+     +        base_throttle = MAX(base_throttle - reduction,
+     +                           state->min_throttle);
+     +      }
+     +    }
+     +  }
+     +
+        return clamp_throttle(base_throttle);
+      }
+
+  SAFETY REVIEW (LLM-assisted):
+    A separate invocation of the local LLM reviews the generated code for:
+    1. Mathematical correctness (fixed-point arithmetic, overflow potential)
+    2. Logical completeness (all edge cases handled)
+    3. Safety compliance (throttle cannot go below min_throttle)
+    4. No unintended side effects on other control paths
+    5. Code style consistency with the existing artifact
+
+    The review LLM uses a DIFFERENT system prompt that instructs it to be
+    adversarial — actively looking for bugs, edge cases, and safety issues.
+
+  APPROVAL PATH:
+    Level 2 changes require human review of the generated code diff before
+    A/B testing. The system presents both the pattern evidence and the
+    proposed code, highlighting the specific lines that change.
+
+3.4 LEVEL 3: ALGORITHM REPLACEMENT
+--------------------------------------------------------------------------------
+
+Level 3 changes replace a control algorithm with a fundamentally different
+approach. These are rare, high-impact changes that require cloud LLM
+capabilities and extensive simulation.
+
+  SCOPE:
+    - Replacing a PID controller with a different control strategy
+    - Adding a feedforward component to an existing feedback controller
+    - Switching from rule-based logic to a lookup table approach
+    - Implementing adaptive gain scheduling
+
+  SYNTHESIS METHOD:
+    Level 3 changes require the cloud LLM pipeline (see Section 7). The
+    Jetson packages:
+    1. The pattern discovery report
+    2. The current algorithm implementation (full source file)
+    3. Historical telemetry data for the relevant operating conditions
+      (anonymized and compressed)
+    4. The current artifact's safety constraints and performance requirements
+    5. A specific prompt requesting algorithmic alternatives
+
+    The cloud LLM generates multiple candidate implementations, each with:
+    - Complete source code
+    - Explanation of the algorithmic approach
+    - Expected advantages and disadvantages
+    - Estimated computational cost on the ESP32-S3
+    - Suggested simulation parameters
+
+  EXAMPLE CANDIDATE:
+    "Replace simple proportional throttle control with gain-scheduled PI
+     controller that adjusts gains based on sea state and wind conditions.
+     Uses lookup tables (precomputed on Jetson, flashed to ESP32) for gain
+     selection. Estimated flash cost: +4 KB. Estimated compute: +15 us per
+     control cycle (within 10 ms budget)."
+
+  SAFETY REVIEW:
+    Level 3 changes undergo BOTH automated and human safety review:
+    1. Automated: Formal verification of control loop stability (Lyapunov
+       analysis on linearized model), memory safety analysis, timing analysis
+    2. Human: The full algorithm implementation is reviewed by the operator
+       and/or a remote marine engineer
+    3. Simulation: Minimum 50 simulated hours of operation across the full
+       range of environmental conditions before A/B testing is permitted
+
+  APPROVAL PATH:
+    Level 3 changes require explicit human approval BEFORE A/B testing. The
+    system presents a comprehensive briefing including simulation results,
+    code review findings, and risk assessment.
+
+3.5 LEVEL 4: ARCHITECTURAL CHANGE
+--------------------------------------------------------------------------------
+
+Level 4 changes add new sensors, actuators, or communication pathways to the
+system. These require physical hardware work and are outside the scope of
+pure software optimization.
+
+  SCOPE:
+    - "Adding a ride-height sensor would allow the trim controller to maintain
+       optimal planing attitude, potentially improving comfort by 25%"
+    - "Adding a second GPS antenna for heading determination would improve
+       heading accuracy by 40% in following seas"
+    - "Adding a current sensor to the windlass motor would enable automatic
+       anchor scope management"
+
+  SYNTHESIS METHOD:
+    The Jetson generates an architectural proposal document:
+    1. Identified deficiency (from pattern discovery)
+    2. Proposed hardware addition
+    3. Expected improvement (with confidence intervals based on available data)
+    4. Hardware specifications (sensor type, interface, power, mounting)
+    5. Estimated cost and installation effort
+    6. Software changes required on both Jetson and ESP32
+    7. Integration plan with existing NexusLink bus
+
+  APPROVAL PATH:
+    Level 4 changes are presented as engineering recommendations. They require
+    human decision on hardware procurement, installation scheduling, and
+    software development. The system tracks them as long-term improvement
+    proposals and may downgrade them to a lower level if a software-only
+    solution becomes apparent.
+
+3.6 DIFF-BASED CHANGE MANAGEMENT
+--------------------------------------------------------------------------------
+
+ALL changes at every level are expressed as diffs from the current artifact
+baseline. This is not merely a convenience — it is a fundamental architectural
+requirement with several purposes:
+
+  1. REVIEWABILITY: Humans can see exactly what changes, nothing hidden
+  2. REVERTIBILITY: Any change can be undone by reversing the diff
+  3. COMPOSABILITY: Multiple changes can be stacked and reviewed as a group
+  4. AUDITABILITY: The complete evolution of every artifact is visible
+  5. REPRODUCIBILITY: Any historical artifact version can be reconstructed
+
+  The diff format follows the unified diff standard with NEXUS-specific
+  extensions:
+
+    --- a/artifact/ride_control/params.json
+    +++ b/artifact/ride_control/params.json
+    @@ -12,3 +12,3 @@
+     "throttle_reduction": 0.0,
+    -"sea_state_threshold": 4.0
+    +"sea_state_threshold": 2.5  # HYP-2025-0712-003-L1: head sea comfort
+     }
+
+    # NEXUS-METADATA:
+    # hypothesis: HYP-2025-0712-003-L1
+    # pattern: PAT-2025-0712-003
+    # author: cortex_auto_L1
+    # safety_review: PASSED (auto, 2025-07-12T14:31:22Z)
+    # human_review: PENDING
+    # simulation: PENDING
+    # ab_test: NOT_STARTED
+
+================================================================================
+  SECTION 4: SIMULATION BEFORE DEPLOYMENT
+================================================================================
+
+No artifact change reaches A/B testing without first passing simulation
+validation. The simulation environment is a digital twin that replays
+historical telemetry data through both the old and new artifact code, producing
+a side-by-side comparison of expected behavior.
+
+4.1 DIGITAL TWIN ARCHITECTURE
+--------------------------------------------------------------------------------
+
+The digital twin runs on the Jetson and consists of three components:
+
+  COMPONENT 1: ENVIRONMENT REPLAY ENGINE
+    - Reads historical observation records from the ring buffer
+    - Presents them to the artifact code as if they were live sensor data
+    - Supports time acceleration (1x, 2x, 5x, 10x) for faster validation
+    - Can loop on specific scenarios for stress testing
+    - Provides deterministic replay (same input always produces same output)
+
+  COMPONENT 2: ARTIFACT EMULATOR
+    - Compiles the artifact's control code (C/C++) for the Jetson's ARM
+      processor (cross-compilation for ESP32 is also supported for cycle-
+      accurate timing validation)
+    - Executes the control loop at the same rate as the real artifact
+      (typically 50-100 Hz)
+    - Records all internal state variables for analysis
+    - Supports running TWO instances simultaneously (old and new) with
+      identical inputs for side-by-side comparison
+
+  COMPONENT 3: METRICS COLLECTOR
+    - Computes performance metrics from both artifact instances:
+      - Comfort: roll amplitude, pitch amplitude, jerk (derivative of
+        acceleration), vertical acceleration RMS
+      - Efficiency: throttle integral (fuel proxy), speed maintenance accuracy
+      - Safety: maximum heel angle, maximum acceleration, control margin
+        (distance from actuator limits)
+      - Smoothness: throttle rate, steering rate, actuator duty cycle
+    - Produces time-series plots and statistical summaries
+    - Computes confidence metrics for the simulation results
+
+4.2 SIMULATION WORKFLOW
+--------------------------------------------------------------------------------
+
+  STEP 1: SCENARIO SELECTION
+    The system selects relevant historical data segments for simulation:
+    - Must include at least N=10 episodes matching the pattern's conditions
+    - Must also include episodes NOT matching the conditions (regression test)
+    - Must include edge cases (transition into/out of conditions, boundary
+      values of environmental variables)
+    - Total simulation duration: minimum 2 hours of real-world data,
+      typically 6-24 hours
+
+  STEP 2: BASELINE SIMULATION
+    Run the current (old) artifact on the selected scenarios.
+    Record all metrics as the baseline for comparison.
+    This also validates that the simulation is faithful to real-world behavior
+    — if the simulated metrics significantly differ from the observed metrics,
+    the simulation is flagged as unreliable.
+
+  STEP 3: PROPOSED ARTIFACT SIMULATION
+    Apply the proposed diff to create the new artifact.
+    Run it on the same scenarios with the same inputs.
+    Record all metrics.
+
+  STEP 4: COMPARISON AND SCORING
+    Compute the difference between old and new metrics:
+
+    | Metric             | Old (mean +/- sd) | New (mean +/- sd) | Delta  | p     |
+    |--------------------|-------------------|-------------------|--------|-------|
+    | Comfort (jerk RMS) | 2.34 +/- 0.45     | 1.89 +/- 0.38     | -19.2% | 0.002 |
+    | Fuel (throttle %)  | 65.2 +/- 8.1      | 63.8 +/- 7.9      | -2.1%  | 0.34  |
+    | Speed (knots)      | 12.1 +/- 1.3      | 11.4 +/- 1.1      | -5.8%  | 0.01  |
+    | Max heel (deg)     | 14.2 +/- 2.1      | 13.8 +/- 2.0      | -2.8%  | 0.21  |
+    | Throttle rate      | 8.3 +/- 2.4       | 9.1 +/- 3.1       | +9.6%  | 0.15  |
+
+  STEP 5: SIMULATION CONFIDENCE METRIC
+    The system computes a confidence score (0-100%) for the simulation:
+
+    confidence = w1 * scenario_coverage
+               + w2 * baseline_fidelity
+               + w3 * effect_consistency
+               + w4 * edge_case_pass_rate
+
+    Where:
+    - scenario_coverage: fraction of identified operating conditions covered
+    - baseline_fidelity: how closely the baseline simulation matches recorded
+      real-world behavior (> 90% match = high fidelity)
+    - effect_consistency: whether the improvement is consistent across all
+      scenarios or only in a subset
+    - edge_case_pass_rate: fraction of edge cases where safety metrics are
+      maintained
+
+    Minimum confidence for A/B testing approval:
+    - Level 1 changes: confidence >= 60% (low risk, parameters only)
+    - Level 2 changes: confidence >= 75% (moderate risk, logic changes)
+    - Level 3 changes: confidence >= 90% (high risk, algorithm changes)
+    - Level 4 changes: N/A (requires real-world prototyping)
+
+  STEP 6: GO/NO-GO DECISION
+    If simulation confidence exceeds the threshold AND no safety metrics
+    degraded AND the primary hypothesis metric improved, the system generates
+    an A/B test proposal. Otherwise, the hypothesis is returned to the
+    refinement stage with specific feedback on what failed.
+
+4.3 SIMULATION LIMITATIONS AND HONEST DISCLOSURE
+--------------------------------------------------------------------------------
+
+The simulation is NOT a substitute for real-world testing. It has fundamental
+limitations that the system explicitly discloses:
+
+  1. The replay engine cannot simulate conditions NOT present in historical
+     data. If a proposed change would affect behavior in conditions never
+     experienced, the simulation cannot evaluate it.
+
+  2. The artifact emulator runs on ARM/Linux, not ESP32/RTOS. Timing
+     differences may affect behavior, especially for time-sensitive control
+     loops. Cross-compilation testing on ESP32 is available but slower.
+
+  3. The simulation models the vessel as a passive environment — it does not
+     model the bidirectional coupling between the vessel's control actions and
+     the environmental response. (For example, changing throttle affects wake,
+     which affects perceived sea state.)
+
+  4. The metrics are proxies, not ground truth. "Comfort" as measured by
+     accelerometer jerk is a necessary but incomplete measure of human comfort.
+
+  These limitations are presented to the human alongside simulation results,
+     framed as: "The simulation suggests improvement, but cannot guarantee it."
+
+================================================================================
+  SECTION 5: A/B TESTING PROTOCOL
+================================================================================
+
+A/B testing is the definitive validation mechanism. It compares the old and new
+artifact in real-world operation under controlled conditions, with statistical
+rigor determining the outcome.
+
+5.1 DEPLOYMENT TOPOLOGY
+--------------------------------------------------------------------------------
+
+  CRITICAL ARCHITECTURE: The new artifact runs on the BACKUP ESP32; the old
+  artifact continues running on the PRIMARY ESP32. This ensures:
+
+  1. Zero risk to primary operation — the old, proven artifact is always
+     running and can be switched to instantly
+  2. The new artifact is receiving real sensor data and can be monitored
+     without affecting the vessel's behavior
+  3. Human can switch between artifacts at any time with a single button press
+     or voice command
+
+  DATA FLOW:
+    Sensors → NexusLink Bus → BOTH ESP32s (independent listeners)
+    PRIMARY ESP32 → Actuators (during primary mode)
+    BACKUP ESP32 → Actuators (during test mode)
+    BOTH ESP32s → Jetson (telemetry for comparison)
+
+  The Jetson monitors both artifacts simultaneously, recording their outputs
+  even when only one is connected to actuators. This "shadow mode" for the
+  inactive artifact allows continuous comparison without requiring active
+  switching.
+
+5.2 TEST PROTOCOL
+--------------------------------------------------------------------------------
+
+  PHASE 1: SHADOW VALIDATION (minimum 1 hour)
+    - New artifact runs on BACKUP ESP32 in shadow mode
+    - Its outputs are logged but NOT sent to actuators
+    - Jetson compares shadow outputs to primary outputs
+    - If shadow outputs are wildly different from expected, abort test
+    - If shadow outputs are reasonable, proceed to Phase 2
+
+  PHASE 2: ACTIVE A/B TESTING (configurable, default 4-24 hours)
+    - Human switches between PRIMARY and BACKUP at their discretion
+    - Recommended protocol:
+      * Operate on PRIMARY for 30 minutes (baseline)
+      * Switch to BACKUP (new artifact) for 30 minutes (test)
+      * Switch back to PRIMARY for 30 minutes (recovery)
+      * Repeat until sufficient data collected
+    - Human can abort and revert to PRIMARY at any time
+    - Jetson records metrics for both artifacts during active periods
+    - Environmental conditions are logged throughout
+
+  PHASE 3: STATISTICAL ANALYSIS
+    - After minimum test duration, Jetson performs paired comparison:
+      * For each matched pair of (old, new) episodes under similar conditions:
+        compute the difference in primary metric
+      * Perform paired t-test (or Wilcoxon signed-rank for non-normal)
+      * Compute confidence intervals for the improvement
+      * Check all secondary metrics for degradation
+      * Check safety metrics — ANY degradation = automatic rejection
+
+  PHASE 4: DECISION
+    Based on the statistical analysis and human subjective feedback:
+
+    ACCEPT:
+      - Primary metric improved by > threshold with p < 0.05
+      - No secondary metric degraded by > 5% with p < 0.05
+      - No safety metric degraded
+      - Human operator reports acceptable or improved experience
+      → Action: Promote BACKUP artifact to PRIMARY. Archive old artifact.
+
+    REJECT:
+      - Primary metric did not improve significantly
+      - OR any safety metric degraded
+      - OR human operator reports worse experience
+      → Action: Discard BACKUP artifact. Investigate failure mode.
+
+    EXTEND:
+      - Results are promising but not statistically conclusive
+      - OR environmental conditions during test were not representative
+      → Action: Extend test duration. Adjust conditions. Re-analyze.
+
+    MODIFY:
+      - Improvement observed but with undesirable side effects
+      → Action: Generate modified hypothesis addressing side effects.
+       Return to simulation phase.
+
+5.3 CONFIGURABLE TEST PARAMETERS
+--------------------------------------------------------------------------------
+
+  {
+    "ab_test_config": {
+      "hypothesis_id": "HYP-2025-0712-003-L1",
+      "min_shadow_duration_min": 60,
+      "min_active_duration_min": 240,
+      "max_active_duration_hours": 24,
+      "switch_interval_min": 30,
+      "required_condition_matches": 10,
+      "primary_metric": "comfort_jerk_rms",
+      "primary_metric_improvement_threshold_pct": 10.0,
+      "secondary_metrics": [
+        {"name": "fuel_efficiency", "max_degradation_pct": 5.0},
+        {"name": "speed_maintenance", "max_degradation_pct": 5.0}
+      ],
+      "safety_metrics": [
+        {"name": "max_heel_angle", "max_allowed_deg": 20.0},
+        {"name": "max_acceleration_g", "max_allowed": 0.5}
+      ],
+      "auto_abort_conditions": [
+        "any_safety_metric_exceeded",
+        "human_emergency_stop",
+        "environmental_conditions_outside_pattern_range"
+      ]
+    }
+  }
+
+================================================================================
+  SECTION 6: HUMAN APPROVAL INTERFACE
+================================================================================
+
+The human operator is the final authority. Every interface design decision
+reinforces this principle: the system proposes, the human disposes.
+
+6.1 VOICE INTERFACE
+--------------------------------------------------------------------------------
+
+  NOTIFICATION:
+    "Hey Helm. The system has a proposed improvement for ride comfort in head
+     seas. It would reduce throttle by twelve percent when waves are above two
+     and a half feet and wind is from ahead. Simulation shows an eighteen
+     percent comfort improvement with minimal fuel impact. Would you like to
+     hear the details, review the code, or dismiss?"
+
+  REVIEW:
+    "The proposed change modifies three parameters in the throttle controller.
+     In forty-seven observed instances, you reduced throttle by twelve percent
+     in these conditions. The system is proposing to automate this behavior.
+     Statistical confidence is high — p value zero point zero zero zero three.
+     The change is Level 1, parameter only, and has passed automatic safety
+     review."
+
+  APPROVAL:
+    "Would you like to proceed to A/B testing? The new artifact will run on
+     backup. You can switch between old and new at any time. Say 'start test'
+     to begin, 'more details' for additional information, or 'dismiss' to
+     decline."
+
+  IN-TEST UPDATES:
+    "A/B test update. Three hours into the test. Comfort has improved by
+     fifteen percent on the new artifact. Fuel efficiency is unchanged.
+     No safety concerns. You can continue the test or say 'accept' to make
+     the change permanent."
+
+6.2 TOUCHSCREEN INTERFACE
+--------------------------------------------------------------------------------
+
+The Helm UI provides a dedicated "Learning" panel accessible from the main
+navigation:
+
+  PROPOSAL VIEW:
+    +---------------------------------------------------------------+
+    | LEARNING CENTER                                    [3 pending] |
+    |---------------------------------------------------------------|
+    | ★ PAT-2025-0712-003: Head Sea Throttle Reduction              |
+    |   Level: 1 (Parameter)  Status: Ready for A/B Test            |
+    |                                                               |
+    |   [Pattern Evidence]                                          |
+    |   ┌─────────────────────────────────────────────────────────┐ |
+    |   │ Human override rate: 94% in target conditions (N=47)    │ |
+    |   │ Mean reduction: 12.3% [CI: 8.1% - 16.5%]              │ |
+    |   │ Effect size: d=1.2 (large)  p<0.001                    │ |
+    |   └─────────────────────────────────────────────────────────┘ |
+    |                                                               |
+    |   [Simulation Results]                                        |
+    |   ┌─────────────────────────────────────────────────────────┐ |
+    |   │ Comfort:  ██████████████████████░░░░  -19% (p=0.002)   │ |
+    |   │ Fuel:    ██████████████████████████░  -2%  (p=0.34)    │ |
+    |   │ Speed:   ███████████████████████░░░░  -6%  (p=0.01)    │ |
+    |   │ Safety:  ████████████████████████████ PASS              │ |
+    |   │ Confidence: 82%                                          │ |
+    |   └─────────────────────────────────────────────────────────┘ |
+    |                                                               |
+    |   [Code Diff]  [Full Simulation Data]  [Raw Data]            |
+    |                                                               |
+    |   [Start A/B Test]  [Request Changes]  [Dismiss]              |
+    +---------------------------------------------------------------+
+
+  A/B TEST MONITORING VIEW:
+    +---------------------------------------------------------------+
+    | A/B TEST: HYP-2025-0712-003-L1                [3h 24m active] |
+    |---------------------------------------------------------------|
+    | Current mode: [BACKUP (New)] ←→ tap to switch to PRIMARY     |
+    |                                                               |
+    |   ┌─── LIVE COMPARISON ────────────────────────────────────┐  |
+    |   │                                                        │  |
+    |   │  Comfort (jerk RMS)                                    │  |
+    |   │  Old: ────── 2.34                                      │  |
+    |   │  New: - - - - 1.91  (↓ 18.4%)                         │  |
+    |   │                                                        │  |
+    |   │  Speed (knots)                                         │  |
+    |   │  Old: ────── 12.1                                      │  |
+    |   │  New: - - - - 11.3  (↓ 6.6%)                          │  |
+    |   │                                                        │  |
+    |   │  Fuel Efficiency (throttle %)                          │  |
+    |   │  Old: ────── 65.2                                      │  |
+    |   │  New: - - - - 64.1  (↓ 1.7%)                          │  |
+    |   └────────────────────────────────────────────────────────┘  |
+    |                                                               |
+    |   Episodes matched: 8 / 10 required                          |
+    |   Statistical significance: not yet reached                   |
+    |                                                               |
+    |   [Accept Change]  [Extend Test]  [Abort & Revert]           |
+    +---------------------------------------------------------------+
+
+6.3 PHYSICAL BUTTONS
+--------------------------------------------------------------------------------
+
+For situations where touchscreen and voice are impractical (rough seas,
+bright sunlight, gloves):
+
+  - A/B SWITCH: A physical, guarded toggle switch on the helm panel.
+    Spring-loaded to center (neutral). Toggle forward = PRIMARY.
+    Toggle aft = BACKUP. Guard prevents accidental activation.
+    LED indicators: GREEN = PRIMARY active, AMBER = BACKUP active,
+    RED = switching in progress.
+
+  - EMERGENCY REVERT: A prominent, unguarded red button that immediately
+    reverts to the PRIMARY artifact regardless of current mode.
+    This is wired directly to the NexusLink bus — it does NOT go through
+    the Jetson. It is the hardware override of last resort.
+
+  - MUTE LEARNING: A toggle that silences all learning notifications for
+    2 hours. Useful during busy operations when the operator cannot attend
+    to proposals. The system continues observing and discovering patterns;
+    it simply queues notifications for later.
+
+6.4 ALWAYS REVERTIBLE
+--------------------------------------------------------------------------------
+
+Every change, at every stage, can be reverted:
+
+  - Before A/B test: Dismiss the proposal. No changes have been made to
+    PRIMARY.
+  - During A/B test: Switch back to PRIMARY. The BACKUP artifact can be
+    stopped, modified, or discarded without affecting PRIMARY.
+  - After A/B test acceptance: The old artifact is archived with full
+    metadata. Reverting means flashing the archived artifact back to
+    PRIMARY. This can be done by voice ("Helm, revert the last change"),
+    touchscreen (one tap from the artifact history view), or physical
+    button (load previous artifact from USB backup).
+
+  MAXIMUM REVERT TIME: < 500 ms from human input to PRIMARY artifact
+  controlling actuators (switching) or < 30 seconds (full flash revert).
+
+================================================================================
+  SECTION 7: CLOUD ENHANCEMENT VIA STARLINK
+================================================================================
+
+Cloud services enhance the learning pipeline when Starlink connectivity is
+available. They are NEVER required for operation. The system is designed to
+operate indefinitely in full standalone mode. Cloud is an accelerator, not a
+dependency.
+
+7.1 ASYNC QUEUE ARCHITECTURE
+--------------------------------------------------------------------------------
+
+All cloud communication uses a persistent, reliable async queue:
+
+  OUTBOUND QUEUE (Jetson → Cloud):
+    Priority 1 (immediate): Emergency telemetry, safety events
+    Priority 2 (batch, hourly): Observation summaries, pattern reports
+    Priority 3 (batch, daily): Full telemetry archives, model snapshots
+    Priority 4 (opportunistic): Firmware update checks, non-critical data
+
+  INBOUND QUEUE (Cloud → Jetson):
+    Priority 1 (immediate): Safety bulletins, critical patches
+    Priority 2 (batch, hourly): LLM-generated code candidates, analysis results
+    Priority 3 (batch, daily): Model updates, simulation enhancements
+    Priority 4 (opportunistic): Documentation, system updates
+
+  QUEUE PROPERTIES:
+    - Persistent on NVMe: survives Jetson reboots and connectivity outages
+    - Encrypted: TLS 1.3 in transit, AES-256 at rest
+    - Bandwidth-aware: automatically throttles to available Starlink bandwidth
+      (typically 50-200 Mbps down, 5-20 Mbps up), leaving minimum 80% for
+      human use
+    - Cost-aware: respects monthly Starlink data caps, warns human before
+      exceeding 90% of allocation
+    - Resume-capable: large file transfers resume from last byte after
+      connectivity interruption
+
+7.2 CLOUD LLM FOR CODE GENERATION
+--------------------------------------------------------------------------------
+
+Level 3 (algorithm) changes and complex Level 2 changes benefit from cloud
+LLM capabilities:
+
+  WORKFLOW:
+    1. Jetson packages the analysis request (pattern report, current code,
+       constraints) into a structured prompt
+    2. Prompt is added to outbound queue (Priority 2)
+    3. Cloud service receives prompt, selects appropriate LLM model
+       (GPT-4 class for complex algorithm design, Claude class for
+       safety-critical code review)
+    4. Cloud LLM generates code candidates with explanations
+    5. Cloud automated review pipeline validates:
+       - Memory safety (AddressSanitizer analysis)
+       - Timing constraints (static analysis of worst-case execution time)
+       - ESP32 compatibility (no unsupported libraries, fixed-point math)
+    6. Results added to inbound queue
+    7. Jetson receives results, integrates into hypothesis proposal pipeline
+
+  PRIVACY:
+    Code sent to cloud is anonymized — vessel-specific names, identifiers,
+    and location data are stripped before transmission. Only the control
+    logic pattern and environmental context are shared.
+
+7.3 LARGE-SCALE SIMULATION
+--------------------------------------------------------------------------------
+
+Cloud resources enable simulation at scales impractical on the Jetson:
+
+  MONTE CARLO SIMULATION:
+    Generate 10,000+ synthetic scenarios by varying environmental conditions
+    within observed ranges. Run both old and new artifacts on all scenarios.
+    Produce robust statistical estimates of improvement likelihood.
+
+  MULTI-VESSEL TRAINING:
+    If multiple NEXUS-equipped vessels share anonymized data, the cloud can
+    train patterns across vessels. A pattern discovered on one vessel can be
+    validated against data from other vessels operating in different
+    conditions. This dramatically increases statistical power and generalizes
+    findings.
+
+    Data sharing is OPTIONAL and requires explicit opt-in per vessel. Shared
+    data is aggregated — individual vessel trajectories are never shared.
+
+  CROSS-VALIDATION:
+    Train pattern discovery model on 80% of data, validate on 20%. Cloud
+    enables k-fold cross-validation with k=10, providing robust estimates of
+    model generalization error.
+
+7.4 NEVER REQUIRED FOR OPERATION
+--------------------------------------------------------------------------------
+
+This cannot be overstated. The cloud is an enhancement. If Starlink goes
+down (common offshore), the system continues to:
+
+  - Observe and record all telemetry
+  - Discover patterns using the on-device XGBoost model
+  - Generate Level 1 and Level 2 hypotheses using the local LLM
+  - Run simulations using historical data
+  - Conduct A/B tests
+  - Present proposals to the human for approval
+
+  Only these capabilities are deferred until connectivity returns:
+  - Level 3 algorithm generation (cloud LLM)
+  - Large-scale Monte Carlo simulation
+  - Multi-vessel cross-validation
+  - Software updates
+
+  The UI clearly indicates which proposals were generated locally vs.
+  cloud-assisted, allowing the human to factor this into their approval
+  decision.
+
+================================================================================
+  SECTION 8: PROVENANCE AND AUDIT TRAIL
+================================================================================
+
+Every change in the NEXUS system is recorded with complete provenance.
+This creates an immutable, tamper-evident history of the system's evolution
+that serves operational, legal, and regulatory purposes.
+
+8.1 CHANGE RECORD FORMAT
+--------------------------------------------------------------------------------
+
+  struct change_record_t {
+      // IDENTIFICATION
+      char     change_id[24];        // e.g., "CHG-2025-0712-003"
+      char     hypothesis_id[24];    // linked hypothesis
+      char     pattern_id[24];       // originating pattern
+      uint64_t timestamp_us;         // when change was created
+      
+      // CHANGE CONTENT
+      uint8_t  level;                // 1-4
+      char     artifact_name[64];    // target artifact
+      char     diff_hash[65];        // SHA-256 of the diff
+      char     old_artifact_hash[65]; // SHA-256 of artifact before change
+      char     new_artifact_hash[65]; // SHA-256 of artifact after change
+      
+      // EVIDENCE
+      char     pattern_report_hash[65];  // SHA-256 of pattern report
+      char     simulation_results_hash[65];
+      float    simulation_confidence;
+      char     simulation_metrics_json[1024];
+      
+      // REVIEW
+      uint8_t  safety_review_result; // 0=fail, 1=pass, 2=conditional
+      char     safety_reviewer[16];  // "auto" or "human" or "cloud_llm"
+      char     safety_review_notes[256];
+      uint8_t  human_review_result;  // 0=pending, 1=approved, 2=rejected
+      char     human_reviewer_id[32];
+      uint64_t human_review_timestamp_us;
+      char     human_review_notes[512];
+      
+      // A/B TEST RESULTS (if applicable)
+      char     ab_test_status[16];   // "not_started", "passed", "failed", 
+                                      // "aborted", "extended"
+      float    ab_test_duration_hours;
+      char     ab_test_metrics_json[2048];
+      char     ab_test_p_value_str[32];
+      char     ab_test_decision[16];  // "accept", "reject", "extend"
+      
+      // DEPLOYMENT
+      uint8_t  deployment_status;     // 0=proposed, 1=testing, 2=deployed,
+                                      // 3=reverted, 4=archived
+      uint64_t deployment_timestamp_us;
+      uint64_t revert_timestamp_us;   // 0 if not reverted
+      char     revert_reason[256];
+      
+      // INTEGRITY
+      char     prev_record_hash[65];  // hash of previous record in chain
+      char     this_record_hash[65];  // hash of this entire record
+  };
+
+8.2 HASH CHAIN INTEGRITY
+--------------------------------------------------------------------------------
+
+Change records form a hash chain analogous to a blockchain:
+
+  record[0].prev_record_hash = "0000...0000" (genesis)
+  record[0].this_record_hash = SHA-256(serialize(record[0]))
+
+  record[1].prev_record_hash = record[0].this_record_hash
+  record[1].this_record_hash = SHA-256(serialize(record[1]))
+
+  Any tampering with a historical record changes its hash, which breaks the
+  chain at that point. The system verifies the chain integrity on every boot
+  and alerts if any breakage is detected.
+
+  The chain is stored:
+  1. On the Jetson NVMe (primary)
+  2. On the USB archive drive (backup)
+  3. In the cloud (when connected, for disaster recovery)
+
+  All three copies are cross-verified. Discrepancies trigger an integrity
+  alarm.
+
+8.3 REGULATORY VALUE
+--------------------------------------------------------------------------------
+
+The provenance chain provides significant value for regulatory compliance:
+
+  COAST GUARD / MARINE AUTHORITY INSPECTION:
+    "Show me the history of the autopilot's throttle control logic."
+    → Complete history from initial deployment to current version, with
+       evidence, approvals, and test results for every change.
+
+  INCIDENT INVESTIGATION:
+    "What was the system doing at the time of the incident?"
+    → Precise artifact version, parameters, and mode active at any
+       timestamp, with full provenance of how that version came to be.
+
+  INSURANCE / LIABILITY:
+    "Was the system modified from its certified configuration?"
+    → Instant answer with cryptographic proof. Every change is attributed
+       to either automatic proposal (with human approval) or direct human
+       modification.
+
+  CONTINUOUS IMPROVEMENT DOCUMENTATION:
+    Many regulatory frameworks (ISO 9001, ISM Code) require documented
+    continuous improvement processes. NEXUS's provenance chain provides
+    this automatically and immutably.
+
+8.4 EXPORT AND REPORTING
+--------------------------------------------------------------------------------
+
+The system can generate human-readable reports from the provenance chain:
+
+  ARTIFACT HISTORY REPORT:
+    Complete evolution of a single artifact from creation to current version,
+    formatted as a chronological narrative with embedded diffs, metrics, and
+    approval records.
+
+  AUDIT TRAIL EXPORT:
+    Machine-readable (JSON or CSV) export of the complete change history,
+    suitable for import into external compliance management systems.
+
+  REGULATORY SUBMISSION PACKAGE:
+    Formatted collection of change records, simulation results, and A/B test
+    outcomes suitable for submission to a marine authority as evidence of
+    due diligence in system maintenance.
+
+================================================================================
+  CONCLUSION: THE CONTINUOUS IMPROVEMENT LOOP
+================================================================================
+
+The Learning and Optimization Architecture creates a virtuous cycle:
+
+  OBSERVE → DISCOVER → HYPOTHESIZE → SIMULATE → TEST → APPROVE → DEPLOY
+       ↑                                                        |
+       |________________________________________________________|
+
+  Each cycle improves the system's understanding of the vessel, the
+  environment, and the human operator's preferences. Over time, the
+  accumulated provenance chain becomes an invaluable operational asset —
+  not just a compliance record, but a living document of institutional
+  knowledge about how to operate this specific vessel in the real world.
+
+  The key architectural principles that make this possible:
+
+  1. CODE AS HYPOTHESIS: No change is sacred. Everything can be improved.
+  2. EVIDENCE-BASED: Every proposal is backed by statistical evidence from
+     real-world observations.
+  3. HUMAN-AUTHORITY: The human operator is always the final decision-maker.
+     The system advises; the human decides.
+  4. SAFE BY DEFAULT: Changes are tested in simulation, A/B tested against
+     the proven baseline, and always instantly revertible.
+  5. CLOUD-OPTIONAL: The system works fully standalone. Cloud enhances but
+     never gates operation.
+  6. AUDITABLE: Every change is recorded immutably with full provenance.
+
+  The Jetson Cortex is not just a computer. It is a research partner that
+  never sleeps, never forgets, and never stops looking for ways to make the
+  vessel safer, more efficient, and more comfortable — always with the
+  human's knowledge and consent.
+
+================================================================================
+  APPENDIX A: RESOURCE BUDGET SUMMARY
+================================================================================
+
+  OBSERVATION PIPELINE:
+    Storage: 50 KB/s continuous, ~4 GB/day, 100+ days on 500 GB NVMe
+    CPU: < 5% of Jetson Orin NX (background service)
+    GPU: Not used
+    RAM: < 128 MB
+
+  PATTERN DISCOVERY:
+    Training: < 30 sec GPU time per nightly run
+    Model size: ~2 MB
+    RAM: < 100 MB during training
+    Frequency: Nightly or on-demand
+
+  LOCAL LLM (Level 2 code generation):
+    Model: 7B parameters, 4-bit quantized, ~4 GB VRAM
+    Inference: < 10 sec per code generation request
+    GPU: ~80% utilization during inference
+    Availability: Immediate, no connectivity required
+
+  SIMULATION:
+    CPU: 30-50% during active simulation
+    GPU: Not used (or optionally for visualization)
+    Duration: 5-30 minutes per simulation run
+    Storage: < 100 MB per simulation result
+
+  CLOUD LLM (Level 3 code generation):
+    Latency: 2-15 minutes round-trip (depending on connectivity)
+    Bandwidth: < 5 MB per request/response pair
+    Availability: Requires Starlink connection
+
+================================================================================
+  APPENDIX B: INTERFACE SPECIFICATION — LEARNING CENTER API
+================================================================================
+
+  // Internal API endpoints on the Jetson (localhost:8080/api/learning)
+
+  GET  /patterns                    // List discovered patterns
+  GET  /patterns/{id}               // Get pattern details
+  GET  /hypotheses                  // List proposed hypotheses
+  GET  /hypotheses/{id}             // Get hypothesis details with diff
+  POST /hypotheses/{id}/approve     // Human approve for A/B testing
+  POST /hypotheses/{id}/reject      // Human reject with reason
+  GET  /ab_tests                    // List A/B tests
+  GET  /ab_tests/{id}               // Get A/B test status and metrics
+  POST /ab_tests/{id}/switch        // Switch active artifact
+  POST /ab_tests/{id}/accept        // Accept A/B test results
+  POST /ab_tests/{id}/abort         // Abort and revert to PRIMARY
+  GET  /provenance                  // Get full change history
+  GET  /provenance/{id}             // Get specific change record
+  GET  /provenance/export           // Export audit trail (JSON/CSV)
+  POST /simulation/run              // Trigger simulation for hypothesis
+  GET  /simulation/{id}/results     // Get simulation results
+
+================================================================================
+  END OF DOCUMENT 03 — LEARNING AND OPTIMIZATION ARCHITECTURE
+================================================================================

@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus-platform.org/schemas/node_role_config.json",
+  "title": "NEXUS Platform - Node Role Configuration",
+  "description": "Complete JSON configuration that defines an ESP32-S3 node's role, I/O mapping, safety parameters, and reflex behaviors. This is the single configuration artifact that transforms a universal firmware into a domain-specific controller.",
+  "type": "object",
+  "required": ["schema_version", "role_name", "role_version", "pins", "safety"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "2.0",
+      "description": "Configuration schema version."
+    },
+    "role_name": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[a-z0-9_]+$",
+      "description": "Unique human-readable role name."
+    },
+    "role_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Configuration version."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of this node's purpose."
+    },
+    "heartbeat_timeout_ms": {
+      "type": "integer",
+      "default": 500,
+      "minimum": 100,
+      "maximum": 10000
+    },
+    "pins": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/pwm_out" },
+          { "$ref": "#/$defs/digital_out" },
+          { "$ref": "#/$defs/digital_in" },
+          { "$ref": "#/$defs/adc_in" },
+          { "$ref": "#/$defs/i2c_bus" },
+          { "$ref": "#/$defs/i2c_device" },
+          { "$ref": "#/$defs/uart" },
+          { "$ref": "#/$defs/pulse_counter" }
+        ]
+      }
+    },
+    "safety": { "$ref": "#/$defs/safety_config" },
+    "reflexes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["reflex_id", "auto_start"],
+        "properties": {
+          "reflex_id": { "type": "string" },
+          "auto_start": { "type": "boolean" },
+          "priority_override": { "type": "integer", "minimum": 0, "maximum": 4 }
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "properties": {
+        "report_interval_ms": { "type": "integer", "default": 100, "minimum": 10, "maximum": 60000 },
+        "variables": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "$defs": {
+    "pwm_out": {
+      "type": "object",
+      "required": ["id", "type", "gpio"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "pwm_out" },
+        "gpio": { "type": "integer", "minimum": 0, "maximum": 48 },
+        "frequency_hz": { "type": "integer", "default": 50 },
+        "min_duty_pct": { "type": "number", "minimum": 0, "maximum": 50 },
+        "max_duty_pct": { "type": "number", "minimum": 50, "maximum": 100 },
+        "default_duty_pct": { "type": "number" },
+        "safe_duty_pct": { "type": "number" },
+        "rate_limit_per_sec": { "type": "number" },
+        "resolution_bits": { "type": "integer", "default": 14 }
+      }
+    },
+    "digital_out": {
+      "type": "object",
+      "required": ["id", "type", "gpio"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "digital_out" },
+        "gpio": { "type": "integer", "minimum": 0, "maximum": 48 },
+        "default_state": { "type": "integer", "enum": [0, 1] },
+        "safe_state": { "type": "integer", "enum": [0, 1] },
+        "inverted": { "type": "boolean", "default": false }
+      }
+    },
+    "digital_in": {
+      "type": "object",
+      "required": ["id", "type", "gpio"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "digital_in" },
+        "gpio": { "type": "integer", "minimum": 0, "maximum": 48 },
+        "pull_mode": { "type": "string", "enum": ["none", "up", "down"], "default": "none" },
+        "interrupt_mode": { "type": "string", "enum": ["none", "rising", "falling", "any"], "default": "none" },
+        "debounce_ms": { "type": "integer", "default": 50 }
+      }
+    },
+    "adc_in": {
+      "type": "object",
+      "required": ["id", "type", "gpio"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "adc_in" },
+        "gpio": { "type": "integer", "minimum": 0, "maximum": 48 },
+        "attenuation_db": { "type": "number", "enum": [0, 2.5, 6, 11], "default": 11 },
+        "samples_to_avg": { "type": "integer", "default": 64 },
+        "filter_type": { "type": "string", "enum": ["none", "median", "ewma"], "default": "median" },
+        "voltage_divider_ratio": { "type": "number" },
+        "report_interval_ms": { "type": "integer" },
+        "overvoltage_threshold_v": { "type": "number" },
+        "undervoltage_threshold_v": { "type": "number" }
+      }
+    },
+    "i2c_bus": {
+      "type": "object",
+      "required": ["id", "type", "sda_gpio", "scl_gpio"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "i2c_bus" },
+        "sda_gpio": { "type": "integer" },
+        "scl_gpio": { "type": "integer" },
+        "speed_hz": { "type": "integer", "default": 100000 },
+        "pullup_enable": { "type": "boolean", "default": false }
+      }
+    },
+    "i2c_device": {
+      "type": "object",
+      "required": ["id", "type", "bus_id", "device_address", "driver"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "i2c_device" },
+        "bus_id": { "type": "string" },
+        "device_address": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{2}$" },
+        "driver": { "type": "string", "enum": ["hmc5883l", "mpu6050", "icm20948", "vl53l0x", "bme280", "ina219", "as5600", "pca9685", "sht40", "generic"] }
+      }
+    },
+    "uart": {
+      "type": "object",
+      "required": ["id", "type", "uart_num", "tx_gpio", "rx_gpio"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "uart" },
+        "uart_num": { "type": "integer", "enum": [1, 2] },
+        "tx_gpio": { "type": "integer" },
+        "rx_gpio": { "type": "integer" },
+        "baud_rate": { "type": "integer", "default": 115200 },
+        "de_gpio": { "type": "integer" },
+        "half_duplex": { "type": "boolean", "default": false }
+      }
+    },
+    "pulse_counter": {
+      "type": "object",
+      "required": ["id", "type", "gpio"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "pulse_counter" },
+        "gpio": { "type": "integer" },
+        "pulse_type": { "type": "string", "enum": ["rising", "falling", "both"] },
+        "filter_us": { "type": "integer", "default": 1000 }
+      }
+    },
+    "safety_config": {
+      "type": "object",
+      "required": ["kill_switch_pin"],
+      "properties": {
+        "kill_switch_pin": { "type": "integer" },
+        "kill_switch_active_level": { "type": "integer", "enum": [0, 1], "default": 0 },
+        "heartbeat_timeout_ms": { "type": "integer", "default": 500 },
+        "failsafe_mode": { "type": "string", "enum": ["all_safe", "last_known_good_reflex", "hold_current"], "default": "all_safe" },
+        "watchdog_timeout_ms": { "type": "integer", "default": 1000 },
+        "solenoid_timeout_ms": { "type": "integer", "default": 5000 },
+        "max_current_per_pin_a": { "type": "object", "additionalProperties": { "type": "number" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,2129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NEXUS Platform Hardware Compatibility Matrix",
+  "version": "1.0.0",
+  "date": "2025-01-15",
+  "description": "Production-ready hardware compatibility specification for the NEXUS distributed intelligence firmware. Defines minimum, recommended, and optimal hardware tiers along with per-MCU compatibility assessments, peripheral requirements, RTOS constraints, and compiler expectations.",
+  "contact": "nexus-firmware-team@example.com",
+
+  "specification_tiers": {
+    "_comment": "Three tiers define the hardware envelope for NEXUS firmware deployment. Tier 0 is the absolute floor; Tier 1 provides full single-node functionality; Tier 2 matches the ESP32-S3 reference platform with wireless, PSRAM, and maximum reflex capacity.",
+
+    "tier_0_minimum": {
+      "tier_id": 0,
+      "tier_name": "Minimum Specification",
+      "tier_summary": "Absolute minimum hardware to run NEXUS firmware in a reduced-capacity mode. Suitable for constrained sensor nodes with serial-only communication, limited reflex capacity, and no observation buffering.",
+
+      "cpu": {
+        "architecture": "32-bit",
+        "architecture_notes": "ARM Cortex-M0+ or better, RISC-V RV32IMC or better, or Xtensa LX6. 8-bit MCUs (AVR, 8051) are NOT supported.",
+        "clock_mhz": 48,
+        "clock_mhz_notes": "48 MHz is the minimum clock to meet tick-resolution and ADC sampling deadlines. Lower clocks will cause reflex timing violations.",
+        "cores": 1,
+        "fpu": "optional",
+        "dsp_extensions": "optional"
+      },
+
+      "memory": {
+        "sram_kb": 32,
+        "sram_kb_notes": "32 KB SRAM is the hard floor. The firmware linker script enforces a minimum heap of 4 KB and a minimum stack of 2 KB. Typical memory map: 12 KB firmware static (.data + .bss), 4 KB reflex state pool, 4 KB serial RX/TX buffers, 4 KB heap, 4 KB stack, 4 KB margin.",
+        "flash_kb": 128,
+        "flash_kb_notes": "128 KB flash is required to fit the core firmware (~80 KB compiled with -Os) plus at least one reflex module (~20 KB typical). Larger reflex suites or OTA capability require more flash.",
+        "psram_kb": 0,
+        "psram_kb_notes": "No PSRAM required at this tier. All data fits in internal SRAM.",
+        "eeprom_kb": 0,
+        "eeprom_kb_notes": "Not required. Configuration is stored in a dedicated flash page or in RAM with defaults."
+      },
+
+      "peripherals": {
+        "timers": {
+          "count": 1,
+          "details": "One 16-bit hardware timer required for system tick generation at 1 kHz. The timer must support interrupt-on-match or periodic reload mode. Free-running counter with compare register is acceptable."
+        },
+        "uart": {
+          "count": 1,
+          "details": "One UART for NEXUSLink serial communication. Minimum 115200 baud. No hardware flow control required at this tier (software XON/XOFF will be used). TX and RX buffers of at least 64 bytes each in hardware FIFO recommended; software ring buffers handle the rest.",
+          "baud_minimum": 115200,
+          "baud_preferred": 460800,
+          "hardware_flow_control": false,
+          "software_flow_control": true
+        },
+        "gpio": {
+          "count": 10,
+          "details": "10 GPIO pins minimum: 4 allocated for reflex outputs, 2 for status LEDs, 2 for NEXUSLink serial TX/RX, 2 spare. All must support digital input and output. Interrupt-on-change capability on at least 4 pins is required for reflex triggers.",
+          "interrupt_capable": 4,
+          "pwm_capable": 0,
+          "pwm_notes": "No hardware PWM required at this tier. Software PWM fallback provides up to 2 channels at approximately 100 Hz with 8-bit resolution when CPU is idle."
+        },
+        "adc": {
+          "channels": 4,
+          "resolution_bits_minimum": 10,
+          "resolution_bits_preferred": 12,
+          "details": "4 ADC channels minimum for sensor input. 10-bit resolution is the floor (1024 discrete values). 12-bit preferred for finer sensor discrimination. Must support sample-and-hold if channels are multiplexed on a single SAR ADC. Sampling rate must support at least 1 kSps per channel simultaneously.",
+          "sample_rate_minimum_ksps": 1,
+          "reference_voltage_options": ["1.2V", "2.5V", "3.3V", "external"]
+        },
+        "pwm_channels": {
+          "count": 2,
+          "details": "2 PWM channels minimum for reflex actuator output. Hardware PWM preferred but not required; software fallback available. Resolution of at least 8-bit (256 levels) required. Frequency range: 100 Hz to 20 kHz.",
+          "resolution_bits_minimum": 8,
+          "frequency_range_hz": {"min": 100, "max": 20000}
+        },
+        "i2c": {
+          "count": 1,
+          "details": "One I2C master peripheral for external sensor communication. 100 kHz (standard mode) minimum. 400 kHz (fast mode) preferred for lower-latency sensor reads. Must support 7-bit addressing (10-bit optional). Clock stretching by slave devices must be supported. Multi-master operation NOT required.",
+          "speed_minimum_khz": 100,
+          "speed_preferred_khz": 400,
+          "addressing": "7-bit",
+          "clock_stretching_required": true,
+          "multi_master_required": false
+        },
+        "spi": {
+          "count": 0,
+          "details": "Not required at Tier 0. SPI is used only for specific high-speed sensor drivers (e.g., IMU chips, display modules). If absent, those sensors cannot be supported.",
+          "speed_notes": "N/A at this tier"
+        }
+      },
+
+      "connectivity": {
+        "wifi": false,
+        "bluetooth": false,
+        "usb": false,
+        "ethernet": false,
+        "notes": "No wireless or USB connectivity required at this tier. NEXUSLink communication is serial-only. Wireless-enabled MCUs that operate at this tier may still use WiFi/BLE but the firmware does not depend on it."
+      },
+
+      "runtime_capabilities": {
+        "max_reflex_count": 2,
+        "max_reflex_count_notes": "Only 2 reflexes can be active simultaneously due to SRAM constraints. Each reflex requires approximately 2 KB of state memory.",
+        "observation_buffer_samples": 0,
+        "observation_buffer_samples_notes": "No observation buffer at Tier 0. Sensor readings are processed immediately and discarded. Historical data is not retained.",
+        "serial_protocol": "NEXUSLink-Serial",
+        "supported_commands": ["REFLEX_TRIGGER", "REFLEX_STATUS", "SENSOR_READ", "CONFIG_GET", "CONFIG_SET", "HEARTBEAT"],
+        "unsupported_commands": ["OBSERVATION_STREAM", "WIRELESS_PAIR", "OTA_UPDATE"]
+      },
+
+      "notes": "Reduced reflex capacity (max 2 reflexes), no observation buffer, serial-only comms. Suitable for simple threshold-based sensor nodes, basic actuator controllers, and diagnostic/monitoring endpoints."
+    },
+
+    "tier_1_recommended": {
+      "tier_id": 1,
+      "tier_name": "Recommended Specification",
+      "tier_summary": "Recommended hardware for full single-node NEXUS functionality including observation buffering, multiple concurrent reflexes, and full NEXUSLink command set over serial. No wireless required but firmware will use it if present.",
+
+      "cpu": {
+        "architecture": "32-bit",
+        "architecture_notes": "ARM Cortex-M4 or better recommended (hardware FPU strongly preferred). RISC-V RV32IMAC with hardware multiply/divide. Xtensa LX6 acceptable.",
+        "clock_mhz": 120,
+        "clock_mhz_notes": "120 MHz provides comfortable headroom for concurrent reflex evaluation, sensor sampling, serial I/O, and observation buffer management. The firmware targets no more than 60% CPU utilization at this clock rate under full load.",
+        "cores": 1,
+        "fpu": "preferred",
+        "fpu_notes": "Hardware single-precision FPU (FPv4-SP on ARM, hardware mul/div on RISC-V) significantly reduces reflex evaluation latency. Soft-float increases reflex evaluation time by 3-5x.",
+        "dsp_extensions": "preferred",
+        "dsp_notes": "DSP extensions (ARM Cortex-M4F CMSIS-DSP instructions, RISC-V P extension) accelerate FIR/IIR filters used in sensor preprocessing."
+      },
+
+      "memory": {
+        "sram_kb": 128,
+        "sram_kb_notes": "128 KB SRAM enables full feature set: ~40 KB firmware static, 32 KB observation buffer (ring buffer, 1024 samples of 32 bytes each), 20 KB reflex state pool (up to 8 concurrent reflexes at ~2.5 KB each), 8 KB serial I/O buffers, 16 KB heap, 8 KB RTOS overhead, 4 KB stack per task (2 tasks).",
+        "flash_kb": 512,
+        "flash_kb_notes": "512 KB flash accommodates core firmware (~100 KB with -Os), up to 10 reflex modules (~200 KB total), sensor driver library (~50 KB), NEXUSLink protocol stack (~30 KB), configuration/calibration data (~20 KB), OTA staging area (~100 KB if supported).",
+        "psram_kb": 0,
+        "psram_kb_notes": "Not required at Tier 1 but beneficial if available. If PSRAM is present, the observation buffer can be extended to 256 KB and additional reflex state can be offloaded.",
+        "eeprom_kb": 4,
+        "eeprom_kb_notes": "4 KB EEPROM or emulated EEPROM in flash for persistent calibration data and node configuration that survives firmware updates."
+      },
+
+      "peripherals": {
+        "timers": {
+          "count": 2,
+          "details": "Two hardware timers: one for 1 kHz system tick, one for high-resolution reflex timing (1 us resolution minimum). Second timer used for pulse-width measurement on reflex input triggers.",
+          "tick_resolution_hz": 1000,
+          "hires_resolution_ns": 1000
+        },
+        "uart": {
+          "count": 2,
+          "details": "Two UARTs: primary UART for NEXUSLink serial communication (configurable baud up to 921600), secondary UART for debug logging or auxiliary sensor input. Hardware flow control (CTS/RTS) preferred on primary to prevent buffer overflow at high baud rates. Software XON/XOFF fallback available.",
+          "baud_minimum": 115200,
+          "baud_preferred": 921600,
+          "hardware_flow_control": true,
+          "software_flow_control": true
+        },
+        "gpio": {
+          "count": 20,
+          "details": "20 GPIO pins: 8 for reflex outputs, 4 for reflex trigger inputs (interrupt-capable), 2 for status LEDs, 2 for serial TX/RX, 2 for debug, 2 spare. At least 8 pins must support interrupt-on-change for multi-channel reflex triggering.",
+          "interrupt_capable": 8,
+          "pwm_capable": 4,
+          "pwm_notes": "4 hardware PWM channels preferred for multi-channel reflex actuator output. Software PWM fallback available for additional channels."
+        },
+        "adc": {
+          "channels": 8,
+          "resolution_bits_minimum": 10,
+          "resolution_bits_preferred": 12,
+          "details": "8 ADC channels for comprehensive sensor input. 12-bit resolution strongly preferred for observation buffer quality. Differential mode support is a bonus but not required. DMA-capable ADC enables background sampling without CPU intervention. Sampling rate: at least 10 kSps per channel.",
+          "sample_rate_minimum_ksps": 10,
+          "dma_preferred": true,
+          "reference_voltage_options": ["internal_1.2V", "internal_2.5V", "VDD_3.3V", "external"]
+        },
+        "pwm_channels": {
+          "count": 4,
+          "details": "4 PWM channels for multi-channel reflex actuator output. 10-bit resolution preferred (1024 levels). Complementary output pairs are a bonus for H-bridge motor control. Dead-time insertion is a bonus.",
+          "resolution_bits_minimum": 8,
+          "resolution_bits_preferred": 10,
+          "frequency_range_hz": {"min": 20, "max": 100000}
+        },
+        "i2c": {
+          "count": 1,
+          "details": "One I2C master peripheral. 400 kHz (fast mode) minimum at this tier for responsive sensor communication. 1 MHz (fast mode plus) or 3.4 MHz (high speed mode) are bonuses. 7-bit addressing required, 10-bit optional. Clock stretching support required. DMA-capable I2C preferred for non-blocking transfers.",
+          "speed_minimum_khz": 400,
+          "speed_preferred_khz": 1000,
+          "addressing": "7-bit",
+          "addressing_10bit_optional": true,
+          "clock_stretching_required": true,
+          "dma_preferred": true
+        },
+        "spi": {
+          "count": 1,
+          "details": "One SPI master peripheral for high-speed sensor drivers (IMU, pressure sensor, display). Minimum 1 MHz clock, preferred 10 MHz. Mode 0 (CPOL=0, CPHA=0) is the default; firmware supports mode configuration per device. DMA-capable SPI preferred.",
+          "speed_minimum_mhz": 1,
+          "speed_preferred_mhz": 10,
+          "dma_preferred": true,
+          "modes_supported": [0, 1, 2, 3]
+        }
+      },
+
+      "connectivity": {
+        "wifi": "optional",
+        "wifi_notes": "If present, enables NEXUSLink-Wireless protocol for multi-node mesh communication. 802.11 b/g/n sufficient. WPA2-PSK support required if WiFi is used.",
+        "bluetooth": "optional",
+        "bluetooth_notes": "If present, BLE 4.2 or 5.0 enables NEXUSLink-BLE for low-power companion communication. GATT-based protocol.",
+        "usb": "optional",
+        "usb_notes": "USB 2.0 Full-Speed device mode enables NEXUSLink-USB as an alternative to serial. CDC-ACM class required.",
+        "ethernet": "not_required",
+        "ethernet_notes": "Not expected at Tier 1 but supported if available via MAC + external PHY."
+      },
+
+      "runtime_capabilities": {
+        "max_reflex_count": 8,
+        "max_reflex_count_notes": "Up to 8 concurrent reflexes with full evaluation pipeline. Each reflex gets its own evaluation slot in the scheduler.",
+        "observation_buffer_samples": 1024,
+        "observation_buffer_samples_notes": "1024-sample ring buffer at 32 bytes per sample (~32 KB). Provides approximately 10 seconds of observation history at 100 Hz sampling rate. Configurable: can trade sample count for sample size.",
+        "serial_protocol": "NEXUSLink-Serial (full command set)",
+        "supported_commands": ["REFLEX_TRIGGER", "REFLEX_STATUS", "REFLEX_CONFIGURE", "REFLEX_LOAD", "REFLEX_UNLOAD", "SENSOR_READ", "SENSOR_STREAM", "OBSERVATION_STREAM", "OBSERVATION_QUERY", "CONFIG_GET", "CONFIG_SET", "CONFIG_SAVE", "CONFIG_ERASE", "HEARTBEAT", "SYSTEM_STATUS", "SYSTEM_RESET", "OTA_START", "OTA_DATA", "OTA_VERIFY", "OTA_COMMIT"],
+        "unsupported_commands": ["WIRELESS_PAIR"]
+      },
+
+      "notes": "Full single-node NEXUS experience. Suitable for autonomous sensor-actuator nodes, edge processing units, and development/testing platforms."
+    },
+
+    "tier_2_optimal": {
+      "tier_id": 2,
+      "tier_name": "Optimal Specification (ESP32-S3 Reference)",
+      "tier_summary": "Optimal hardware matching the ESP32-S3 WROOM-1-N8R8 reference platform. This is the target platform for NEXUS firmware development and testing. All features are fully supported including wireless, PSRAM, dual-core, and maximum reflex capacity.",
+
+      "cpu": {
+        "architecture": "32-bit",
+        "architecture_family": "Xtensa LX7",
+        "architecture_notes": "Xtensa LX7 dual-core as found in ESP32-S3. The firmware reference implementation is optimized for this architecture. ARM Cortex-M7 or RISC-V with equivalent throughput are also Tier 2 capable.",
+        "clock_mhz": 240,
+        "clock_mhz_notes": "240 MHz operating frequency. Each core can independently run at up to 240 MHz. Core 0 handles NEXUSLink communication and system management; Core 1 handles reflex evaluation and sensor sampling.",
+        "cores": 2,
+        "cores_notes": "Dual-core required. Core affinity is configurable: by default, Core 0 runs the NEXUSLink I/O task and system tick, Core 1 runs reflex evaluation and observation sampling. Single-core operation degrades to Tier 1 performance.",
+        "fpu": "required",
+        "fpu_notes": "Single-precision hardware FPU is required for real-time reflex evaluation within timing budgets. ESP32-S3 provides 32 hardware floating-point registers.",
+        "dsp_extensions": "required",
+        "dsp_notes": "DSP instructions (MAC, SIMD) required for real-time sensor preprocessing pipelines (FIR/IIR filtering, FFT, statistical analysis)."
+      },
+
+      "memory": {
+        "sram_kb": 512,
+        "sram_kb_notes": "512 KB internal SRAM (384 KB available to application after ESP-IDF overhead). Memory map: ~100 KB firmware static, 128 KB observation buffer (4096 samples at 32 bytes), 64 KB reflex state pool (up to 16 concurrent reflexes), 32 KB serial/wireless I/O buffers, 32 KB RTOS overhead, 16 KB stack per task (4 tasks), remainder heap.",
+        "flash_kb": 8192,
+        "flash_kb_notes": "8 MB (N8 variant). Core firmware ~150 KB, full reflex library ~500 KB, all sensor drivers ~200 KB, NEXUSLink stack ~50 KB, WiFi/BLE stack ~300 KB, OTA staging ~1 MB, remaining space for additional reflex modules and user data.",
+        "psram_kb": 8192,
+        "psram_kb_notes": "8 MB octal SPI PSRAM (R8 variant). Used for: extended observation buffer (up to 4 MB), reflex module loading/unloading without reboot, WiFi/BLE buffer allocation, JSON/config parsing, and large lookup tables. PSRAM access is approximately 4x slower than internal SRAM; time-critical data (reflex state, tick counters) must remain in internal SRAM.",
+        "eeprom_kb": 0,
+        "eeprom_kb_notes": "No dedicated EEPROM. NVS (Non-Volatile Storage) partition in flash provides equivalent functionality with wear leveling."
+      },
+
+      "peripherals": {
+        "timers": {
+          "count": 4,
+          "details": "Four 64-bit general-purpose timers (LPTIMER group). Timer 0: 1 kHz system tick. Timer 1: high-resolution reflex timing (down to 0.5 us resolution). Timer 2: watchdog/supervisor timer. Timer 3: auxiliary (PWM fallback, sensor timing). All timers support interrupt-on-match and auto-reload.",
+          "tick_resolution_hz": 1000,
+          "hires_resolution_ns": 500
+        },
+        "uart": {
+          "count": 3,
+          "details": "Three UARTs: UART0 for NEXUSLink primary communication (configurable up to 3 Mbps), UART1 for debug/logging, UART2 for auxiliary sensor input or secondary NEXUSLink channel. All UARTs support hardware flow control (CTS/RTS) and have 128-byte hardware FIFOs.",
+          "baud_minimum": 115200,
+          "baud_preferred": 3000000,
+          "hardware_flow_control": true,
+          "software_flow_control": true,
+          "fifo_depth_bytes": 128
+        },
+        "gpio": {
+          "count": 45,
+          "details": "45 GPIO pins: 14 usable as reflex outputs (22 if multiplexing with other functions is acceptable), 14 interrupt-capable inputs for reflex triggers, dedicated pins for UART, SPI, I2C, USB D+/D-, and camera interface. Up to 8 pins can be configured as capacitive touch inputs (bonus feature, not required by firmware).",
+          "interrupt_capable": 14,
+          "pwm_capable": 14,
+          "pwm_notes": "14 hardware LEDC PWM channels with independent frequency and duty cycle. 1-bit to 20-bit resolution configurable per channel. Supports fade functions and hardware grouping."
+        },
+        "adc": {
+          "channels": 20,
+          "resolution_bits_minimum": 12,
+          "resolution_bits_preferred": 12,
+          "details": "20 ADC channels (2 x 12-bit SAR ADCs, 10 channels each). ADC1 has 10 channels, ADC2 has 10 channels. NOTE: ADC2 is unavailable while WiFi is active (shared hardware). Firmware automatically routes ADC channels to ADC1 when WiFi is enabled, falling back to ADC2 only when WiFi is off. DMA-capable via SPI/DMA peripheral. On-chip attenuator supports 0-3.3V range. Calibration data stored in eFuse for improved accuracy.",
+          "adc1_channels": 10,
+          "adc2_channels": 10,
+          "adc2_wifi_conflict": true,
+          "adc2_wifi_conflict_notes": "ADC2 cannot be used when WiFi TX/RX is active. Firmware detects this and disables ADC2 channels when WiFi is initialized.",
+          "sample_rate_minimum_ksps": 83,
+          "dma_capable": true,
+          "reference_voltage_options": ["0-0.9V (11dB atten)", "0-1.25V (6dB atten)", "0-1.75V (2.5dB atten)", "0-2.45V (0dB atten)"],
+          "calibration": "eFuse per-unit calibration coefficients"
+        },
+        "pwm_channels": {
+          "count": 8,
+          "count_notes": "8 dedicated hardware PWM channels for reflex actuator output. Additional channels available via LEDC peripheral if needed.",
+          "resolution_bits_minimum": 8,
+          "resolution_bits_preferred": 16,
+          "resolution_notes": "LEDC peripheral supports 1-bit to 20-bit resolution. 10-bit is typical for motor control (1024 levels). 16-bit available for high-precision DAC-like applications.",
+          "frequency_range_hz": {"min": 5, "max": 40000}
+        },
+        "i2c": {
+          "count": 2,
+          "details": "Two I2C master peripherals. I2C0: primary sensor bus, supports up to 1 MHz (fast mode plus). I2C1: auxiliary bus for display or secondary sensors. Both support 7-bit and 10-bit addressing, clock stretching, and DMA transfers. Software I2C available on any GPIO as fallback.",
+          "speed_minimum_khz": 400,
+          "speed_preferred_khz": 1000,
+          "addressing": "7-bit and 10-bit",
+          "clock_stretching_required": true,
+          "dma_preferred": true,
+          "max_speed_khz": 3400,
+          "max_speed_notes": "High speed mode (3.4 MHz) theoretically supported but not tested in reference implementation."
+        },
+        "spi": {
+          "count": 2,
+          "details": "Two SPI peripherals: FSPI (Fast SPI) for external flash/PSRAM (managed by ESP-IDF, not available for general use), SPI2/HSPI for user peripherals (sensors, displays, IMUs). SPI2 supports up to 80 MHz clock, quad-SPI (QIO/QOUT), DMA, and all four SPI modes. SPI3/VSPI available but shares pins with other peripherals.",
+          "speed_minimum_mhz": 1,
+          "speed_preferred_mhz": 40,
+          "max_speed_mhz": 80,
+          "dma_capable": true,
+          "quad_spi": true,
+          "modes_supported": [0, 1, 2, 3]
+        }
+      },
+
+      "connectivity": {
+        "wifi": true,
+        "wifi_standard": "802.11 b/g/n",
+        "wifi_details": "Integrated 2.4 GHz WiFi with 20/40 MHz channel width. Supports STA, AP, and STA+AP concurrent modes. WPA2/WPA3-PSK. Throughput: ~35 Mbps TCP (typical). Used for NEXUSLink-Wireless mesh protocol, OTA updates, and cloud communication.",
+        "wifi_notes": "WiFi activity disables ADC2. Firmware manages this constraint automatically.",
+        "bluetooth": true,
+        "bluetooth_standard": "BLE 5.0 + Bluetooth Classic",
+        "bluetooth_details": "Integrated Bluetooth LE 5.0 with 2 Mbps PHY, long range (coded) PHY, and advertising extensions. Bluetooth Classic (BR/EDR) also available. Used for NEXUSLink-BLE companion protocol and provisioning. Support for up to 9 simultaneous BLE connections.",
+        "usb": true,
+        "usb_standard": "USB 2.0 OTG Full-Speed (12 Mbps)",
+        "usb_details": "Integrated USB OTG peripheral with PHY. Supports CDC-ACM (virtual serial port), HID, and MSC device classes. Used for NEXUSLink-USB as alternative to UART. Also supports USB serial/JTAG for programming and debugging without external FTDI chip.",
+        "ethernet": false,
+        "ethernet_notes": "No integrated Ethernet MAC. External Ethernet via SPI (e.g., W5500) is supported via driver layer but not used in reference implementation."
+      },
+
+      "runtime_capabilities": {
+        "max_reflex_count": 16,
+        "max_reflex_count_notes": "Up to 16 concurrent reflexes across both cores. Reflex scheduler distributes evaluation across cores based on priority and timing requirements.",
+        "observation_buffer_samples": 4096,
+        "observation_buffer_samples_notes": "4096-sample ring buffer in PSRAM (128 KB) or internal SRAM (configurable). At 100 Hz sampling provides ~40 seconds of history. At 1 kHz provides ~4 seconds.",
+        "observation_buffer_extended": true,
+        "observation_buffer_extended_notes": "Extended observation buffer up to 4 MB (131072 samples) available in PSRAM for long-duration recording or high-frequency sampling.",
+        "serial_protocol": "NEXUSLink-Serial + NEXUSLink-Wireless + NEXUSLink-BLE + NEXUSLink-USB",
+        "supported_commands": "All NEXUSLink commands",
+        "wireless": {
+          "max_peer_nodes": 8,
+          "mesh_topology": "star",
+          "encryption": "AES-128-CCM"
+        },
+        "ota": {
+          "supported": true,
+          "staging_size_kb": 1024,
+          "dual_bank": "single-bank with A/B partition scheme",
+          "rollback": true,
+          "rollback_notes": "Anti-rollback counter stored in eFuse prevents downgrade to vulnerable firmware versions."
+        }
+      },
+
+      "reference_platform": {
+        "mcu": "ESP32-S3",
+        "module": "ESP32-S3-WROOM-1-N8R8",
+        "manufacturer": "Espressif Systems",
+        "datasheet": "https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf",
+        "technical_reference_manual": "https://www.espressif.com/sites/default/files/documentation/esp32-s3_technical_reference_manual_en.pdf",
+        "notes": "This is the primary development and test platform. All firmware PRs must pass CI on this hardware before merge."
+      }
+    }
+  },
+
+  "mcu_compatibility_matrix": {
+    "_comment": "Per-MCU compatibility assessment against all three tiers. Each entry provides detailed capability mapping, known limitations, and porting effort estimates.",
+
+    "ESP32": {
+      "part_number": "ESP32-D0WDQ6",
+      "manufacturer": "Espressif Systems",
+      "architecture": "Xtensa LX6",
+      "core_count": 2,
+      "clock_mhz": 240,
+      "sram_kb": 520,
+      "flash_kb": 4096,
+      "psram_kb": 4096,
+      "psram_support": "via ESP32-WROVER modules",
+      "fpu": true,
+      "fpu_type": "single-precision (32 registers)",
+      "toolchain": "xtensa-esp32-elf-gcc (Espressif GCC fork)",
+      "sdk": "ESP-IDF v4.4+ / Arduino Core",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "supported",
+        "highest_tier": 2
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "Dual-core reflex evaluation",
+          "Full NEXUSLink serial protocol at 921600+ baud",
+          "WiFi STA/AP modes with NEXUSLink-Wireless",
+          "BLE 4.2 with NEXUSLink-BLE",
+          "Up to 16 concurrent reflexes with PSRAM",
+          "Extended observation buffer in PSRAM",
+          "OTA firmware updates",
+          "Hardware PWM (LEDC peripheral)",
+          "SPI, I2C, UART peripherals"
+        ],
+        "works_with_limitations": [
+          "ADC2 is unavailable when WiFi is active (shared hardware with WiFi). Only ADC1 (8 channels) usable during WiFi operation. Firmware must fall back to ADC1-only or disable WiFi for ADC2 access.",
+          "PSRAM bandwidth is limited (~20 MB/s via 4-line SPI), which can cause observation buffer contention under heavy sensor sampling + WiFi traffic.",
+          "No USB OTG (requires external USB-to-serial bridge like CP2102). USB CDC not available natively.",
+          "Bluetooth Classic audio quality is limited; BLE is the recommended wireless mode.",
+          "Hall effect sensor on GPIO 36/39 can cause ADC noise on nearby channels; not recommended for precision sensing."
+        ],
+        "does_not_work": [
+          "USB native device mode (no OTG peripheral)",
+          "High-speed I2C (>1 MHz) not reliable due to bus capacitance",
+          "GPIO 34-39 are input-only (cannot be used for reflex output)",
+          "No hardware cryptographic accelerator for AES-GCM (only AES-128-ECB in hardware); software AES required for encrypted NEXUSLink-Wireless."
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 16,
+        "observation_buffer_capacity_samples": 4096,
+        "observation_buffer_extended_samples": 8192,
+        "max_serial_baud_rate_bps": 3000000,
+        "max_wifi_throughput_mbps": 35,
+        "max_ble_connections": 7,
+        "adc_noise_floor_lsb": 5,
+        "reflex_evaluation_latency_us": 12
+      },
+
+      "porting_effort": {
+        "person_days": 5,
+        "assumptions": "Experienced embedded developer familiar with ESP-IDF. Includes HAL adaptation, linker script, timer/tick setup, UART/I2C/SPI driver mapping, FreeRTOS task creation, and basic smoke testing. Does NOT include WiFi/BLE NEXUSLink protocol adaptation (add 10 person-days for that).",
+        "difficulty": "low",
+        "existing_hal_support": true,
+        "existing_hal_name": "ESP-IDF HAL / esp-hal"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "ADC2 unavailable during WiFi TX/RX",
+          "severity": "medium",
+          "workaround": "Firmware detects WiFi state and routes all ADC channels to ADC1 (channels 0-7). If more than 8 ADC channels are needed, WiFi must be temporarily disabled before ADC2 sampling and re-enabled after."
+        },
+        {
+          "issue": "Brown-out detector triggers at ~2.5V on some modules with PSRAM",
+          "severity": "medium",
+          "workaround": "Increase brown-out threshold via efuse programming or use external power supply with >500 mA capacity. PSRAM current spikes during WiFi TX can cause BOD reset."
+        },
+        {
+          "issue": "Watchdog timer timeout during long WiFi initialization",
+          "severity": "low",
+          "workaround": "Feed the task watchdog during WiFi init sequence or disable TWDT during WiFi startup with esp_task_wdt_reset() calls."
+        },
+        {
+          "issue": "PSRAM not initialized on first boot after deep sleep",
+          "severity": "high",
+          "workaround": "Ensure esp_psram_init() is called before any PSRAM access. Do not store critical data only in PSRAM across deep sleep cycles."
+        }
+      ]
+    },
+
+    "ESP32-S2": {
+      "part_number": "ESP32-S2FH4",
+      "manufacturer": "Espressif Systems",
+      "architecture": "Xtensa LX7",
+      "core_count": 1,
+      "clock_mhz": 240,
+      "sram_kb": 320,
+      "flash_kb": 4096,
+      "psram_kb": 4096,
+      "psram_support": "via ESP32-S2-WROVER modules",
+      "fpu": true,
+      "fpu_type": "single-precision (32 registers)",
+      "toolchain": "xtensa-esp32s2-elf-gcc (Espressif GCC fork)",
+      "sdk": "ESP-IDF v4.4+ / Arduino Core",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "supported",
+        "highest_tier": 2
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "Full NEXUSLink serial protocol at 921600+ baud",
+          "WiFi STA mode with NEXUSLink-Wireless (WiFi 4, 2.4 GHz)",
+          "Up to 14 concurrent reflexes (single-core limits to ~14 with acceptable jitter)",
+          "Extended observation buffer in PSRAM",
+          "OTA firmware updates",
+          "Hardware PWM (LEDC peripheral, 8 channels)",
+          "Native USB OTG (CDC-ACM, HID)",
+          "SPI, I2C, UART peripherals",
+          "Excellent GPIO matrix for flexible pin assignment"
+        ],
+        "works_with_limitations": [
+          "Single-core only: reflex evaluation and NEXUSLink I/O share CPU time. Under heavy load, reflex timing jitter can increase to ~50 us (vs. ~5 us on dual-core ESP32). Tier 2 max reflex count reduced to 14 to maintain timing guarantees.",
+          "No BLE: Bluetooth Low Energy is NOT available on ESP32-S2. NEXUSLink-BLE protocol cannot be used. Wireless communication is WiFi-only.",
+          "No Bluetooth Classic: only WiFi for wireless.",
+          "USB OTG throughput limited to Full-Speed (12 Mbps); not suitable for high-bandwidth observation streaming.",
+          "Fewer ADC channels than ESP32: ADC1 has 10 channels, ADC2 has 10 channels but same WiFi conflict as ESP32.",
+          "Single-core means no parallel WiFi TX and reflex evaluation; worst-case reflex latency increases during WiFi transmission."
+        ],
+        "does_not_work": [
+          "NEXUSLink-BLE protocol (no BLE hardware)",
+          "Bluetooth Classic audio or SPP",
+          "Dual-core parallel processing (single-core architecture)",
+          "Ethernet MAC (not available on S2)"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 14,
+        "max_reflex_count_notes": "Single-core limits practical max to ~14 for real-time reflex deadlines. 16 is technically possible but timing jitter exceeds 50 us.",
+        "observation_buffer_capacity_samples": 4096,
+        "observation_buffer_extended_samples": 8192,
+        "max_serial_baud_rate_bps": 3000000,
+        "max_wifi_throughput_mbps": 30,
+        "max_ble_connections": 0,
+        "adc_noise_floor_lsb": 3,
+        "reflex_evaluation_latency_us": 18,
+        "reflex_evaluation_latency_worst_case_us": 52,
+        "reflex_evaluation_latency_worst_case_notes": "Worst case during concurrent WiFi TX burst."
+      },
+
+      "porting_effort": {
+        "person_days": 3,
+        "assumptions": "Experienced embedded developer. ESP32-S2 shares the same ESP-IDF framework as ESP32, so porting from ESP32 reference is straightforward. Native USB support actually simplifies some aspects (no external FTDI needed). Exclude WiFi/BLE NEXUSLink adaptation.",
+        "difficulty": "low",
+        "existing_hal_support": true,
+        "existing_hal_name": "ESP-IDF HAL / esp-hal"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "Single-core contention between reflex evaluation and WiFi",
+          "severity": "medium",
+          "workaround": "Use FreeRTOS task priorities: reflex evaluation at priority 5 (above WiFi stack at priority 4). WiFi throughput will be slightly reduced but reflex deadlines are met."
+        },
+        {
+          "issue": "ADC2 WiFi conflict same as ESP32",
+          "severity": "medium",
+          "workaround": "Same as ESP32: route ADC channels to ADC1 during WiFi operation."
+        },
+        {
+          "issue": "USB CDC enumeration can take 500+ ms on some hosts",
+          "severity": "low",
+          "workaround": "Add USB DTR/RTS handling with debounce. Some Linux hosts require udev rules for reliable enumeration."
+        }
+      ]
+    },
+
+    "ESP32-S3": {
+      "part_number": "ESP32-S3FN8 (WROOM-1-N8R8 module)",
+      "manufacturer": "Espressif Systems",
+      "architecture": "Xtensa LX7",
+      "core_count": 2,
+      "clock_mhz": 240,
+      "sram_kb": 512,
+      "flash_kb": 8192,
+      "psram_kb": 8192,
+      "psram_support": "octal SPI PSRAM on R8 variant",
+      "fpu": true,
+      "fpu_type": "single-precision (32 registers, improved pipeline vs. LX6)",
+      "toolchain": "xtensa-esp32s3-elf-gcc (Espressif GCC fork)",
+      "sdk": "ESP-IDF v5.0+ (v5.1+ recommended for best PSRAM support)",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "reference_platform",
+        "highest_tier": 2
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "ALL NEXUS features fully supported. This is the reference platform.",
+          "Dual-core reflex evaluation with core affinity assignment",
+          "Full NEXUSLink protocol suite: Serial, Wireless (WiFi), BLE 5.0, USB CDC",
+          "Up to 16 concurrent reflexes with guaranteed timing deadlines",
+          "Extended observation buffer in octal SPI PSRAM (up to 4 MB)",
+          "OTA firmware updates with anti-rollback",
+          "WiFi 4 (802.11 b/g/n) STA/AP/STA+AP concurrent",
+          "BLE 5.0 with 2 Mbps PHY and long range (coded) PHY",
+          "Native USB OTG with CDC-ACM, HID, MSC device classes",
+          "Hardware PWM (LEDC, 8 channels, up to 20-bit resolution)",
+          "SPI, I2C (x2), UART (x3) peripherals with DMA",
+          "20 ADC channels across 2 SAR ADCs",
+          "Capacitive touch sensing (14 channels)",
+          "Instruction cache (16 KB) and data cache (16 KB) for faster PSRAM access",
+          "Vector extensions for AI/ML acceleration (INT8 MAC)"
+        ],
+        "works_with_limitations": [
+          "ADC2 (10 channels) is unavailable when WiFi is active. Only ADC1 (10 channels on S3, vs. 8 on original ESP32) usable during WiFi operation. This is an improvement over ESP32 (more ADC1 channels on S3).",
+          "PSRAM is octal SPI, not on-chip: access latency is higher than internal SRAM (~4x). Time-critical data paths (reflex evaluation state, interrupt handlers) must not depend on PSRAM.",
+          "No Bluetooth Classic (BR/EDR) support: BLE only. Bluetooth Classic SPP not available for legacy device communication.",
+          "No Ethernet MAC: requires external MAC+PHY via SPI.",
+          "USB is Full-Speed only (12 Mbps), not High-Speed (480 Mbps)."
+        ],
+        "does_not_work": [
+          "Bluetooth Classic (BR/EDR) audio or SPP profiles",
+          "On-chip Ethernet MAC",
+          "USB High-Speed (480 Mbps)"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 16,
+        "observation_buffer_capacity_samples": 4096,
+        "observation_buffer_extended_samples": 131072,
+        "max_serial_baud_rate_bps": 3000000,
+        "max_wifi_throughput_mbps": 40,
+        "max_ble_connections": 9,
+        "adc_noise_floor_lsb": 3,
+        "reflex_evaluation_latency_us": 8,
+        "reflex_evaluation_latency_worst_case_us": 15,
+        "psram_bandwidth_mbps": 80,
+        "notes": "Best-in-class performance for NEXUS platform. Instruction and data caches significantly improve PSRAM access patterns compared to ESP32."
+      },
+
+      "porting_effort": {
+        "person_days": 0,
+        "assumptions": "This IS the reference platform. No porting required. Zero effort.",
+        "difficulty": "none",
+        "existing_hal_support": true,
+        "existing_hal_name": "ESP-IDF HAL (reference implementation target)"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "ADC2 WiFi conflict persists",
+          "severity": "low",
+          "workaround": "ESP32-S3 has 10 ADC1 channels (vs. 8 on ESP32), reducing the impact. Firmware uses ADC1 channels preferentially."
+        },
+        {
+          "issue": "PSRAM cache miss on first access after cache invalidation",
+          "severity": "low",
+          "workaround": "Pre-fetch observation buffer headers into cache before processing. Cache line size is 32 bytes; align critical structures to 32-byte boundaries."
+        },
+        {
+          "issue": "USB CDC can fail if firmware crashes during USB enumeration",
+          "severity": "low",
+          "workaround": "Add USB reset on boot and watchdog-triggered USB re-initialization. Use tinyusb_component in ESP-IDF for robust USB handling."
+        }
+      ]
+    },
+
+    "ESP32-C3": {
+      "part_number": "ESP32-C3FN4",
+      "manufacturer": "Espressif Systems",
+      "architecture": "RISC-V RV32IMAC",
+      "core_count": 1,
+      "clock_mhz": 160,
+      "sram_kb": 400,
+      "flash_kb": 4096,
+      "psram_kb": 0,
+      "psram_support": "not supported on C3",
+      "fpu": false,
+      "fpu_type": "none (soft-float only)",
+      "toolchain": "riscv32-esp-elf-gcc (Espressif GCC fork)",
+      "sdk": "ESP-IDF v5.0+ / Arduino Core",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "not_supported",
+        "highest_tier": 1
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "Full NEXUSLink serial protocol at 921600 baud",
+          "WiFi 4 (802.11 b/g/n) STA mode with NEXUSLink-Wireless",
+          "BLE 5.0 (LE only) with NEXUSLink-BLE",
+          "Up to 8 concurrent reflexes (limited by single-core and no PSRAM)",
+          "Observation buffer in internal SRAM (up to 1024 samples)",
+          "OTA firmware updates",
+          "Hardware PWM (LEDC, 6 channels)",
+          "SPI, I2C, UART peripherals",
+          "RISC-V instruction set with hardware integer multiply/divide (M extension)",
+          "Native USB Serial/JTAG for programming (CDC-ACM device class for NEXUSLink-USB)",
+          "Low power: excellent deep sleep current (~7 uA), suitable for battery-powered nodes",
+          "Ultra-low cost: typically $1.50-$2.50 in volume"
+        ],
+        "works_with_limitations": [
+          "Single-core only: same reflex/WiFi contention issue as ESP32-S2. Reflex evaluation jitter increases during WiFi TX bursts. Max reflex count capped at 8 for timing guarantees.",
+          "No PSRAM: all data must fit in 400 KB SRAM (minus ESP-IDF overhead, ~320 KB available). Observation buffer limited to ~64 KB. Reflex count limited by SRAM availability.",
+          "Soft-float only: no hardware FPU. Floating-point operations use software emulation, increasing reflex evaluation latency by 3-5x compared to ESP32-S3. Reflex modules should use fixed-point arithmetic where possible.",
+          "RISC-V architecture: toolchain maturity is improving but lags behind Xtensa/ARM. Some third-party libraries may need RISC-V ports.",
+          "Fewer peripherals: only 1 I2C, 1 SPI, 2 UART (vs. 2/2/3 on S3). Pin count is lower (22 GPIO).",
+          "Only 6 ADC channels (ADC1 only, no ADC2). No WiFi/ADC conflict since ADC2 does not exist.",
+          "No hardware cryptographic accelerator beyond basic AES-128.",
+          "Bluetooth Classic not available (BLE only)."
+        ],
+        "does_not_work": [
+          "Tier 2 features requiring >320 KB SRAM simultaneously",
+          "Extended observation buffer (>64 KB)",
+          "More than 8 concurrent reflexes",
+          "Bluetooth Classic SPP",
+          "USB OTG (USB peripheral is Serial/JTAG only, not general-purpose OTG)"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 8,
+        "max_reflex_count_notes": "Limited by single-core scheduling and no PSRAM for reflex state offloading.",
+        "observation_buffer_capacity_samples": 1024,
+        "observation_buffer_extended_samples": 2048,
+        "max_serial_baud_rate_bps": 2000000,
+        "max_wifi_throughput_mbps": 20,
+        "max_ble_connections": 4,
+        "adc_noise_floor_lsb": 4,
+        "reflex_evaluation_latency_us": 25,
+        "reflex_evaluation_latency_soft_float_overhead": "3-5x vs. hardware FPU",
+        "notes": "Excellent cost/performance ratio for Tier 1 sensor-actuator nodes with wireless capability."
+      },
+
+      "porting_effort": {
+        "person_days": 8,
+        "assumptions": "Experienced embedded developer familiar with ESP-IDF. Main work items: (1) verify soft-float reflex evaluation meets timing budgets (may need to convert some reflexes to fixed-point), (2) adapt memory layout for no-PSRAM constraint, (3) test WiFi/BLE coexistence on single-core, (4) validate USB Serial/JTAG for NEXUSLink. RISC-V toolchain is well-supported in ESP-IDF 5.x.",
+        "difficulty": "low",
+        "existing_hal_support": true,
+        "existing_hal_name": "ESP-IDF HAL (same API as Xtensa ESP32 variants)"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "Soft-float reflex evaluation may exceed timing budget for mathematically complex reflexes",
+          "severity": "medium",
+          "workaround": "Use fixed-point arithmetic (Q15.16 format) in reflex modules targeting ESP32-C3. The firmware provides a fixed-point math library (nexus_fixedpoint.h) for this purpose. Reflexes with heavy FP usage should declare a minimum tier requirement of 2 in their manifest."
+        },
+        {
+          "issue": "Single-core WiFi/reflex contention",
+          "severity": "medium",
+          "workaround": "Set reflex task priority above WiFi stack. Accept reduced WiFi throughput (~15 Mbps) during active reflex evaluation."
+        },
+        {
+          "issue": "Only 22 GPIO pins available",
+          "severity": "low",
+          "workaround": "Careful pin planning required. Use I2C/SPI expander (e.g., PCF8574, MCP23017) if more I/O is needed."
+        },
+        {
+          "issue": "USB peripheral is Serial/JTAG only, not general OTG",
+          "severity": "low",
+          "workaround": "USB CDC-ACM works for NEXUSLink-USB communication. HID and MSC classes NOT available. Use UART for non-CDC communication needs."
+        }
+      ]
+    },
+
+    "ESP32-C6": {
+      "part_number": "ESP32-C6FH4",
+      "manufacturer": "Espressif Systems",
+      "architecture": "RISC-V RV32IMAC",
+      "core_count": 1,
+      "clock_mhz": 160,
+      "sram_kb": 512,
+      "flash_kb": 4096,
+      "psram_kb": 0,
+      "psram_support": "not supported on C6 (as of silicon rev. 0)",
+      "fpu": false,
+      "fpu_type": "none (soft-float only)",
+      "toolchain": "riscv32-esp-elf-gcc (Espressif GCC fork)",
+      "sdk": "ESP-IDF v5.1+ (earlier versions have incomplete C6 support)",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "not_supported",
+        "highest_tier": 1
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "Full NEXUSLink serial protocol at 921600 baud",
+          "WiFi 6 (802.11ax) 2.4 GHz STA mode with NEXUSLink-Wireless",
+          "BLE 5.0 (LE only) with NEXUSLink-BLE plus Zigbee 3.0 and Thread 1.3 (IEEE 802.15.4)",
+          "Up to 8 concurrent reflexes (single-core, no PSRAM)",
+          "Observation buffer in internal SRAM (up to 1024 samples)",
+          "OTA firmware updates",
+          "Hardware PWM (LEDC, 6 channels)",
+          "SPI, I2C, UART peripherals",
+          "Low power: 802.11ax Target Wake Time (TWT) support for reduced WiFi power consumption",
+          "802.15.4 radio for Zigbee/Thread mesh networking (bonus, not required by NEXUS but available)",
+          "Low standby power (~5 uA deep sleep)"
+        ],
+        "works_with_limitations": [
+          "Single-core only: reflex evaluation and wireless stack share CPU time.",
+          "No PSRAM: all data in internal SRAM (~400 KB available after overhead). Same limitations as ESP32-C3.",
+          "Soft-float only: same fixed-point recommendation as ESP32-C3.",
+          "RISC-V toolchain is newer for C6; some ESP-IDF components may not yet be fully optimized for C6.",
+          "Fewer peripherals than C3: some peripheral instances are shared (e.g., one I2C, one SPI).",
+          "WiFi 6 support in ESP-IDF is maturing; some advanced 802.11ax features (OFDMA, MU-MIMO) may not be fully supported.",
+          "Zigbee/Thread support is via ESP-Zigbee-SDK, separate from ESP-IDF; integration with NEXUSLink would require additional development (out of scope for base porting effort).",
+          "Only 7 ADC channels available (all on single ADC, no WiFi conflict since it is a different ADC architecture from ESP32).",
+          "Silicon is relatively new (2023+); errata list is longer than mature parts."
+        ],
+        "does_not_work": [
+          "Tier 2 features (same as ESP32-C3)",
+          "Extended observation buffer (>64 KB)",
+          "Bluetooth Classic",
+          "USB OTG (USB Serial/JTAG only)",
+          "Zigbee/Thread NEXUSLink integration (not implemented, only radio hardware is present)"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 8,
+        "observation_buffer_capacity_samples": 1024,
+        "observation_buffer_extended_samples": 2048,
+        "max_serial_baud_rate_bps": 2000000,
+        "max_wifi_throughput_mbps": 25,
+        "max_ble_connections": 4,
+        "adc_noise_floor_lsb": 4,
+        "reflex_evaluation_latency_us": 22,
+        "reflex_evaluation_latency_soft_float_overhead": "3-5x vs. hardware FPU"
+      },
+
+      "porting_effort": {
+        "person_days": 10,
+        "assumptions": "Experienced embedded developer. Additional effort vs. C3 due to: (1) newer ESP-IDF version requirement (v5.1+), (2) WiFi 6 driver differences vs. WiFi 4, (3) potential silicon errata workarounds, (4) less community documentation and fewer example projects to reference. Otherwise similar to C3 porting effort.",
+        "difficulty": "medium",
+        "existing_hal_support": true,
+        "existing_hal_name": "ESP-IDF HAL",
+        "notes": "Porting difficulty rated medium solely due to platform maturity, not technical capability. As ESP-IDF C6 support matures, this will decrease to low."
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "Soft-float overhead (same as C3)",
+          "severity": "medium",
+          "workaround": "Same as ESP32-C3: use fixed-point math library for complex reflexes."
+        },
+        {
+          "issue": "WiFi 6 driver maturity",
+          "severity": "medium",
+          "workaround": "Stick to WiFi 4 (802.11n) fallback mode in ESP-IDF if WiFi 6 issues are encountered. Set CONFIG_ESP_WIFI_11AX_SUPPORT=n in menuconfig."
+        },
+        {
+          "issue": "Silicon errata (check Espressif errata sheet for latest rev.)",
+          "severity": "low",
+          "workaround": "Update to latest ESP-IDF release which includes silicon errata workarounds. Verify silicon revision and apply recommended esptool.py efuse changes."
+        }
+      ]
+    },
+
+    "STM32F401": {
+      "part_number": "STM32F401CCU6 / STM32F401CDU6",
+      "manufacturer": "STMicroelectronics",
+      "architecture": "ARM Cortex-M4F",
+      "core_count": 1,
+      "clock_mhz": 84,
+      "sram_kb": 64,
+      "flash_kb": 256,
+      "psram_kb": 0,
+      "psram_support": "not supported (no XSPIM/FSMC on F401)",
+      "fpu": true,
+      "fpu_type": "single-precision FPv4-SP (hardware FPU)",
+      "toolchain": "arm-none-eabi-gcc (official GCC ARM)",
+      "sdk": "STM32CubeF4 HAL / LL / libopencm3 / Zephyr",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "not_supported",
+        "highest_tier": 1
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "Full NEXUSLink serial protocol at 921600 baud (USART2/6 with DMA)",
+          "Up to 8 concurrent reflexes (limited by 64 KB SRAM, ~52 KB available after static allocation)",
+          "Observation buffer in internal SRAM (up to 512 samples at 32 bytes = 16 KB)",
+          "Excellent 12-bit ADC with very low noise (3-4 LSB typical, better than ESP32)",
+          "Hardware FPU for fast reflex evaluation (faster than soft-float ESP32-C3 despite lower clock)",
+          "Hardware PWM (TIM1, TIM2, TIM3, TIM4: up to 12 channels total)",
+          "SPI, I2C (x2), UART (x3) peripherals all with DMA support",
+          "Excellent peripheral DMA: most peripherals support DMA with minimal CPU intervention",
+          "Mature toolchain (GCC ARM) with extensive debugger support (ST-Link, J-Link, OpenOCD)",
+          "Deterministic single-core execution: no WiFi stack interference",
+          "Very low interrupt latency (12 cycles = ~143 ns at 84 MHz)",
+          "64 KB SRAM includes 16 KB CCM (core-coupled memory) for ultra-fast data access"
+        ],
+        "works_with_limitations": [
+          "No built-in WiFi/BLE: requires external wireless module (ESP-01S, ATWINC1500, nRF52832 via SPI/I2C). NEXUSLink-Wireless and NEXUSLink-BLE require adapter drivers. Add 5-10 person-days for external WiFi module integration.",
+          "84 MHz clock is lower than ESP32 variants; single-thread performance is lower for complex reflexes but FPU compensates.",
+          "64 KB SRAM is tight for Tier 1: 52 KB available leaves ~20 KB for observation buffer after firmware + reflex state. Max 512 observation samples.",
+          "256 KB flash is adequate for core firmware + ~5 reflex modules. More modules require the 512 KB variant (STM32F401CE/RD).",
+          "No USB OTG FS on CCU6 variant (only USB 2.0 device). CDU6 variant has USB OTG FS.",
+          "No built-in wireless means this MCU is best suited for wired/serial-only NEXUS nodes or nodes paired with an external wireless bridge.",
+          "CCM RAM (16 KB) cannot be used for DMA; restrict CCM usage to CPU-only data (stack, hot variables)."
+        ],
+        "does_not_work": [
+          "Native wireless communication (WiFi, BLE) without external module",
+          "Tier 2 features requiring >64 KB SRAM or wireless",
+          "OTA updates without external flash or bootloader support (256 KB flash is tight for dual-bank OTA)",
+          "USB OTG on CCU6 package (only on CDU6)"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 8,
+        "max_reflex_count_notes": "Limited by SRAM. With 8 reflexes at 2.5 KB each = 20 KB, leaving 32 KB for firmware + buffers.",
+        "observation_buffer_capacity_samples": 512,
+        "observation_buffer_extended_samples": 512,
+        "max_serial_baud_rate_bps": 921600,
+        "max_wifi_throughput_mbps": 0,
+        "max_ble_connections": 0,
+        "adc_noise_floor_lsb": 3,
+        "reflex_evaluation_latency_us": 15,
+        "reflex_evaluation_latency_notes": "Despite lower clock than ESP32, hardware FPU makes floating-point reflex evaluation competitive. Integer-only reflexes are slower than ESP32 due to 84 MHz clock."
+      },
+
+      "porting_effort": {
+        "person_days": 12,
+        "assumptions": "Experienced embedded developer familiar with STM32 HAL/LL. Work items: (1) create STM32CubeMX project and configure peripherals (1 day), (2) adapt HAL layer for timer, UART, I2C, SPI, ADC, GPIO (3 days), (3) FreeRTOS integration (port is provided by STM32Cube, 1 day), (4) memory layout / linker script (1 day), (5) DMA configuration for all peripherals (2 days), (6) testing and debug (4 days). Does NOT include external WiFi module integration (add 5-10 days).",
+        "difficulty": "medium",
+        "existing_hal_support": true,
+        "existing_hal_name": "STM32CubeF4 HAL/LL"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "CCM RAM cannot be used for DMA transfers",
+          "severity": "medium",
+          "workaround": "Allocate all DMA buffers in main SRAM (0x20000000 region), not in CCM (0x10000000). Place CPU-only hot data (reflex state, stack) in CCM for faster access."
+        },
+        {
+          "issue": "No built-in wireless requires external module",
+          "severity": "high",
+          "workaround": "Recommend ATWINC1500 (Microchip, SPI WiFi) or ESP-01S (Espressif, UART WiFi) as external wireless adapters. NEXUSLink-Wireless adapter driver must be written for the chosen module."
+        },
+        {
+          "issue": "256 KB flash is tight for OTA dual-bank",
+          "severity": "medium",
+          "workaround": "Use STM32F401CE (512 KB flash) variant for OTA capability, or use external SPI flash (W25Qxx) for OTA staging. Alternatively, use single-bank OTA with factory reset fallback."
+        }
+      ]
+    },
+
+    "STM32F411": {
+      "part_number": "STM32F411CEU6 / STM32F411RETx",
+      "manufacturer": "STMicroelectronics",
+      "architecture": "ARM Cortex-M4F",
+      "core_count": 1,
+      "clock_mhz": 100,
+      "sram_kb": 128,
+      "flash_kb": 512,
+      "psram_kb": 0,
+      "psram_support": "not supported (no FSMC on F411)",
+      "fpu": true,
+      "fpu_type": "single-precision FPv4-SP (hardware FPU)",
+      "toolchain": "arm-none-eabi-gcc (official GCC ARM)",
+      "sdk": "STM32CubeF4 HAL / LL / libopencm3 / Zephyr",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "not_supported",
+        "highest_tier": 1
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "Full NEXUSLink serial protocol at 921600 baud",
+          "Up to 8 concurrent reflexes with comfortable SRAM headroom (128 KB, ~100 KB available)",
+          "Observation buffer in internal SRAM (up to 1024 samples = 32 KB)",
+          "Excellent 12-bit ADC (same quality as F401)",
+          "Hardware FPU for fast reflex evaluation",
+          "100 MHz clock provides 19% more headroom than F401 (84 MHz)",
+          "Hardware PWM (TIM1-TIM4, TIM9-TIM11: up to 16 channels total)",
+          "SPI (x3), I2C (x3), UART/USART (x6) peripherals with DMA",
+          "64 KB CCM RAM for ultra-fast CPU-only data access",
+          "512 KB flash supports OTA with dual-bank or single-bank + external flash",
+          "Same excellent peripheral DMA support as F401",
+          "Same deterministic single-core execution"
+        ],
+        "works_with_limitations": [
+          "No built-in WiFi/BLE (same as F401: requires external module)",
+          "100 MHz is still lower than ESP32 240 MHz, but hardware FPU narrows the gap",
+          "No PSRAM: all data in internal SRAM (128 KB is generous but not unlimited)",
+          "No USB OTG on CEU6 variant (device-only USB). RETx variant has USB OTG FS.",
+          "Same CCM DMA restriction as F401"
+        ],
+        "does_not_work": [
+          "Native wireless communication without external module",
+          "Tier 2 features",
+          "USB OTG on CEU6 package"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 8,
+        "observation_buffer_capacity_samples": 1024,
+        "observation_buffer_extended_samples": 1024,
+        "max_serial_baud_rate_bps": 921600,
+        "max_wifi_throughput_mbps": 0,
+        "max_ble_connections": 0,
+        "adc_noise_floor_lsb": 3,
+        "reflex_evaluation_latency_us": 12,
+        "reflex_evaluation_latency_notes": "19% faster than F401 due to 100 MHz clock with same FPU."
+      },
+
+      "porting_effort": {
+        "person_days": 12,
+        "assumptions": "Same effort as STM32F401. If F401 port already exists, adapting to F411 is ~1 person-day (update clock config to 100 MHz, adjust flash/RAM sizes in linker script).",
+        "difficulty": "medium",
+        "existing_hal_support": true,
+        "existing_hal_name": "STM32CubeF4 HAL/LL"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "CCM RAM DMA restriction (same as F401)",
+          "severity": "medium",
+          "workaround": "Same as STM32F401."
+        },
+        {
+          "issue": "No built-in wireless (same as F401)",
+          "severity": "high",
+          "workaround": "Same as STM32F401."
+        }
+      ]
+    },
+
+    "STM32H743": {
+      "part_number": "STM32H743VIH6 / STM32H743ZIT6",
+      "manufacturer": "STMicroelectronics",
+      "architecture": "ARM Cortex-M7",
+      "core_count": 1,
+      "clock_mhz": 480,
+      "sram_kb": 1024,
+      "flash_kb": 2048,
+      "psram_kb": 0,
+      "psram_support": "external PSRAM via FMC (flexible memory controller)",
+      "fpu": true,
+      "fpu_type": "double-precision FPv5 (hardware FPU, supports both single and double precision)",
+      "toolchain": "arm-none-eabi-gcc (official GCC ARM, v10+ required for Cortex-M7)",
+      "sdk": "STM32CubeH7 HAL / LL / Zephyr",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "supported",
+        "highest_tier": 2
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "ALL NEXUS features supported. Massive performance headroom over ESP32-S3.",
+          "Up to 16 concurrent reflexes with extensive SRAM for state (1 MB SRAM)",
+          "Extended observation buffer in internal SRAM (up to 32768 samples = 1 MB) or external PSRAM via FMC (up to 64 MB theoretically)",
+          "480 MHz Cortex-M7 provides 2x the single-thread performance of ESP32-S3",
+          "Double-precision FPU for maximum reflex evaluation speed",
+          "Excellent 16-bit ADC (up to 3.6 MSPS total, multiple channels)",
+          "Up to 36 timer channels, extensive PWM capability",
+          "SPI (x6), I2C (x4), UART/USART (x8), SDIO, FMC, QSPI peripherals with DMA",
+          "L1 cache (16 KB I-cache + 16 KB D-cache) for faster flash/external memory access",
+          "Optional TCM (Tightly Coupled Memory): 64 KB DTCM + 64 KB ITCM for zero-wait-state code/data execution",
+          "Hardware JPEG codec, hardware hash (MD5, SHA-1, SHA-256), hardware CRC, hardware RNG",
+          "Chrom-ART DMA2D for graphics acceleration (bonus, not required by NEXUS)"
+        ],
+        "works_with_limitations": [
+          "No built-in WiFi/BLE: requires external module (same as F401/F411). For a chip this capable, the lack of integrated wireless is the main gap.",
+          "External PSRAM via FMC adds board complexity (wiring, trace routing, timing constraints). FMC PSRAM is asynchronous, not as seamless as ESP32 integrated PSRAM.",
+          "480 MHz comes with higher power consumption (~100 mA active vs. ~50 mA for ESP32-S3). Not ideal for battery-powered nodes without careful power management.",
+          "D-cache can cause coherency issues with DMA: software cache maintenance (SCB_InvalidateDCache_by_Addr, SCB_CleanDCache_by_Addr) required after DMA transfers. This is a common source of bugs on Cortex-M7.",
+          "STM32CubeH7 HAL is more complex than STM32CubeF4; initialization sequence has more steps and more errata workarounds.",
+          "Higher cost ($10-15 in volume vs. $3-5 for ESP32-S3) makes it less cost-effective for simple sensor nodes.",
+          "ITCM is limited to 64 KB; not enough for entire firmware code. Critical code (interrupt handlers, reflex evaluator) should be placed in ITCM via linker sections."
+        ],
+        "does_not_work": [
+          "Native wireless communication without external module",
+          "Low-power operation comparable to ESP32 (H7 power management is more complex)"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 16,
+        "observation_buffer_capacity_samples": 32768,
+        "observation_buffer_extended_samples": 2097152,
+        "observation_buffer_extended_notes": "With external 64 MB PSRAM via FMC, theoretically up to 2 million samples. Practical limit depends on PSRAM size and FMC bandwidth.",
+        "max_serial_baud_rate_bps": 921600,
+        "max_serial_baud_rate_notes": "STM32 UART max is 9.375 Mbps at 480 MHz APB2, but NEXUSLink firmware caps at 921600 for compatibility.",
+        "max_wifi_throughput_mbps": 0,
+        "max_ble_connections": 0,
+        "adc_noise_floor_lsb": 2,
+        "reflex_evaluation_latency_us": 3,
+        "reflex_evaluation_latency_notes": "Approximately 2.5x faster than ESP32-S3 due to 480 MHz + D-cache + double-precision FPU."
+      },
+
+      "porting_effort": {
+        "person_days": 15,
+        "assumptions": "Experienced embedded developer familiar with STM32 HAL/LL. Higher effort than F401 due to: (1) more complex clock tree (multiple PLLs, D1/D2/D3 domain power management), (2) cache coherency management for DMA, (3) TCM/ITCM linker section configuration, (4) STM32CubeH7 HAL differences vs. F4. Power domain configuration alone takes ~1 day.",
+        "difficulty": "medium",
+        "existing_hal_support": true,
+        "existing_hal_name": "STM32CubeH7 HAL/LL"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "D-cache coherency with DMA transfers",
+          "severity": "high",
+          "workaround": "After every DMA RX completion: call SCB_InvalidateDCache_by_Addr(rx_buffer, length). Before every DMA TX: call SCB_CleanDCache_by_Addr(tx_buffer, length). Alternatively, place DMA buffers in non-cacheable region by configuring MPU to set the DMA buffer region as non-cacheable (strongly recommended).",
+          "recommended": "Configure MPU to mark DMA buffer SRAM regions as non-cacheable, shareable. This eliminates the need for manual cache maintenance but adds ~1-2 wait states to those regions."
+        },
+        {
+          "issue": "Power domain configuration complexity",
+          "severity": "medium",
+          "workaround": "Use STM32CubeMX power configuration wizard. For NEXUS: keep D2 domain (peripherals) always on, use D3 domain (standby) for unused peripherals. Do not disable D1 domain (CPU) during operation."
+        },
+        {
+          "issue": "No built-in WiFi/BLE",
+          "severity": "medium",
+          "workaround": "Use external WiFi module connected via SPI (ATWINC1500) or UART (ESP-01S). For BLE, use external nRF52832 module via UART/SPI. Additional driver development required."
+        },
+        {
+          "issue": "Higher power consumption",
+          "severity": "low",
+          "workaround": "Use STM32H743 with power-efficient packaging (WLCSP). Enable sleep mode between reflex evaluations. Use DVFS (Dynamic Voltage and Frequency Scaling) to reduce clock to 240 MHz when full performance is not needed."
+        }
+      ]
+    },
+
+    "RP2040": {
+      "part_number": "RP2040",
+      "manufacturer": "Raspberry Pi Foundation",
+      "architecture": "ARM Cortex-M0+",
+      "core_count": 2,
+      "clock_mhz": 133,
+      "sram_kb": 264,
+      "flash_kb": 2048,
+      "flash_notes": "External QSPI flash (typically W25Q16JV). Flash is NOT execute-in-place; code is copied to SRAM (XIP cache).",
+      "psram_kb": 0,
+      "psram_support": "not natively supported; external PSRAM possible via PIO or QSPI with custom driver",
+      "fpu": false,
+      "fpu_type": "none (Cortex-M0+ has no FPU; soft-float only)",
+      "toolchain": "arm-none-eabi-gcc (official GCC ARM)",
+      "sdk": "Pico SDK (pico-sdk) / Arduino-Pico / Zephyr",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "not_supported",
+        "tier_2": "not_supported",
+        "highest_tier": 0
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "NEXUSLink serial protocol at 115200 baud (minimum) to 460800 baud (reliable)",
+          "Up to 2 concurrent reflexes (limited by SRAM: 264 KB total, ~200 KB available, but observation buffer consumes significant space if enabled)",
+          "Dual-core Cortex-M0+ for parallel reflex evaluation and serial I/O",
+          "Hardware PWM on all 30 GPIO pins (PWM slice architecture, 4 channels per slice, 8 slices)",
+          "PIO (Programmable I/O): two PIO blocks with 4 state machines each for custom protocol implementation",
+          "Flexible GPIO: any GPIO can be used for any digital function (no fixed peripheral mapping)",
+          "I2C (x2), SPI (x2), UART (x2) peripherals",
+          "256 KB internal SRAM split into 6 banks for concurrent DMA access",
+          "Low cost: ~$1.00 in volume (Raspberry Pi Pico board ~$4.00)",
+          "Extremely low power: ~1 mA active, ~50 uA sleep with RTC",
+          "Excellent community and documentation (Raspberry Pi Foundation)"
+        ],
+        "works_with_limitations": [
+          "Soft-float only: Cortex-M0+ has no FPU. Floating-point operations are emulated. Reflex evaluation latency is significantly higher than FPU-equipped MCUs. Fixed-point arithmetic is mandatory for complex reflexes.",
+          "No WiFi/BLE: requires external module. No integrated wireless.",
+          "264 KB SRAM must hold both code AND data (no execute-in-place for all code). XIP cache holds ~16 KB of frequently executed code, but all data + non-cached code must fit in 264 KB. Typical usage: ~150 KB for code + data, leaving ~114 KB for heap/stack/buffers.",
+          "Tier 1 not achievable because: (a) soft-float makes 8 concurrent reflexes with FP math infeasible within timing budgets, (b) observation buffer (1024 samples x 32 bytes = 32 KB) competes with code space in SRAM, (c) no WiFi/BLE for full NEXUSLink suite.",
+          "No DMA: PIO state machines can replace DMA for some use cases (SPI, I2C, UART) but are more complex to program. Software polling/interrupt-driven I/O for most peripherals.",
+          "No hardware I2S or audio support (PIO can implement it).",
+          "Flash is external QSPI with XIP; flash access adds latency compared to internal flash MCUs.",
+          "No hardware AES or cryptographic acceleration."
+        ],
+        "does_not_work": [
+          "Tier 1 features (8+ reflexes, full observation buffer, complete NEXUSLink suite)",
+          "Tier 2 features (wireless, PSRAM, max performance)",
+          "Native wireless communication",
+          "Hardware floating-point operations",
+          "OTA updates to external QSPI flash (unsupported in pico-sdk; custom bootloader required)",
+          "Hardware cryptographic acceleration"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 2,
+        "max_reflex_count_notes": "2 integer-only reflexes. Floating-point reflexes count as 2 reflexes each due to CPU overhead.",
+        "observation_buffer_samples": 256,
+        "observation_buffer_samples_notes": "Limited by SRAM contention with code. 256 samples at 32 bytes = 8 KB.",
+        "max_serial_baud_rate_bps": 460800,
+        "max_serial_baud_rate_notes": "Higher baud rates possible (up to 2 Mbps) but reliability decreases due to interrupt contention and no DMA.",
+        "max_wifi_throughput_mbps": 0,
+        "max_ble_connections": 0,
+        "adc_noise_floor_lsb": 8,
+        "adc_noise_floor_notes": "Internal SAR ADC is notably noisy (~8 LSB). External ADC (e.g., ADS1115 via I2C) recommended for precision sensing.",
+        "reflex_evaluation_latency_us": 40,
+        "reflex_evaluation_latency_notes": "Soft-float overhead makes FP reflexes ~3x slower than integer-only. Integer-only reflexes: ~15 us."
+      },
+
+      "porting_effort": {
+        "person_days": 10,
+        "assumptions": "Experienced embedded developer. Main work items: (1) adapt pico-sdk HAL for timer, UART, I2C, SPI, ADC, GPIO (3 days), (2) dual-core task distribution (1 day), (3) PIO-based UART/I2C for reliable high-baud serial (2 days), (4) linker script for XIP SRAM layout (1 day), (5) convert critical reflex math to fixed-point (2 days), (6) testing (1 day).",
+        "difficulty": "medium",
+        "existing_hal_support": true,
+        "existing_hal_name": "pico-sdk (hardware abstraction layer)"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "Noisy internal ADC (8 LSB noise floor)",
+          "severity": "medium",
+          "workaround": "Use external I2C ADC (ADS1115, 16-bit, ~0.5 LSB noise) for any sensor requiring precision. Internal ADC is usable only for coarse measurements (e.g., battery level, presence detection)."
+        },
+        {
+          "issue": "SRAM shared between code and data (no pure execute-in-place)",
+          "severity": "medium",
+          "workaround": "Keep firmware size under ~150 KB to leave sufficient SRAM for data. Use -Os optimization aggressively. Consider -flto for additional code size reduction. Profile with pico-sdk's pico_probe and objdump to identify large functions."
+        },
+        {
+          "issue": "No DMA for peripheral data transfer",
+          "severity": "medium",
+          "workaround": "Use PIO state machines for high-bandwidth peripherals (SPI at 10+ MHz, UART at 921600+). PIO can offload byte-level I/O from CPU. For I2C, use interrupt-driven HAL which is sufficiently efficient at 400 kHz."
+        },
+        {
+          "issue": "Soft-float overhead for floating-point reflexes",
+          "severity": "high",
+          "workaround": "Mandatory: convert all floating-point reflex modules to fixed-point (Q15.16) using nexus_fixedpoint.h library. Reflexes that cannot be converted to fixed-point must declare tier 1+ minimum hardware requirement."
+        }
+      ]
+    },
+
+    "nRF52840": {
+      "part_number": "nRF52840-QIAA",
+      "manufacturer": "Nordic Semiconductor",
+      "architecture": "ARM Cortex-M4F",
+      "core_count": 1,
+      "clock_mhz": 64,
+      "sram_kb": 256,
+      "flash_kb": 1024,
+      "psram_kb": 0,
+      "psram_support": "not supported (no external memory controller)",
+      "fpu": true,
+      "fpu_type": "single-precision FPv4-SP (hardware FPU)",
+      "toolchain": "arm-none-eabi-gcc (official GCC ARM)",
+      "sdk": "nRF5 SDK v17+ / nRF Connect SDK (Zephyr-based) / Apache Mynewt",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "not_supported",
+        "tier_2": "not_supported",
+        "highest_tier": 0
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "NEXUSLink serial protocol at 115200-460800 baud",
+          "Up to 2 concurrent reflexes (limited by 64 MHz clock and single-core; FPU helps but not enough for 8+ reflexes with observation buffer)",
+          "BLE 5.0 with all features: 2 Mbps PHY, long range (coded) PHY, advertising extensions, direction finding (AoA/AoD)",
+          "NEXUSLink-BLE protocol (unique advantage: native BLE without external module)",
+          "Excellent BLE power management: down to 1.5 uA in System OFF, 5 uA in System ON with RAM retention",
+          "Hardware FPU for floating-point reflex evaluation",
+          "1024 KB flash with OTA support (SoftDevice reserves ~150 KB, leaving ~874 KB for application)",
+          "256 KB SRAM (SoftDevice reserves ~64 KB during BLE connection, leaving ~192 KB for application)",
+          "Built-in NFC-A tag for BLE pairing (touch-to-pair)",
+          "AES-128-CCM hardware accelerator for encrypted BLE communication",
+          "Radio: 2.4 GHz proprietary mode available for custom protocols (not used by NEXUSLink-BLE)",
+          "Excellent development ecosystem: nRF Connect SDK with Zephyr RTOS, Segger Embedded Studio, nRF Connect for Desktop"
+        ],
+        "works_with_limitations": [
+          "64 MHz is significantly slower than ESP32 (240 MHz) and even STM32F401 (84 MHz). Reflex evaluation takes 3.75x longer than ESP32-S3 at the same instruction mix. This limits the maximum number of concurrent reflexes.",
+          "No WiFi: only BLE for wireless. NEXUSLink-Wireless (WiFi-based) not available. This is a significant limitation for multi-node deployments where WiFi is preferred.",
+          "No USB OTG: USB peripheral provides device-only CDC-ACM. NEXUSLink-USB works but no host mode.",
+          "SoftDevice (Nordic BLE stack) reserves significant SRAM during BLE connections. With 4+ concurrent BLE connections, available SRAM drops below 128 KB, further limiting reflex count and observation buffer.",
+          "Single-core: BLE stack and reflex evaluation share CPU time. BLE radio events (advertising, connections) can preempt reflex evaluation and cause timing jitter up to ~100 us.",
+          "Only 1 I2C, 1 SPI, 1 UART peripheral instance (but these can be remapped to different pins via GPIOTE). Additional instances require EasyDMA-based bit-banging or TWI slave (limited).",
+          "12-bit ADC (SAADC) has limited performance: max 200 kSps total, no DMA (EasyDMA with 512 byte limit per transaction).",
+          "No hardware PWM timer in the traditional sense: PWM is implemented via GPIOTE + PPI + timer compare, which is flexible but requires more setup than dedicated PWM peripherals."
+        ],
+        "does_not_work": [
+          "Tier 1 features: 64 MHz is too slow for 8+ concurrent reflexes with observation buffer while maintaining BLE connectivity",
+          "Tier 2 features: no WiFi, no PSRAM, insufficient single-thread performance",
+          "NEXUSLink-Wireless (WiFi-based protocol)",
+          "High-baud serial (>460800 reliably; UART hardware supports higher but SoftDevice interrupt latency can cause overruns)",
+          "Multiple I2C/SPI instances simultaneously without remapping complexity"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 2,
+        "max_reflex_count_notes": "With BLE active: max 2 reflexes due to SoftDevice CPU time and SRAM overhead. Without BLE (serial-only): max 4 reflexes.",
+        "observation_buffer_samples": 256,
+        "observation_buffer_samples_notes": "Limited by SRAM competition with SoftDevice. ~192 KB available with BLE active, ~80 KB after firmware + reflex state allocation.",
+        "max_serial_baud_rate_bps": 460800,
+        "max_wifi_throughput_mbps": 0,
+        "max_ble_connections": 8,
+        "adc_noise_floor_lsb": 5,
+        "reflex_evaluation_latency_us": 30,
+        "reflex_evaluation_latency_notes": "64 MHz + FPU. Integer-only reflexes: ~12 us. FP reflexes: ~30 us. BLE radio event preemption adds ~100 us worst-case jitter."
+      },
+
+      "porting_effort": {
+        "person_days": 14,
+        "assumptions": "Experienced embedded developer familiar with nRF Connect SDK / Zephyr. Work items: (1) Zephyr device tree configuration for nRF52840 (1 day), (2) HAL adaptation (UART, I2C, SPI, ADC, GPIO, timer) (3 days), (3) SoftDevice/BLE integration with NEXUSLink-BLE protocol (4 days), (4) memory layout accounting for SoftDevice reservation (1 day), (5) GPIOTE/PPI-based PWM implementation (1 day), (6) power management integration (sleep between BLE events) (1 day), (7) testing with BLE sniffer and power profiler (3 days).",
+        "difficulty": "medium",
+        "existing_hal_support": true,
+        "existing_hal_name": "Zephyr HAL (via nRF Connect SDK) / nRF5 SDK HAL"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "SoftDevice reserves significant SRAM during BLE connections",
+          "severity": "high",
+          "workaround": "Configure SoftDevice RAM reservation to minimum required for expected BLE connection count. Use sd_ble_cfg_set() to fine-tune. Monitor available RAM at runtime and reduce observation buffer size dynamically if RAM is tight.",
+          "recommended": "Use nRF Connect SDK with Zephyr Bluetooth subsystem instead of raw SoftDevice API for better memory management."
+        },
+        {
+          "issue": "BLE radio events preempt reflex evaluation",
+          "severity": "medium",
+          "workaround": "Use priority-based scheduling: set BLE radio priority lower than reflex evaluation. Accept that BLE connection intervals will be stretched during reflex bursts. Set BLE connection interval to 100 ms (vs. default 20 ms) when reflexes are active.",
+          "alternative": "Use Timeslot API to schedule reflex evaluation during BLE radio idle times, ensuring no preemption."
+        },
+        {
+          "issue": "SAADC EasyDMA 512-byte transaction limit",
+          "severity": "low",
+          "workaround": "Chain multiple 512-byte EasyDMA transactions with PPI triggering for continuous sampling. nRF Connect SDK's ADC driver handles this automatically."
+        },
+        {
+          "issue": "64 MHz clock is slow for computation-heavy reflexes",
+          "severity": "medium",
+          "workaround": "Optimize reflex evaluation code aggressively. Use CMSIS-DSP optimized functions. Pre-compute constants. Limit FP operations. Consider splitting complex reflexes into pipeline stages evaluated across multiple ticks."
+        }
+      ]
+    },
+
+    "SAMD51": {
+      "part_number": "ATSAMD51J19A / ATSAMD51N20A",
+      "manufacturer": "Microchip Technology",
+      "architecture": "ARM Cortex-M4F",
+      "core_count": 1,
+      "clock_mhz": 120,
+      "sram_kb": 256,
+      "flash_kb": 512,
+      "psram_kb": 0,
+      "psram_support": "external QSPI PSRAM possible via QSPI peripheral",
+      "fpu": true,
+      "fpu_type": "single-precision FPv4-SP (hardware FPU)",
+      "toolchain": "arm-none-eabi-gcc (official GCC ARM)",
+      "sdk": "Microchip Advanced Software Framework (ASF4) / Adafruit CircuitPython / Zephyr",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "not_supported",
+        "tier_2": "not_supported",
+        "highest_tier": 0
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "NEXUSLink serial protocol at 115200-921600 baud",
+          "Up to 2 concurrent reflexes (limited by 256 KB SRAM after ASF4 overhead)",
+          "Hardware FPU for floating-point reflex evaluation at 120 MHz",
+          "Excellent 12-bit ADC: up to 1 MSPs, differential mode, programmable gain amplifier (PGA)",
+          "QSPI peripheral for external flash and PSRAM (if available)",
+          "DMA controller (DMAC) with 32 channels, descriptor-linked transfers",
+          "Timer architecture: 8 TC (Timer/Counter) instances + 1 RTC",
+          "EIC (External Interrupt Controller) with configurable trigger on all GPIO pins",
+          "Multiple SERCOM instances for UART/I2C/SPI (up to 8 SERCOMs, configurable per-instance)",
+          "Low power: down to 1.2 uA in standby with RTC",
+          "Used in popular boards: Adafruit Metro M4, Seeeduino Wio Terminal, PyGamer"
+        ],
+        "works_with_limitations": [
+          "No WiFi/BLE: requires external module. SAMD51 is a general-purpose MCU without wireless.",
+          "256 KB SRAM is tight for Tier 1 with full observation buffer (32 KB) + 8 reflexes (20 KB) + firmware overhead (~100 KB with ASF4) + DMA buffers + stack. Leaves ~80 KB margin which is tight under load.",
+          "Tier 1 not achievable because: (a) no wireless without external module, (b) SRAM is borderline for full feature set, (c) external WiFi module integration requires significant driver work.",
+          "ASF4 is a heavy HAL framework with significant RAM/flash overhead. Consider bare-metal or minimal HAL for tighter memory fits.",
+          "Clock configuration is complex (DFLL + DPLL + FDPLL) and must be set up correctly at boot for 120 MHz operation.",
+          "SERCOM instances are flexible (UART/I2C/SPI per instance) but cannot be used simultaneously in different modes. Total available: up to 8 SERCOMs but some may be occupied by onboard peripherals (USB, QSPI).",
+          "No hardware cryptographic acceleration beyond basic CRC."
+        ],
+        "does_not_work": [
+          "Tier 1 full feature set (primarily due to no wireless)",
+          "Tier 2 features",
+          "Native wireless communication",
+          "OTA updates without external QSPI flash and custom bootloader"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 2,
+        "max_reflex_count_notes": "SRAM allows 4-6 technically, but rated Tier 0 due to lack of wireless and other Tier 1 requirements.",
+        "observation_buffer_samples": 512,
+        "observation_buffer_samples_notes": "512 samples at 32 bytes = 16 KB, leaving adequate SRAM for firmware and reflex state.",
+        "max_serial_baud_rate_bps": 921600,
+        "max_wifi_throughput_mbps": 0,
+        "max_ble_connections": 0,
+        "adc_noise_floor_lsb": 3,
+        "reflex_evaluation_latency_us": 10,
+        "reflex_evaluation_latency_notes": "120 MHz + FPU provides good performance. Faster than STM32F401 (84 MHz) for FP operations."
+      },
+
+      "porting_effort": {
+        "person_days": 14,
+        "assumptions": "Experienced embedded developer familiar with Microchip SAMD series. Work items: (1) clock initialization (DFLL + DPLL to 120 MHz) (1 day), (2) SERCOM configuration for UART/I2C/SPI (2 days), (3) DMAC setup for all peripherals (2 days), (4) EIC configuration for GPIO interrupts (1 day), (5) ADC/DAC configuration (1 day), (6) timer/tick setup (0.5 day), (7) FreeRTOS port (available in ASF4, 1 day), (8) linker script and memory layout (1 day), (9) testing and bringup (3 days), (10) external WiFi module integration (2 days if needed).",
+        "difficulty": "medium",
+        "existing_hal_support": true,
+        "existing_hal_name": "Microchip ASF4 / Atmel START"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "Complex clock initialization sequence",
+          "severity": "medium",
+          "workaround": "Use Atmel START (web-based configuration tool) to generate correct clock initialization code. Verify with oscilloscope that CPU clock is 120 MHz before proceeding. Common pitfall: DFLL48M must be calibrated via factory values, then DPLL locks to DFLL output.",
+          "recommended": "Copy clock initialization from Atmel START generated project or from Adafruit's board support package."
+        },
+        {
+          "issue": "ASF4 is RAM/flash heavy",
+          "severity": "low",
+          "workaround": "Use minimal driver set: include only ADC, SERCOM (UART/I2C/SPI), TC (timer), EIC, DMAC drivers. Skip CAN, USB, DAC, SDHC drivers if not needed. Alternatively, use bare-metal register access for smaller footprint."
+        },
+        {
+          "issue": "No built-in wireless",
+          "severity": "high",
+          "workaround": "Use ESP-01S (UART WiFi) or ATWINC1500 (SPI WiFi) for wireless capability. NEXUSLink-Wireless adapter driver must be written for the chosen module."
+        }
+      ]
+    },
+
+    "CH32V307": {
+      "part_number": "CH32V307VCT6",
+      "manufacturer": "WCH (Nanjing Qinheng Microelectronics)",
+      "architecture": "RISC-V RV32IMAC",
+      "core_count": 1,
+      "clock_mhz": 144,
+      "sram_kb": 64,
+      "flash_kb": 256,
+      "psram_kb": 0,
+      "psram_support": "not supported (no external memory controller on VCT6)",
+      "fpu": false,
+      "fpu_type": "none (soft-float only, hardware integer multiply/divide via M extension)",
+      "toolchain": "riscv-none-embed-gcc (RISC-V GCC) or WCH-specific GCC fork (MounRiver Studio)",
+      "sdk": "WCH CH32V30x EVT (Example Verification Toolkit) / community HAL (ch32v-hal)",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "not_supported",
+        "tier_2": "not_supported",
+        "highest_tier": 0
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "NEXUSLink serial protocol at 115200-460800 baud",
+          "Up to 2 concurrent reflexes (limited by 64 KB SRAM)",
+          "144 MHz RISC-V with hardware integer multiply/divide (M extension) provides good integer performance",
+          "Very low cost: ~$0.80 in volume (among the cheapest 32-bit MCUs available)",
+          "Hardware USB 2.0 FS device with internal PHY (CDC-ACM, HID, MSC, custom classes)",
+          "5 UART/USART instances, 3 SPI instances, 2 I2C instances",
+          "2 x 12-bit ADC (16 channels total, 2 MSPs total)",
+          "7 timer instances (basic, general-purpose, advanced) with PWM output",
+          "DMA controller with 8 channels",
+          "Ethernet MAC with dedicated DMA (RMII/MII interface)",
+          "CAN 2.0B controller",
+          "RTC with alarm, wakeup, and tamper detection"
+        ],
+        "works_with_limitations": [
+          "Soft-float only: no FPU. Floating-point operations are emulated in software, increasing reflex evaluation latency by 3-5x. Fixed-point arithmetic is mandatory for complex reflexes.",
+          "64 KB SRAM is very tight: ~52 KB available after firmware static allocation. This supports 2 reflexes (5 KB) + minimal observation buffer (256 samples, 8 KB) + serial buffers (4 KB) + heap (16 KB) + stack (4 KB) with thin margins.",
+          "No WiFi/BLE: requires external module. Unlike Espressif chips, WCH does not offer integrated wireless.",
+          "Tier 1 not achievable because: (a) insufficient SRAM for 8 reflexes + full observation buffer, (b) no wireless, (c) soft-float limits complex reflex evaluation throughput.",
+          "WCH toolchain and SDK maturity is significantly lower than STMicroelectronics/Espressif. Fewer community resources, less documentation, more potential for toolchain bugs.",
+          "MounRiver Studio (WCH's recommended IDE) is Windows-only. Linux development requires custom Makefiles or adaptation of community build systems.",
+          "Debug probe support: WCH-LinkE is the primary debug probe; OpenOCD support is limited and community-maintained.",
+          "Ethernet MAC is available but requires external PHY, making board design more complex.",
+          "Flash programming requires WCH-Link or WCH ISP utility; standard SWD/JTAG probes are not compatible."
+        ],
+        "does_not_work": [
+          "Tier 1 features (SRAM insufficient, no wireless)",
+          "Tier 2 features",
+          "Native wireless communication",
+          "Hardware floating-point operations",
+          "OTA updates (256 KB flash is tight; custom bootloader in first 16 KB partition possible but risky)"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 2,
+        "max_reflex_count_notes": "SRAM limited. Integer-only reflexes: up to 4 possible if observation buffer is disabled.",
+        "observation_buffer_samples": 256,
+        "observation_buffer_samples_notes": "256 samples at 32 bytes = 8 KB. Any larger consumes reflex or heap space.",
+        "max_serial_baud_rate_bps": 460800,
+        "max_wifi_throughput_mbps": 0,
+        "max_ble_connections": 0,
+        "adc_noise_floor_lsb": 4,
+        "reflex_evaluation_latency_us": 20,
+        "reflex_evaluation_latency_notes": "144 MHz RISC-V with hardware M extension. Integer reflexes: ~8 us. Soft-float FP reflexes: ~40 us."
+      },
+
+      "porting_effort": {
+        "person_days": 18,
+        "assumptions": "Experienced embedded developer, no prior WCH experience. Higher effort due to: (1) unfamiliar SDK and register layout (3 days for peripheral bringup), (2) toolchain setup (WCH GCC fork or community RISC-V toolchain) (1 day), (3) custom linker script (1 day), (4) debug probe setup and serial output verification (1 day), (5) HAL adaptation for all peripherals (4 days), (6) timer/tick/reflex porting (3 days), (7) testing and workaround for SDK bugs (3 days), (8) documentation of port (2 days). Developer with prior WCH experience could reduce this to ~10 days.",
+        "difficulty": "high",
+        "existing_hal_support": true,
+        "existing_hal_name": "WCH CH32V30x EVT HAL (quality: beta-level compared to STM32Cube)",
+        "community_hal": "ch32v-hal (community project, incomplete)",
+        "notes": "Higher difficulty rating is due to SDK maturity and toolchain issues, not inherent hardware capability."
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "WCH SDK quality and documentation gaps",
+          "severity": "high",
+          "workaround": "Use WCH-provided EVT examples as templates rather than relying solely on documentation. Reference the CH32V307 reference manual (Chinese and English versions available, but English translation has errors). Cross-reference with STM32F103 register descriptions (CH32V307 register layout is heavily inspired by STM32).",
+          "recommended": "Compare register addresses and bit definitions with STM32F103 reference manual for clarification."
+        },
+        {
+          "issue": "Linux toolchain support is limited",
+          "severity": "medium",
+          "workaround": "Use community-maintained ch32v-rs (Rust) or ch32v-arduino projects as build system reference. RISC-V GCC from riscv-gnu-toolchain (official) works but may need WCH-specific linker flags. Build with: -march=rv32imac -mabi=ilp32 -msmall-data-limit=8"
+        },
+        {
+          "issue": "WCH-LinkE debug probe lock-up after firmware crash",
+          "severity": "medium",
+          "workaround": "Power-cycle the board and re-connect WCH-LinkE. Hold BOOT0 pin high during power-on to enter ISP mode if firmware is bricked. WCH ISP tool can erase flash and restore bootloader."
+        },
+        {
+          "issue": "64 KB SRAM is insufficient for Tier 1",
+          "severity": "high",
+          "workaround": "No workaround for SRAM limitation. Use CH32V308 (128 KB SRAM) variant if Tier 1 is needed, or use a different MCU entirely."
+        }
+      ]
+    },
+
+    "ATSAME54": {
+      "part_number": "ATSAME54P20A",
+      "manufacturer": "Microchip Technology",
+      "architecture": "ARM Cortex-M4F",
+      "core_count": 1,
+      "clock_mhz": 120,
+      "sram_kb": 256,
+      "flash_kb": 1024,
+      "psram_kb": 0,
+      "psram_support": "external QSPI PSRAM possible via QSPI peripheral",
+      "fpu": true,
+      "fpu_type": "single-precision FPv4-SP (hardware FPU)",
+      "toolchain": "arm-none-eabi-gcc (official GCC ARM)",
+      "sdk": "Microchip ASF4 / Atmel START / Zephyr",
+
+      "tier_compatibility": {
+        "tier_0": "supported",
+        "tier_1": "supported",
+        "tier_2": "not_supported",
+        "highest_tier": 1
+      },
+
+      "capabilities": {
+        "works_fully": [
+          "Full NEXUSLink serial protocol at 921600 baud",
+          "Up to 8 concurrent reflexes (256 KB SRAM supports full Tier 1 feature set)",
+          "Observation buffer in internal SRAM (up to 1024 samples = 32 KB)",
+          "Hardware FPU for fast reflex evaluation at 120 MHz",
+          "Excellent 12-bit ADC: 1 MSPs, differential mode, PGA, 20 input channels",
+          "1024 KB flash (dual-bank: 2 x 512 KB pages) enables true dual-bank OTA",
+          "DMA controller (DMAC) with 32 channels",
+          "8 SERCOM instances (configurable as UART/I2C/SPI per instance)",
+          "QSPI peripheral for external flash/PSRAM",
+          "USB 2.0 FS device and host with internal PHY",
+          "CAN-FD controller",
+          "Ethernet MAC with dedicated DMA (10/100 Mbps)",
+          "SD/MMC host controller",
+          "32 KB flash page size for efficient OTA and configuration storage",
+          "Extensive clock system: DFLL48M, DPLL0, DPLL1 for flexible clock management",
+          "Used in popular boards: Adafruit Grand Central M4, Arduino Nano 33 IoT (SAMD21 variant, similar ecosystem)",
+          "EIC (External Interrupt Controller) on all GPIO pins"
+        ],
+        "works_with_limitations": [
+          "No WiFi/BLE: requires external module. ATSAME54 is a general-purpose MCU without wireless. External WiFi (ATWINC1500) or BLE (nRF52832) module recommended.",
+          "256 KB SRAM is comfortable for Tier 1 but leaves no room for Tier 2 extended features.",
+          "32 KB flash page size is larger than typical (4 KB on STM32, 4 KB on ESP32). This means: (a) OTA updates must write 32 KB minimum per erase cycle, (b) configuration storage wastes 32 KB per config page unless page-level wear leveling is implemented. However, 1024 KB flash provides ample pages.",
+          "ASF4 overhead is significant (~30-40 KB flash, ~8 KB SRAM for HAL). Consider lightweight HAL or bare-metal for tighter fit.",
+          "Clock initialization is complex (same as SAMD51, same clock tree architecture).",
+          "Single-core: no parallel processing advantage despite high clock rate.",
+          "Ethernet MAC available but not commonly used in NEXUS deployments; requires external PHY (KSZ8081, LAN8720).",
+          "External PSRAM via QSPI is possible but requires custom driver and memory management."
+        ],
+        "does_not_work": [
+          "Tier 2 features (no native wireless, no PSRAM integration, single-core)",
+          "Native wireless communication",
+          "Sub-4 KB configuration page updates (32 KB minimum erase granularity)"
+        ]
+      },
+
+      "estimated_performance": {
+        "max_reflex_count": 8,
+        "observation_buffer_capacity_samples": 1024,
+        "observation_buffer_extended_samples": 2048,
+        "observation_buffer_extended_notes": "If external QSPI PSRAM is connected, up to 2048 samples in PSRAM. Driver development required.",
+        "max_serial_baud_rate_bps": 921600,
+        "max_wifi_throughput_mbps": 0,
+        "max_ble_connections": 0,
+        "adc_noise_floor_lsb": 3,
+        "reflex_evaluation_latency_us": 10,
+        "reflex_evaluation_latency_notes": "120 MHz + FPU. Same as SAMD51 (same core). Competitive with STM32F401 (84 MHz + FPU) despite same FPU due to higher clock."
+      },
+
+      "porting_effort": {
+        "person_days": 12,
+        "assumptions": "Experienced embedded developer familiar with Microchip SAMD/SAM family. Similar effort to SAMD51 with additional work for: (1) dual-bank OTA bootloader (2 days), (2) Ethernet MAC configuration (1 day, optional), (3) CAN-FD configuration (1 day, optional). Base port (same as SAMD51): ~8 days. Total: ~12 days.",
+        "difficulty": "medium",
+        "existing_hal_support": true,
+        "existing_hal_name": "Microchip ASF4 / Atmel START"
+      },
+
+      "known_issues_and_workarounds": [
+        {
+          "issue": "32 KB flash page size for configuration storage",
+          "severity": "low",
+          "workaround": "Implement wear-leveling within a single 32 KB page: use a circular buffer of config records within the page. Each config update appends a new record; page is erased only when full (~1000 config updates per page at 32 bytes per record). ATSAME54 flash endurance is 10K cycles, so this provides ~10 million config updates.",
+          "alternative": "Use EEPROM emulation (EEPROM service in ASF4) which handles page management automatically."
+        },
+        {
+          "issue": "No built-in wireless",
+          "severity": "medium",
+          "workaround": "Same as SAMD51: use external ATWINC1500 (SPI WiFi) or nRF52832 (UART BLE) module. Microchip ATWINC1500 integrates naturally with ASF4 ecosystem."
+        },
+        {
+          "issue": "Complex clock initialization",
+          "severity": "medium",
+          "workaround": "Same as SAMD51: use Atmel START or copy clock init from Adafruit board support package."
+        },
+        {
+          "issue": "ASF4 memory overhead",
+          "severity": "low",
+          "workaround": "Use ASF4 in 'header-only' mode (no service abstraction layer) or use bare-metal register access for peripheral drivers. This can reduce flash usage by ~20 KB."
+        }
+      ]
+    }
+  },
+
+  "peripheral_capability_requirements": {
+    "_comment": "Defines what the NEXUS firmware requires from each peripheral type and how it adapts to hardware capability differences.",
+
+    "gpio": {
+      "minimum_capability": "digital input and output",
+      "required_features": [
+        "Push-pull output mode",
+        "Input mode with pull-up or pull-down",
+        "Interrupt-on-change (at least 4 pins)",
+        "Configurable output drive strength (optional but preferred)"
+      ],
+      "optional_features": [
+        "Open-drain output mode (used for I2C bit-bang fallback)",
+        "Analog input mux (for ADC channel selection)",
+        "Inverted output mode (used for active-low reflex outputs)"
+      ],
+      "pwm": {
+        "required": false,
+        "preferred": true,
+        "hardware_channels_preferred": 4,
+        "software_fallback_available": true,
+        "software_fallback_details": "Software PWM uses timer interrupt to toggle GPIO at configured duty cycle. Supports up to 2 channels at ~100 Hz with 8-bit resolution. CPU overhead: ~2% at 48 MHz per channel. Resolution and frequency are inversely proportional. Not suitable for motor control (too much jitter) but acceptable for LED dimming and slow actuator control.",
+        "software_fallback_limitations": [
+          "Maximum 4 software PWM channels (practical limit due to CPU overhead)",
+          "Frequency limited to ~200 Hz for acceptable jitter",
+          "Resolution limited to 8-bit (256 levels)",
+          "Cannot operate during deep sleep",
+          "Jitter increases under heavy interrupt load"
+        ]
+      },
+      "adaptation_notes": "The firmware queries GPIO capability at startup via the HAL. If hardware PWM channels are available, they are used for reflex actuator outputs. If not, software PWM fallback is activated with reduced capabilities. The reflex module manifest declares whether it requires hardware PWM (minimum_hardware_pwm_channels field)."
+    },
+
+    "adc": {
+      "minimum_resolution_bits": 10,
+      "preferred_resolution_bits": 12,
+      "maximum_usable_resolution_bits": 16,
+      "required_features": [
+        "Sample-and-hold for multiplexed channels",
+        "Single-ended input mode",
+        "Reference voltage selection (at least internal and VDD)",
+        "Conversion complete interrupt or DMA support",
+        "Minimum sampling rate: 1 kSps per active channel"
+      ],
+      "preferred_features": [
+        "12-bit resolution (4096 discrete values)",
+        "Differential input mode",
+        "Programmable gain amplifier (PGA)",
+        "DMA-capable transfers for background sampling",
+        "Multiple ADC instances for parallel sampling",
+        "Hardware averaging or oversampling",
+        "Per-channel sampling time configuration"
+      ],
+      "sample_and_hold_required": true,
+      "sample_and_hold_rationale": "On MCUs with a single SAR ADC multiplexed across multiple channels, the ADC input capacitance must be charged to the input voltage before conversion. Without sample-and-hold (or configurable acquisition time), switching between channels with different source impedances can cause crosstalk. The firmware configures acquisition time based on source impedance declared in the sensor manifest.",
+      "adaptation_notes": "The firmware adapts ADC usage based on available resolution. At 10-bit, sensor threshold values in reflex modules are automatically scaled. At 12-bit or higher, full precision is used. The ADC HAL layer abstracts resolution differences; reflex modules work with normalized 0.0-1.0 floating-point values internally.",
+      "calibration": {
+        "required": false,
+        "preferred": true,
+        "notes": "Per-unit ADC calibration (stored in eFuse or calibration EEPROM) significantly improves absolute accuracy. The firmware supports calibration coefficients in the sensor configuration: offset and gain corrections applied in software."
+      }
+    },
+
+    "uart": {
+      "minimum_baud_rate": 115200,
+      "preferred_baud_rate": 921600,
+      "maximum_baud_rate": 3000000,
+      "required_features": [
+        "TX and RX",
+        "8 data bits, no parity, 1 stop bit (8N1 default, configurable)",
+        "Receive data available interrupt",
+        "Transmit data register empty interrupt",
+        "Minimum 16-byte hardware FIFO (software ring buffer used for deeper buffering)"
+      ],
+      "preferred_features": [
+        "Hardware flow control (CTS/RTS)",
+        "128-byte or larger hardware FIFO",
+        "DMA support for TX and RX",
+        "Baud rate auto-detection (for initial connection)",
+        "LIN break detection (for future protocol extensions)",
+        "Multi-instance (2+ UARTs for separate NEXUSLink and debug channels)"
+      ],
+      "flow_control": {
+        "hardware_preferred": true,
+        "hardware_details": "CTS (Clear To Send) input and RTS (Request To Send) output. Hardware flow control prevents buffer overflow at high baud rates without CPU intervention. Recommended for baud rates >= 921600.",
+        "software_fallback_available": true,
+        "software_details": "XON/XOFF software flow control: receiver sends XOFF (0x13) when software buffer exceeds 75% capacity, XON (0x11) when below 25%. CPU must process bytes fast enough to detect XOFF/XON. Not reliable at baud rates > 460800 without DMA.",
+        "software_fallback_limitations": [
+          "XON/XOFF bytes consume bandwidth (~1% at 115200 baud for aggressive flow control)",
+          "Requires byte-level processing in receive ISR (cannot use DMA word-level transfers)",
+          "Race condition possible: if XOFF is sent but already-in-flight bytes arrive before sender processes XOFF, buffer may overflow",
+          "Not suitable for binary protocols that use 0x11/0x13 as data bytes (firmware uses byte-stuffing to escape these)"
+        ]
+      },
+      "adaptation_notes": "At startup, the firmware probes the UART at 115200 baud with a synchronization sequence. If the host responds at a higher baud rate (indicated in the sync response), the firmware reconfigures to the higher rate. This auto-baud negotiation allows a single firmware image to work at any supported baud rate."
+    },
+
+    "i2c": {
+      "minimum_speed_khz": 100,
+      "preferred_speed_khz": 400,
+      "maximum_speed_khz": 3400,
+      "required_features": [
+        "Master mode",
+        "7-bit addressing",
+        "Clock stretching support (slave may hold SCL low)",
+        "Start and stop condition generation",
+        "Repeated start (Sr) for combined read/write without stop",
+        " arbitration lost detection (for multi-master, even if not required)",
+        "NACK detection (for slave error handling)"
+      ],
+      "preferred_features": [
+        "400 kHz fast mode (or higher)",
+        "10-bit addressing support (optional, for sensors that require it)",
+        "DMA support for non-blocking transfers",
+        "Timeout detection (bus hang prevention)",
+        "SMBus alert support (for some power management sensors)",
+        "Multi-master arbitration"
+      ],
+      "clock_stretching": {
+        "required": true,
+        "rationale": "Many I2C sensors (especially MEMS devices like IMUs, barometers) use clock stretching during internal ADC conversion. Without clock stretching support, reads from these sensors will fail with NACK. The firmware must configure the I2C peripheral's clock stretch timeout to at least 10 ms.",
+        "timeout_ms": 10,
+        "timeout_handling": "If clock stretch timeout expires, the firmware logs a warning, resets the I2C bus (9 clock pulses with SDA high), and retries the transaction up to 3 times before declaring the sensor offline."
+      },
+      "adaptation_notes": "The firmware starts I2C at 100 kHz and probes all declared sensors. If all sensors respond within timeout at 100 kHz, the firmware attempts to increase to 400 kHz. If any sensor NACKs at 400 kHz, the bus speed is reverted to 100 kHz. This automatic speed negotiation ensures compatibility with both fast and slow I2C sensors on the same bus."
+    },
+
+    "timer": {
+      "minimum_count": 1,
+      "preferred_count": 2,
+      "required_features": [
+        "16-bit counter minimum (32-bit preferred)",
+        "Periodic interrupt mode (auto-reload on match)",
+        "Interrupt on compare/match",
+        "Configurable prescaler (to achieve 1 kHz tick from any clock source)"
+      ],
+      "preferred_features": [
+        "32-bit counter (eliminates overflow handling for tick generation)",
+        "Input capture mode (for measuring external pulse widths)",
+        "Output compare mode (for PWM generation fallback)",
+        "Multiple compare channels (for multiple periodic events from one timer)",
+        "One-shot mode (for single-trigger timeout)"
+      ],
+      "tick_generation": {
+        "target_frequency_hz": 1000,
+        "rationale": "1 kHz system tick provides 1 ms time resolution for reflex scheduling, observation buffer timestamps, and heartbeat monitoring. This is the minimum; higher tick rates (up to 10 kHz) can be configured for faster reflex response at the cost of increased interrupt overhead.",
+        "maximum_tick_rate_hz": 10000,
+        "overhead_per_tick_percent_at_48mhz": 0.5,
+        "notes": "Tick ISR must complete in under 50 us. At 48 MHz, this allows ~2400 instruction cycles per tick. The reference implementation tick ISR uses ~200 cycles (0.4%)."
+      },
+      "adaptation_notes": "The firmware requires one timer for the system tick. If only one timer is available, it is used exclusively for tick generation and all other timing functions (delays, timeouts, PWM) are implemented in software using tick counts. If two timers are available, the second timer is used for high-resolution timing (reflex input capture, sensor sampling scheduling) with a separate interrupt."
+    },
+
+    "spi": {
+      "required": false,
+      "rationale": "SPI is used only for specific sensor drivers (e.g., IMU chips like ICM-20948, display controllers like SSD1306, flash memory like W25Qxx). If SPI is not available, these specific sensors cannot be used but the core NEXUS functionality is unaffected.",
+      "minimum_speed_mhz": 1,
+      "preferred_speed_mhz": 10,
+      "maximum_speed_mhz": 80,
+      "required_features": [
+        "Master mode",
+        "Mode 0 (CPOL=0, CPHA=0) support",
+        "Chip select management (hardware CS preferred, software GPIO CS fallback)"
+      ],
+      "preferred_features": [
+        "All four SPI modes (0, 1, 2, 3)",
+        "DMA support for TX and RX",
+        "Configurable bit order (MSB-first and LSB-first)",
+        "Quad SPI (QSPI) for high-speed flash memory access",
+        "Multiple chip select lines"
+      ],
+      "software_fallback_available": true,
+      "software_fallback_details": "Software SPI (bit-banging) on GPIO pins. Supports Mode 0 and Mode 3. Speed limited to approximately 500 kHz at 48 MHz (100 CPU cycles per byte). Sufficient for low-speed sensors but not for flash memory programming or high-speed displays.",
+      "adaptation_notes": "SPI peripheral availability is queried at startup. Sensor drivers declare their transport requirements (I2C or SPI). If a sensor requires SPI and no SPI peripheral is available, the sensor driver reports an error and the sensor is marked offline. Software SPI is attempted as a fallback before declaring failure."
+    }
+  },
+
+  "rtos_requirements": {
+    "_comment": "NEXUS firmware is designed to run with or without an RTOS. The reference implementation uses FreeRTOS, but the architecture supports bare-metal operation.",
+
+    "minimum": {
+      "mode": "bare-metal with timer interrupt",
+      "description": "Single-task cooperative multitasking model. The main loop calls nexus_tick() on each timer interrupt (1 kHz), which processes reflex evaluation, serial I/O, and sensor sampling in a round-robin fashion. No preemption, no context switching.",
+      "requirements": [
+        "One hardware timer configured for periodic interrupt at 1 kHz",
+        "Interrupt service routine that sets a tick flag",
+        "Main super-loop: while(1) { if(tick_flag) { nexus_tick(); tick_flag = 0; } }",
+        "Global interrupt enable/disable for critical sections (basepri on ARM, mstatus.IE on RISC-V, interrupt_level on Xtensa)"
+      ],
+      "limitations": [
+        "No parallel task execution: reflex evaluation blocks serial I/O and vice versa",
+        "Higher worst-case reflex evaluation latency (up to 2x vs. RTOS with preemption)",
+        "No priority-based scheduling: urgent reflexes may be delayed by lower-priority work",
+        "Observation buffer writes may be delayed during long reflex evaluations",
+        "Not suitable for wireless operation (WiFi/BLE stacks require preemptive multitasking)"
+      ],
+      "supported_tiers": [0],
+      "recommended_for": "Tier 0 nodes without wireless, minimal reflex count"
+    },
+
+    "recommended": {
+      "mode": "FreeRTOS",
+      "description": "FreeRTOS is the reference RTOS for NEXUS firmware. It provides preemptive multitasking, inter-task communication, and timer services that the firmware architecture is designed around.",
+      "version": "FreeRTOS 10.5.1+ (LTS release preferred)",
+      "configuration": {
+        "configUSE_PREEMPTION": 1,
+        "configUSE_TIME_SLICING": 0,
+        "configTICK_RATE_HZ": 1000,
+        "configMAX_PRIORITIES": 7,
+        "configMINIMAL_STACK_SIZE": 256,
+        "configTOTAL_HEAP_SIZE": "calculated per MCU (see tier memory specs)",
+        "configUSE_MUTEXES": 1,
+        "configUSE_COUNTING_SEMAPHORES": 1,
+        "configUSE_QUEUE_SETS": 0,
+        "configUSE_TIMERS": 1,
+        "configUSE_IDLE_HOOK": 1,
+        "configUSE_TICK_HOOK": 0,
+        "configSUPPORT_STATIC_ALLOCATION": 1,
+        "configSUPPORT_DYNAMIC_ALLOCATION": 1,
+        "configAPPLICATION_ALLOCATED_HEAP": 0
+      },
+      "tasks": {
+        "nexus_tick_task": {
+          "priority": 5,
+          "stack_words": 512,
+          "periodicity": "1 ms (driven by FreeRTOS tick)",
+          "responsibility": "System tick processing, reflex scheduler, observation buffer management"
+        },
+        "nexus_serial_task": {
+          "priority": 3,
+          "stack_words": 768,
+          "periodicity": "event-driven (woken by UART RX interrupt)",
+          "responsibility": "NEXUSLink serial protocol parsing and response generation"
+        },
+        "nexus_sensor_task": {
+          "priority": 4,
+          "stack_words": 512,
+          "periodicity": "configurable (default 10 ms)",
+          "responsibility": "Sensor sampling, ADC reads, I2C/SPI sensor communication"
+        },
+        "nexus_wireless_task": {
+          "priority": 2,
+          "stack_words": 2048,
+          "periodicity": "event-driven (woken by WiFi/BLE events)",
+          "responsibility": "NEXUSLink-Wireless and NEXUSLink-BLE protocol handling",
+          "notes": "Only created if wireless is available. Stack size is large due to WiFi/BLE stack requirements."
+        }
+      },
+      "inter_task_communication": {
+        "queues": [
+          "serial_rx_queue (128 bytes, UART RX to serial task)",
+          "serial_tx_queue (256 bytes, serial task to UART TX)",
+          "sensor_data_queue (16 entries of 32 bytes, sensor task to tick task)",
+          "reflex_event_queue (32 entries of 8 bytes, GPIO ISR to tick task)"
+        ],
+        "mutexes": [
+          "observation_buffer_mutex (protects ring buffer access)",
+          "i2c_bus_mutex (serializes I2C bus access)",
+          "spi_bus_mutex (serializes SPI bus access)",
+          "reflex_state_mutex (protects reflex configuration access)"
+        ],
+        "semaphores": [
+          "uart_tx_complete_sem (signals UART DMA TX completion)",
+          "adc_conversion_sem (signals ADC DMA chain completion)"
+        ]
+      },
+      "supported_tiers": [0, 1, 2],
+      "notes": "FreeRTOS is the only RTOS that is tested in CI and has guaranteed compatibility. Other RTOS options are supported but require additional porting."
+    },
+
+    "alternatives": {
+      "zephyr": {
+        "compatibility": "supported",
+        "version": "Zephyr 3.4+",
+        "porting_effort_days": 5,
+        "notes": "Zephyr provides a rich HAL and device tree abstraction. Porting NEXUS to Zephyr requires: (1) mapping FreeRTOS tasks to Zephyr threads, (2) replacing FreeRTOS queues with Zephyr message queues, (3) replacing FreeRTOS timers with Zephyr kernel timers, (4) adapting the HAL layer to use Zephyr driver APIs. Zephyr is the recommended RTOS for STM32H7, nRF52840, and ATSAME54 ports.",
+        "advantages": ["Excellent STM32 and Nordic HAL support", "Device tree for hardware description", "Built-in Bluetooth stack for nRF5", "Active community and vendor support"],
+        "disadvantages": ["Larger code size than bare-metal FreeRTOS", "Steeper learning curve", "Kconfig build system adds complexity"]
+      },
+      "riot_os": {
+        "compatibility": "experimental",
+        "version": "RIOT 2023.10+",
+        "porting_effort_days": 10,
+        "notes": "RIOT-OS is designed for IoT and provides a thin abstraction over MCU hardware. Porting effort is higher due to less similarity to FreeRTOS APIs. Best suited for ultra-low-power NEXUS nodes.",
+        "advantages": ["Very low memory overhead", "Excellent power management", "Good support for diverse MCU architectures"],
+        "disadvantages": ["Smaller community than Zephyr/FreeRTOS", "Less mature BLE stack", "Different threading model requires architecture rethinking"]
+      },
+      "nuttx": {
+        "compatibility": "experimental",
+        "version": "NuttX 12.0+",
+        "porting_effort_days": 12,
+        "notes": "NuttX provides POSIX-like APIs and is used in several commercial products. Porting effort is moderate but NuttX's file-system-centric architecture is a mismatch for NEXUS's in-memory processing model.",
+        "advantages": ["POSIX API familiarity", "Used in commercial products (Sony Spresense, Samsung IoT)", "Good USB and networking stacks"],
+        "disadvantages": ["File-system-centric design is overkill for NEXUS", "Larger code footprint", "Less MCU diversity than Zephyr"]
+      }
+    },
+
+    "mandatory_rtos_behavior": {
+      "required_capabilities": [
+        "Preemptive task scheduling (minimum 2 tasks: tick and serial)",
+        "Queue or message passing (minimum 1 queue: serial RX)",
+        "Binary semaphore or event flag (for ISR-to-task signaling)",
+        "Timer callback service (for periodic reflex evaluation)",
+        "Critical section primitive (disable interrupts or raise base priority)"
+      ],
+      "prohibited_behaviors": [
+        "Dynamic memory allocation (malloc/free/new/delete) in interrupt context (ISR or timer callback). All ISR-to-task communication must use pre-allocated queues or semaphores. This is a hard requirement to prevent heap fragmentation and stack overflow from ISR context.",
+        "Blocking calls (queue receive with infinite timeout, semaphore wait with infinite timeout) in ISR context. ISRs must use 'fromISR' variants that return immediately.",
+        "Recursive mutex locking from ISR. ISRs must never attempt to lock a mutex that may already be held by the preempted task (deadlock risk).",
+        "Floating-point operations in ISR context on MCUs with lazy FPU context switching (Cortex-M4F, Cortex-M7). The FPU may not be enabled in ISR context, causing a hard fault. ISR code must use integer-only operations.",
+        "Calling printf() or any stdio function in ISR context. Logging from ISR must use a dedicated lock-free ring buffer written in the ISR and drained in a low-priority task."
+      ]
+    }
+  },
+
+  "compiler_requirements": {
+    "_comment": "Compiler and build tool requirements for NEXUS firmware.",
+
+    "language_standard": {
+      "minimum": "C99 (ISO/IEC 9899:1999)",
+      "preferred": "C11 (ISO/IEC 9899:2011)",
+      "required_features": [
+        "Designated initializers (C99)",
+        "Inline functions (C99)",
+        "Variable-length arrays are NOT used (disabled with -Wvla)",
+        "Compound literals (C99) used in some HAL macros",
+        "_Static_assert (C11, preferred for compile-time assertions)",
+        "_Alignof/_Alignas (C11, used for DMA buffer alignment)",
+        "Anonymous structs/unions (C11, used in protocol parsing)"
+      ],
+      "prohibited_features": [
+        "C++ (the firmware is pure C; no .cpp files, no extern \"C\" wrapping needed)",
+        "C++ exceptions (not supported and not needed)",
+        "C++ RTTI (dynamic_cast, typeid) - not used",
+        "C++ templates - not used",
+        "Objective-C - not used",
+        "GNU extensions beyond those explicitly listed below are discouraged but tolerated"
+      ]
+    },
+
+    "compiler": {
+      "required": "GCC (GNU Compiler Collection)",
+      "minimum_version": "GCC 8.3.0",
+      "preferred_version": "GCC 12.2.0 or later",
+      "clang_compatibility": "Clang 14+ is compatible with the firmware source but NOT tested in CI. Clang users must ensure: (1) -fno-exceptions -fno-rtti are set, (2) GCC inline assembly is translated to clang-compatible syntax, (3) __attribute__((section())) directives are compatible.",
+      "vendor_toolchains": {
+        "xtensa-esp32-elf-gcc": "Espressif GCC fork for Xtensa LX6/LX7. Required for ESP32/S2/S3. Based on GCC 8.4 or 12.2 depending on ESP-IDF version.",
+        "xtensa-esp32s2-elf-gcc": "Espressif GCC fork for ESP32-S2.",
+        "xtensa-esp32s3-elf-gcc": "Espressif GCC fork for ESP32-S3.",
+        "riscv32-esp-elf-gcc": "Espressif GCC fork for RISC-V ESP32-C3/C6. Based on GCC 12.2.",
+        "riscv-none-embed-gcc": "RISC-V GCC for CH32V307 and other generic RISC-V MCUs.",
+        "arm-none-eabi-gcc": "Official GCC ARM Embedded toolchain for STM32, RP2040, nRF52, SAMD51, ATSAME54."
+      }
+    },
+
+    "required_compiler_flags": [
+      {
+        "flag": "-Os",
+        "rationale": "Optimize for size. NEXUS firmware targets flash-constrained MCUs. -Os provides good performance (often better than -O2 for cache-miss-heavy code) while minimizing code size. Required for all builds."
+      },
+      {
+        "flag": "-ffunction-sections",
+        "rationale": "Place each function in its own ELF section. Combined with -fdata-sections and linker --gc-sections, this allows the linker to remove unused functions, reducing flash usage by 10-30%."
+      },
+      {
+        "flag": "-fdata-sections",
+        "rationale": "Place each global/static variable in its own ELF section. Same rationale as -ffunction-sections."
+      },
+      {
+        "flag": "-fno-common",
+        "rationale": "Prevent tentative definitions. Each global variable must have exactly one definition. Catches duplicate symbol bugs at link time instead of silently merging them."
+      },
+      {
+        "flag": "-ffreestanding",
+        "rationale": "Firmware is freestanding (no hosted environment, no libc startup). Required for embedded targets."
+      },
+      {
+        "flag": "-fno-builtin",
+        "rationale": "Do not assume standard library functions exist. The firmware provides its own implementations of memcpy, memset, etc., optimized for the target architecture."
+      },
+      {
+        "flag": "-Wall -Wextra -Werror",
+        "rationale": "Strict warning policy. All warnings are errors. This catches bugs early. Firmware must compile with zero warnings."
+      },
+      {
+        "flag": "-Wno-unused-parameter",
+        "rationale": "Suppress unused parameter warnings. Some HAL callback signatures require parameters that may not be used in all implementations. Alternative: cast to (void)param."
+      },
+      {
+        "flag": "-Wstack-usage=1024",
+        "rationale": "Warn if any function uses more than 1024 bytes of stack. Helps prevent stack overflow on SRAM-constrained MCUs."
+      }
+    ],
+
+    "linker_flags": [
+      {
+        "flag": "-Wl,--gc-sections",
+        "rationale": "Garbage-collect unused sections. Removes unreferenced functions and data from the final binary. Requires -ffunction-sections and -fdata-sections."
+      },
+      {
+        "flag": "-Wl,--print-memory-usage",
+        "rationale": "Print flash and SRAM usage summary after linking. Used in CI to track binary size regression."
+      },
+      {
+        "flag": "-Wl,-Map=nexus.map",
+        "rationale": "Generate linker map file for symbol analysis and debugging."
+      },
+      {
+        "flag": "-T ${LINKER_SCRIPT}",
+        "rationale": "Use MCU-specific linker script that defines memory regions (FLASH, SRAM, PSRAM) and section placement."
+      }
+    ],
+
+    "floating_point": {
+      "minimum": "soft-float",
+      "preferred": "hardware-fpu",
+      "details": {
+        "soft_float": {
+          "flag": "-mfloat-abi=soft (ARM) or -mabi=ilp32 (RISC-V without FPU)",
+          "description": "All floating-point operations are emulated in software. Slower but works on any MCU.",
+          "performance_impact": "3-5x slower than hardware FPU for floating-point intensive code",
+          "code_size_impact": "Adds ~4-8 KB of soft-float library code (division, square root, transcendental functions)",
+          "required_for": "MCUs without FPU: RP2040 (Cortex-M0+), ESP32-C3/C6 (RISC-V), CH32V307 (RISC-V)"
+        },
+        "hardware_fpu": {
+          "flag_arm": "-mfloat-abi=hard -mfpu=fpv4-sp-d16 (Cortex-M4F) or -mfpu=fpv5-d16 (Cortex-M7)",
+          "flag_xtensa": "FPU is always enabled on ESP32/S2/S3 (LX6/LX7 have integrated FPU)",
+          "description": "Hardware floating-point unit accelerates FP operations. Required for Tier 2 timing guarantees on complex reflexes.",
+          "performance_impact": "Single-precision FP multiply: 1 cycle (vs. ~30 cycles soft-float). Square root: 14 cycles (vs. ~100 cycles soft-float).",
+          "context_switch_overhead": "32 FPU registers must be saved/restored on task switch: adds ~128 bytes to stack and ~30 cycles to context switch time."
+        }
+      },
+      "recommendation": "Use hardware FPU whenever available. For MCUs without FPU, ensure reflex modules use the fixed-point math library (nexus_fixedpoint.h) for performance-critical calculations."
+    },
+
+    "debug_and_analysis_tools": {
+      "required": [
+        "objdump (disassembly and symbol inspection)",
+        "size (section size reporting: text, data, bss)",
+        "nm (symbol table listing)",
+        "readelf (ELF header and section analysis)"
+      ],
+      "recommended": [
+        "addr2line (convert addresses to source file:line for crash analysis)",
+        "c++filt (demangle symbols, useful even for C with some GCC internals)",
+        "gcov / lcov (code coverage analysis for unit tests)",
+        "valgrind (for host-based unit testing of firmware logic)",
+        "gdb with target remote (for on-device debugging)"
+      ],
+      "static_analysis": [
+        "cppcheck (static analysis, runs in CI)",
+        "clang-tidy (additional static analysis, optional in CI)",
+        "include-what-you-use (header dependency cleanup, optional)"
+      ]
+    }
+  },
+
+  "appendix": {
+    "tier_selection_guide": "Choose the lowest tier that meets your requirements. Tier 0 is for simple threshold-based sensor nodes. Tier 1 is for autonomous sensor-actuator nodes with full NEXUSLink command set. Tier 2 is for wireless mesh nodes with maximum reflex capacity and extended observation buffering.",
+
+    "porting_checklist": [
+      "1. Verify MCU meets minimum clock, SRAM, and flash requirements for target tier",
+      "2. Set up toolchain and SDK (GCC + vendor SDK or Zephyr)",
+      "3. Create linker script defining FLASH, SRAM, and (if applicable) PSRAM regions",
+      "4. Implement HAL layer: timer_tick, uart_init/tx/rx, gpio_set/get, adc_read, i2c_write/read, spi_write_read, pwm_set",
+      "5. Configure RTOS (FreeRTOS or alternative) with task priorities and stack sizes",
+      "6. Adapt memory allocation: static allocation for ISR buffers, dynamic allocation for reflex modules and observation buffer",
+      "7. Verify floating-point capability and select hard-float or soft-float compiler flags",
+      "8. Run unit tests (host-based, no hardware required) to verify core logic",
+      "9. Flash to hardware and run integration tests: tick accuracy, serial protocol, reflex evaluation timing",
+      "10. Measure worst-case reflex evaluation latency with oscilloscope or GPIO toggle",
+      "11. Verify no dynamic memory allocation in ISR context (use -Wframe-larger-than or runtime assertions)",
+      "12. Run 24-hour soak test to verify stability under continuous operation"
+    ],
+
+    "testing_matrix": {
+      "unit_tests": {
+        "host_based": true,
+        "framework": "Unity test framework (ThrowTheSwitch/Unity)",
+        "coverage_target_percent": 80,
+        "runs_on": "any host with GCC (Linux, macOS, Windows WSL)"
+      },
+      "integration_tests": {
+        "hardware_required": true,
+        "platforms": ["ESP32-S3 (reference)", "STM32F411 (secondary)"],
+        "tests": ["serial_protocol", "reflex_evaluation", "observation_buffer", "sensor_sampling", "ota_update", "power_management"]
+      },
+      "ci_cd": {
+        "host_tests": "every commit",
+        "hardware_tests": "every pull request (ESP32-S3) and nightly (all platforms)",
+        "binary_size_regression_threshold_percent": 5
+      }
+    }
+  }
+}

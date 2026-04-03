@@ -1,0 +1,1140 @@
+================================================================================
+  OPEN-SOURCE MARINE AUTOPILOT ANALYSIS
+  Comprehensive Technical Design Study
+  Prepared: 2025
+  Purpose:  Inform ESP32 Autopilot Architecture Decisions
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+  1. pypilot Architecture Analysis
+  2. Nautinect ESP32 Autopilot Analysis
+  3. ESP32 WiFi Autopilot (jeff-burright) Analysis
+  4. OpenCPN Autopilot Integration (APB/NMEA 0183)
+  5. Key Design Lessons for Our ESP32 Autopilot
+  6. Comparison Table
+
+
+================================================================================
+1. PYPILOT ARCHITECTURE ANALYSIS
+================================================================================
+  Project:     pypilot (github.com/pypilot/pypilot)
+  Author:      Sean D'Epagnier
+  License:     GPLv3
+  Stars:       ~2500+
+  Status:      Mature, actively maintained (last updated 2024)
+  Language:    Python (core) + C++ (performance-critical) + Arduino C (servo)
+
+1.1 ARCHITECTURE OVERVIEW - SERVER/SERVO SEPARATION
+---------------------------------------------------
+
+  pypilot separates concerns into two distinct computing environments:
+
+  +-------------------+     UART 38400 baud     +--------------------+
+  |  PILOT SERVER     |  <-- 4-wire (3v3,tx,  |  SERVO CONTROLLER  |
+  |  (RPi / tinypilot)|      rx, gnd)          |  (Arduino-based)   |
+  |                   |                         |                    |
+  | - 9-DOF IMU       |  Binary protocol w/CRC8 | - H-bridge driver  |
+  | - Sensor fusion   |                         | - Current sensing  |
+  | - PID computation |                         | - Rudder feedback  |
+  | - NMEA I/O        |                         | - Clutch output    |
+  | - Wind/GPS modes  |                         | - Temp monitoring  |
+  | - Calibration     |                         | - Stall detection  |
+  | - UI (web/LCD)    |                         | - EEPROM settings  |
+  +-------------------+                         +--------------------+
+
+  WHY THIS MATTERS:
+  - The server handles ALL computation (PID, sensor fusion, NMEA parsing)
+  - The servo is a "dumb" motor controller that receives simple commands
+  - Command range: -1.0 to +1.0 (representing full port to full starboard)
+  - Servo sends back telemetry: current (amps), voltage, temperature,
+    rudder position, flags (faults, engaged status)
+  - The separation means motor EMI stays away from sensitive IMU sensors
+  - Critical safety: servo failsafe is HARDWARE (disconnect = motor stops)
+
+1.2 TINYPILOT: WHAT RUNS WHERE
+-------------------------------
+
+  tinypilot (Linux, runs from RAM on RPi Zero):
+    - boatimu process:      RTIMU-based sensor fusion (100Hz IMU sampling)
+    - autopilot process:    Main control loop, PID, mode management
+    - sensors process:      NMEA 0183 parsing, GPS, wind sensor input
+    - server process:       TCP server on port 23322 for pypilot clients
+    - nmea_bridge process:  TCP server on port 20220 for NMEA data relay
+    - hat process:          GPIO controls, IR receiver, LCD keypad
+    - web process:          Flask-based web UI (delayed boot)
+    - signalk process:      SignalK integration (optional)
+
+  Motor Controller (Arduino, custom firmware):
+    - Receives command packets (4 bytes with CRC8)
+    - Drives H-bridge (PWM)
+    - Reads current sensor (ADC)
+    - Reads rudder feedback pot (ADC)
+    - Monitors temperature (onboard + optional external NTC)
+    - Manages clutch engagement (initial pulse then PWM hold)
+    - Stores calibration in EEPROM
+    - Reports flags: SYNC, OVERTEMP, OVERCURRENT, ENGAGED, PIN_FAULT, etc.
+
+  Communication Protocol (Server -> Servo):
+    - Baud: 38400
+    - Packet format: [command_byte][value_low][value_high][crc8]
+    - Commands include: COMMAND (motor position), MAX_CURRENT, 
+      MAX_CONTROLLER_TEMP, MAX_MOTOR_TEMP, RUDDER_RANGE, DISENGAGE,
+      MAX_SLEW_SPEED, EEPROM read/write, CLUTCH_PWM, RESET
+    - Command value range: 0-2000 mapped to -1.0..+1.0 motor command
+
+  Communication Protocol (Servo -> Server):
+    - Same 4-byte packet format
+    - Telemetry: CURRENT, VOLTAGE, CONTROLLER_TEMP, MOTOR_TEMP,
+      RUDDER_SENSE, FLAGS, EEPROM_VALUE
+    - Rudder range: 0-65535 mapped to -0.5..+0.5 (-30 to +30 degrees typical)
+    - CRC8 polynomial with lookup table for integrity
+
+1.3 PID IMPLEMENTATION DETAILS
+-------------------------------
+
+  pypilot uses an ENHANCED PID with 6 gains (not the standard 3):
+
+    Gain   | Name              | Default | Range     | Description
+    -------|-------------------|---------|-----------|--------------------------------
+    P      | Proportional      | 0.003   | 0-0.03    | Linear heading error response
+    I      | Integral          | 0       | 0-0.05    | Accumulated error (rarely used)
+    D      | Derivative        | 0.09    | 0-0.24    | Rate of turn (GYRO - primary gain)
+    DD     | Derivative'       | 0.075   | 0-0.24    | Rate of rate of turn (improves
+           |                   |         |           |  reaction time)
+    PR     | Proportional Root | 0.005   | 0-0.02    | sqrt(|heading_error|)*sign,
+           |                   |         |           |  reduces overshoot (fractional
+           |                   |         |           |  derivative mimic)
+    FF     | Feed Forward      | 0.6     | 0-2.4     | Change in heading command,
+           |                   |         |           |  only active during course changes
+
+  Formula: command = P*e + I*∫e + D*ḣ + DD*ḧ + PR*√|e|*sign(e) + FF*Δheading_cmd
+
+  Key Implementation Details:
+  - Heading error is CLAMPED to ±60 degrees (prevents integrator windup)
+  - Integral error is CLAMPED to ±5 degrees with accumulation rate /1500
+  - P gain units: 0.003 = 0.3% max motor speed per degree of error
+  - D gain units: 0.06 = 6% max motor speed per degree/second yaw rate
+  - All gains are POSITIVE only (direction is implicit in the error sign)
+  - Heading rate uses LOW-PASS FILTERED gyro data
+  - Heading rate-of-rate uses LOW-PASS FILTERED rate data
+  - Gain scheduling via PROFILES: different gain sets for upwind/downwind/
+    light air/strong wind conditions
+  - Auto-gain search tool exists but is experimental
+
+  Servo Command Processing:
+  - Servo.period (default 0.4s): minimum move/rest time
+  - Servo.speed.min: minimum motor speed (avoid inefficient low-speed)
+  - Servo.speed.max: maximum motor speed (limit for light conditions)
+  - Servo.max_slew_speed: acceleration limit (default 28)
+  - Servo.max_slew_slow: deceleration limit (default 34)
+  - Servo.use_brake: short motor windings when holding (for weather helm)
+  - Command ignored if manual override occurred within 0.8 seconds
+
+  Autogain Tool:
+  - Systematic search through gain parameter space
+  - Measures average |heading_error| and servo.watts for each combination
+  - Settle period of 20s, measurement period of 120s
+  - Searches D gain primarily (0.07-0.12 in 0.001 steps)
+  - Provides multidimensional result tables for optimization
+
+1.4 NMEA 0183 INPUT/OUTPUT
+---------------------------
+
+  Input Sentences Parsed:
+    - RMC: GPS position, speed, track, magnetic variation
+    - MWV: Wind speed and angle (apparent/true, knots/m/s/km/h)
+    - VWR: Apparent wind (legacy alternative)
+    - VWT: True wind (legacy alternative)
+    - VHW: Water speed
+    - LWY: Leeway angle
+    - APB: Autopilot bearing for route following
+    - RSA: Rudder angle
+
+  Output Sentences Generated:
+    - HDM: Magnetic heading
+    - ROT: Rate of turn
+    - RMC: High-speed GPS track (if GPS filter combines IMU+GPS)
+    - MWV: Calibrated wind data
+    - RSA: Rudder angle
+    - XDR: Pitch and roll
+    - VHW: Water speed (pass-through)
+
+  Connection Methods:
+    - USB serial (auto-detected at 4800 or 38400 baud)
+    - Hat NMEA port (isolated RS-422, configurable baud)
+    - WiFi TCP on port 20220
+    - NMEA client mode (pypilot connects outbound to a host)
+    - Relay: serial data not used internally is forwarded to WiFi clients
+
+  Source Priority System:
+    - Sources ranked: 'none' < 'serial' < 'tcp' < 'signalk' < 'gpsd'
+    - Higher priority source overrides lower; never downgrades
+    - GPS offset computed as running average: offset = (1-d)*old + d*new
+    - GPS offset weight: d = 0.005 * ln(gps_speed + 1), only above 1 knot
+    - Wind offset update factor (wfactor) is configurable
+
+  APB Parsing (critical for route following):
+    - Field 12: bearing to destination (degrees)
+    - Field 13: 'M' = magnetic, 'T' = true heading
+    - Field 2: cross-track error (nautical miles, max 0.15)
+    - Field 3: 'L' or 'R' for XTE direction
+    - Determines NAV mode availability
+
+1.5 OPENCPN INTEGRATION
+------------------------
+
+  pypilot OpenCPN Plugin (v0.51):
+  - Auto-detects pypilot on network via TCP port 23322
+  - Communicates using pypilot's native data format (key=value over TCP)
+  - Control: enable/disable, course adjustment, mode selection, tacking
+  - Gains visualization: animated bars showing each gain's contribution
+    - Red = starboard correction, Blue = port correction
+    - Saturated = gain too high or motor too slow
+  - Calibration visualization: compass plot, accelerometer plot, rudder
+  - Statistics: runtime, power consumption, temperatures, data sources
+  - Autopilot Route Plugin (separate, by same author):
+    - Improves route following over built-in OpenCPN algorithm
+    - Works with pypilot's NAV mode to steer routes more closely
+    - When following routes, APB sentences are sent to pypilot
+
+1.6 WIND MODE IMPLEMENTATION
+-----------------------------
+
+  Apparent Wind Mode:
+  - Maintains constant angle to apparent wind
+  - Computes heading = wind_compass_offset - compass_heading
+  - Wind compass offset is running average of (wind_direction + compass)
+  - Offset update weighted by wfactor (configurable)
+
+  True Wind Mode:
+  - Computes true wind from: apparent wind + boat speed (water or GPS)
+  - Formula: true_wind_direction = atan2(
+      wind_speed*sin(wind_angle) - boat_speed*sin(heading),
+      wind_speed*cos(wind_angle) - boat_speed*cos(heading))
+  - Preferred for downwind sailing (apparent wind shifts greatly with speed)
+
+  Wind Pilot (alternative, disabled by default):
+  - Dedicated pilot that does NOT require compass
+  - Adds WG (wind gust) gain: responds to changes in wind speed
+  - Follows wind shifts even in compass mode (maintains average course)
+  - Falls back to basic pilot if wind sensor data fails
+
+  Tack Detection (used in wind modes):
+  - TackSensorLog maintains rolling window of wind direction samples
+  - Computes running average of last 20 samples (at 4Hz)
+  - Determines port/starboard based on average vs threshold (±20 degrees)
+  - Also can use heel angle for tack direction (7-degree threshold)
+  - Tack angle adjustable: 10-180 degrees, default 100
+  - Tack rate: degrees/second of commanded turn, default 15
+  - Tack threshold: percentage of tack angle to complete, default 50%
+
+1.7 CALIBRATION PROCEDURES
+---------------------------
+
+  Accelerometer Calibration:
+  - Requires sensor REMOVAL from boat (6-face rotation)
+  - Factory pre-calibrated on most recent units (icm20948)
+  - Calibration attempts every 30 seconds if sufficient orientation change
+  - Must be on stable platform (impossible at anchor in chop)
+
+  Leveling/Alignment:
+  - Press "Level" ONLY when boat is level and still
+  - Progress bar averages sensor readings over several seconds
+  - Essential BEFORE compass calibration
+  - Pitch/roll should read near zero when properly leveled
+
+  Compass Calibration:
+  - 2D fix: sail/rotate 240+ degrees on flat water
+  - 3D fix: additionally heel/tack to get pitch/roll compass data
+  - Alternatively: unmount sensors, rotate with pitch/roll, remount
+  - Continuous calibration: always updates unless LOCKED
+  - Uses ellipsoid fitting with soft/hard iron correction
+  - Hall sensors preferred over magnetoresistive (more repeatable)
+  - WARNING: moving metal near sensors underway can cause uncontrolled jibes
+
+  Rudder Calibration:
+  - Manual sequence: turn to port limit → press "Port" → starboard limit →
+    press "Starboard" → center → press "Center"
+  - Computes scale, offset, and non-linearity from 3 reference points
+  - Rudder feedback range: configurable (default ±30°)
+  - Can constrain autopilot range separately from calibration range
+  - Uses angular hall sensor (MLX90316) - waterproof, no wear
+
+  Heading Offset:
+  - Corrects for sensor mounting orientation
+  - Affects pitch/roll readings too (90° off = reversed pitch/roll)
+
+1.8 WHAT PYPILOT DOES RIGHT (COPY THESE)
+-----------------------------------------
+
+  1. SERVER/SERVO SEPARATION
+     - Motor controller is isolated, simple, hardware-failsafe
+     - IMU and computation far from EMI sources
+     - Modular: can upgrade computer without changing motor controller
+
+  2. BINARY PROTOCOL WITH CRC
+     - Simple 4-byte packets with CRC8 integrity check
+     - Sync detection, invalid packet recovery
+     - Much more robust than text-based NMEA for real-time control
+
+  3. EXTENDED PID (6 GAINS)
+     - PR (proportional root) is genius: reduces overshoot without
+       sacrificing response time
+     - DD (rate of rate) gives faster reaction than D alone
+     - FF (feed forward) solves the "slow course changes with low P" problem
+     - I gain rarely needed - most users set to 0
+
+  4. REAL-TIME PROCESS PRIORITY
+     - Autopilot main loop gets Linux SCHED_FIFO realtime priority
+     - 100Hz IMU sampling ensures responsive control
+     - Separate processes with different priorities
+
+  5. PROFILES FOR DIFFERENT CONDITIONS
+     - Upwind, downwind, light air, rough weather profiles
+     - One-button switching between gain sets
+     - Profile stores gains AND servo parameters together
+
+  6. MULTIPLE CONTROL INTERFACES
+     - LCD+keypad, web browser, OpenCPN plugin, 433MHz remotes,
+       Python scripts, IR remotes
+     - All interfaces use the same data protocol
+     - No single point of failure for control
+
+  7. GRACEFUL SENSOR DEGRADATION
+     - Mode fallback chain: nav → gps → compass
+     - Wind mode → true wind → apparent wind → compass
+     - Never crashes if a sensor fails; degrades to next best mode
+
+  8. TINYPILOT LINUX FROM RAM
+     - Runs entirely from RAM after boot (no SD card wear)
+     - Power can be removed at any time without filesystem corruption
+     - 10-15 second boot to steering availability
+
+  9. COMPREHENSIVE MOTOR PROTECTION
+     - Overcurrent detection with configurable threshold
+     - Over-temperature protection (controller + motor)
+     - Stall detection (current-based)
+     - End-of-travel switches (optional)
+     - Clutch PWM reduction after engagement (power saving)
+     - Fuses and voltage protection on power input
+
+  10. Rudder feedback is OPTIONAL
+      - Autopilot works without it using integration
+      - Corrections 10x larger than integration errors
+      - When present, improves accuracy and enables position control
+
+1.9 WHAT PYPILOT DOES WRONG (AVOID THESE)
+-------------------------------------------
+
+  1. PYTHON AS MAIN LANGUAGE
+     - "Not the fastest or most efficient" - author admits this
+     - Requires multi-process architecture to compensate
+     - RPi Zero can struggle under load (WiFi + web + autopilot)
+     - Not suitable for real-time control without process priority tricks
+     - For ESP32, C/C++ is the right choice
+
+  2. SINGLE POINT OF FAILURE ON RPi
+     - If the Raspberry Pi hangs, autopilot fails
+     - No watchdog implementation (commented out in code)
+     - No secondary microcontroller watchdog
+     - SD card corruption IS possible despite "RAM-based" claims
+     - Boot time of 10-15 seconds is too long for safety-critical
+
+  3. NO REDUNDANCY IN COMPUTATION
+     - Single RPi does everything: sensors, PID, communication, UI
+     - No fallback computer or watchdog timer
+     - Motor controller has no independent heading capability
+
+  4. COMPLEX MULTI-PROCESS ARCHITECTURE
+     - 7+ separate processes communicating via pipes
+     - Difficult to debug
+     - Pipe deadlocks possible (SIGPIPE handling needed)
+     - Inter-process communication adds latency
+
+  5. CALIBRATION IS FRAGILE
+     - Compass calibration can be disrupted by moving metal
+     - No warning before uncontrolled maneuvers from calibration changes
+     - fix_compass_calibration_change() tries to compensate but adds
+       complexity and potential for bugs
+     - Accelerometer calibration requires sensor removal
+
+  6. WIRELESS CONTROL AS DEFAULT
+     - 433MHz remotes are great but not waterproof
+     - WiFi adds complexity and attack surface
+     - No hardware "kill switch" standard
+
+  7. GAIN TUNING IS COMPLEX
+     - 6 gains with non-obvious interactions
+     - No clear "start here" guide beyond basic P and D
+     - Autogain tool is experimental and time-consuming
+     - New users easily overwhelmed
+
+  8. NO MOTION PLANNING
+     - Simple proportional control only
+     - No look-ahead for wave patterns
+     - No adaptive gain scheduling (manual profiles only)
+     - No learning from past behavior
+
+
+================================================================================
+2. NAUTINECT ESP32 AUTOPILOT ANALYSIS
+================================================================================
+  Project:     pieteroskam/autopilot (nautinect.com)
+  Author:      Pieter Oskam
+  License:     CC BY-NC-SA 4.0 (non-commercial only!)
+  Stars:       ~60
+  Status:      Active, commercial hardware available
+  Language:    C++ (Arduino/ESP32)
+  Platform:    ESP32 + phone app (iOS/Android)
+
+2.1 ARCHITECTURE OVERVIEW
+--------------------------
+
+  +------------------+     BLE GATT      +------------------+
+  |  PHONE APP       |<------------------>|  ESP32           |
+  |  (iOS/Android)   |                    |                  |
+  |                  |                    |  - IMU (compass, |
+  |  - Compass       |  Service UUID:     |    gyro, accel)  |
+  |  - Gyro          |  ab0828b1...       |  - IBT-2 motor   |
+  |  - GPS           |                    |    controller    |
+  |  - Wind input    |  Char UUID:        |  - Rudder feedback|
+  |  - PID tuning    |  4ac8a682...       |  - NMEA input    |
+  |  - Display       |                    |  - NMEA2000       |
+  +------------------+                    |  - WiFi (opt.)   |
+                                           +------------------+
+
+  Two Operating Modes:
+  1) Standalone (compass only): ESP32 + IMU + motor driver
+  2) Phone-assisted: ESP32 + motor driver + phone sensors via BLE
+
+  Motor Controller: IBT-2 (40A max) or L298N (2A max)
+  Pins: GPIO 33 → motor right, GPIO 32 → motor left
+
+2.2 BLE COMMUNICATION DESIGN
+-----------------------------
+
+  Protocol:
+  - GATT service with single write characteristic
+  - Commands sent as text strings (e.g., "motor200", "3,0", "apOn1")
+  - OTA firmware updates via separate BLE service (512-byte MTU)
+  - On disconnect: motor stops immediately (hardware failsafe via callback)
+  - LED indicator: ON = connected, OFF = disconnected
+
+  Command API (unified across all channels):
+  - Simple CSV format: <CommandID>,<value>[,<value2>]
+  - 44 defined commands covering all autopilot functions
+  - Same command set works via Serial, WiFi UDP, NMEA 0183 ($APCMD prefix),
+    NMEA 2000 (PGN 743837), and BLE
+
+  OTA Update System:
+  - Separate BLE service for firmware delivery
+  - MTU negotiation to 500 bytes for faster transfer
+  - Size validation against partition table
+  - Automatic reboot on completion
+
+  Strengths of BLE approach:
+  - Very low power consumption
+  - No WiFi configuration needed
+  - Phone is always in pocket → always have controls
+  - Direct connection, no router needed
+  - Automatic disconnect = motor stop
+
+  Weaknesses:
+  - BLE range: ~10-30m (limited on larger boats)
+  - Single phone connection only (one-to-one)
+  - Phone battery dependency
+  - BLE data rate limits telemetry frequency
+  - No multi-device control simultaneously
+
+2.3 PID IMPLEMENTATION
+----------------------
+
+  Gains (configurable 0-255 integer scale):
+  - P: proportional (heading error)
+  - I: integral (accumulated error)
+  - D: derivative (rate of turn)
+  - DD: second derivative (rate of rate of turn)
+  - FF: feed forward (course change response)
+  - Overall gain multiplier (separate from individual gains)
+
+  Additional PID Parameters:
+  - precision: general precision parameter
+  - min_motor_speed: minimum PWM (0-255)
+  - max_motor_speed: maximum PWM (0-255)
+  - motor_running_limit_enabled: timeout safety
+  - motor_running_limit: max seconds motor can run continuously
+  - motor_reverse: direction reversal flag
+  - motor_max_current: current limit (0-4096 ADC)
+
+  Heading Sources (7 options):
+  - autopilotCompass: Internal ESP32 IMU
+  - phoneCompass: Smartphone compass via BLE
+  - phoneGps: Smartphone GPS heading via BLE
+  - AWA: Apparent Wind Angle from wind sensor
+  - TWA: True Wind Angle (calculated)
+  - NMEA_GPS: External GPS heading
+  - NMEA_Compass: External compass heading
+
+  Modes:
+  - heading: compass course hold
+  - route: follow NMEA waypoints
+  - wind: wind angle hold
+
+2.4 WHAT MAKES IT UNIQUE
+-------------------------
+
+  1. PHONE AS SENSOR HUB
+     - Uses phone's compass, gyro, GPS for heading
+     - Dramatically reduces hardware cost (just ESP32 + motor driver)
+     - Phone quality IMUs are actually quite good
+
+  2. MULTI-PROTOCOL INPUT
+     - Same command set via Serial, WiFi UDP, NMEA 0183, NMEA 2000, BLE
+     - Very flexible integration options
+
+  3. OTA FIRMWARE UPDATES
+     - Can update firmware from phone via BLE
+     - No USB cable needed for maintenance
+
+  4. BUILT-IN NMEA 2000
+     - Supports proprietary PGN 743837 for autopilot control
+     - Can receive standard N2K PGNs for heading, wind, GPS
+
+  5. NON-COMMERCIAL LICENSE
+     - Cannot be used in commercial products
+     - Good for DIY, bad for our open-source project
+
+2.5 LIMITATIONS
+----------------
+
+  1. PHONE DEPENDENCY
+     - Without phone, standalone mode limited to basic compass
+     - Phone battery, water damage, loss = control loss
+     - Bluetooth range limits control distance
+
+  2. PID IN FIRMWARE (NOT VISIBLE)
+     - Full firmware delivered via OTA, not in GitHub repo
+     - GitHub code is BASIC VERSION only
+     - Cannot audit or modify PID implementation
+
+  3. NO SENSOR FUSION VISIBLE
+     - No evidence of Kalman filter or complementary filter
+     - Basic compass reading without gyroscope integration
+
+  4. NO RUDDER POSITION PID
+     - Simple on/off motor control (0-255 PWM)
+     - No position feedback loop visible in open code
+
+  5. LIMITED SAFETY FEATURES
+     - Motor timeout is the only safety mechanism in open code
+     - No over-temperature protection
+     - No clutch management
+
+  6. NO GAIN SCHEDULING
+     - Single set of gains, no profile system
+     - No adaptive behavior
+
+
+================================================================================
+3. ESP32 WiFi AUTOPILOT ANALYSIS (jeff-burright)
+================================================================================
+  Project:     jeff-burright/Autopilot_ESP32_wifi
+  Author:      Jeff Burright (based on Jack Edwards' Arduino autopilot)
+  License:     Open (unspecified)
+  Stars:       ~19
+  Status:      Active, ESP32 Arduino Core 3 compatible
+  Language:    C/C++ (Arduino)
+  Platform:    ESP32 DevKit
+  Cost:        ~$150 total including motor linkage
+
+3.1 ARCHITECTURE OVERVIEW
+--------------------------
+
+  All computation runs on the single ESP32:
+  - IMU: LSM303 9DOF compass (I2C)
+  - Motor: IBT-2 H-bridge (PWM via ledcWrite)
+  - Rudder feedback: potentiometer (optional, analog)
+  - Display: 16x2 LCD (optional, I2C)
+  - Control: WiFi (AP mode), IR remote, physical button, smartwatch
+
+  Control Input Methods (4 simultaneous):
+  1. WiFi HTML interface (primary) - AP mode at 192.168.4.1
+  2. LilyGo smartwatch via ESP-NOW protocol
+  3. IR remote control (optional receiver)
+  4. Physical toggle button (toggle AP on/off)
+
+3.2 MULTIPLE INPUT METHOD HANDLING
+-----------------------------------
+
+  WiFi Interface:
+  - WebSocket-based real-time communication
+  - HTML interface with course adjustment buttons
+  - Real-time heading and rudder display (JSON via WebSocket)
+  - PID gain adjustment from web page
+  - OTA firmware update at 192.168.4.1/update
+  - JSON-based telemetry: {"heading": "185", "rudder_position": "-5"}
+
+  Smartwatch (ESP-NOW):
+  - Bidirectional: sends commands, receives heading status
+  - Commands: toggle AP, ±1, ±10 degree course changes
+  - Struct: APCommand {int doit;} sent/received as broadcast
+  - Response includes: heading_to_steer and Steering_Mode state
+
+  IR Remote:
+  - Standard IR receiver module
+  - Decodes commands by IR protocol command byte
+  - Supports: ON, OFF, light toggle, ±1, ±10, ±90 degree changes
+  - 300ms debounce delay between commands
+
+  Physical Button:
+  - Toggle AP on/off via bounce debouncer
+  - Connected to Button_Pin (configurable GPIO)
+
+  Command Arbitration:
+  - ALL inputs call the SAME functions (toggleAP, remoteadd1, etc.)
+  - No explicit priority system
+  - Last command wins
+  - All inputs can control simultaneously
+  - No conflict resolution beyond "last write wins"
+
+3.3 PID IMPLEMENTATION
+----------------------
+
+  Three PID Modes (compile-time selected):
+  - MODE 0: rudder_command = PID_output (no integral)
+  - MODE 1: rudder_command = PID_output + Rudder_Offset
+  - MODE 2: rudder_command = rudder_command + PID_output (integral form)
+  - MODE 3: rudder_command = PID_output including integral_error
+
+  Standard PID Formula (Mode 3):
+    PID_output = Ks[0] * (Ks[1] * heading_error - Ks[2] * differential_error
+                          + integral_error)
+
+  Where:
+    - heading_error = heading_to_steer - heading (wrapped to ±180)
+    - differential_error = bearingrate (gyro-derived)
+    - integral_error: accumulates when |error| > deadband, clamped ±10
+
+  Rudder Control:
+  - Two RUDDER_MODES (compile-time):
+    - MODE 0: Position control (uses rudder feedback potentiometer)
+    - MODE 1: Velocity control (no rudder feedback, move until error < deadband)
+  - Motor speed: proportional to rudder_error
+    motorspeed = motorspeedMAX / 30 * rudder_error
+  - Minimum speed enforced (motorspeedMIN)
+  - Rudder Power Coefficient: applies more force at higher angles
+    (counters weather helm)
+  - Deadband: rudder stops moving when |rudder_error| < deadband
+
+  Heading Computation:
+  - Uses DCM (Direction Cosine Matrix) algorithm for sensor fusion
+  - Drift correction uses compass data
+  - Bearing rate (rate of turn) from gyro integration
+  - Magnetic variation correction for true heading
+  - Low-pass filter on compass readings (alpha blending)
+
+  Loop Timing:
+  - Main loop: 50Hz (20ms period)
+  - PID updates: 10Hz (every 2nd main loop iteration)
+  - Compass reads: 10Hz
+  - LCD updates: 1Hz
+
+3.4 WIFI RELIABILITY CONCERNS
+-------------------------------
+
+  Critical Issue: WiFi is the PRIMARY control interface
+
+  Risks:
+  - WiFi interference from other devices on boat (marine VHF harmonics,
+    other WiFi networks, radar)
+  - Client device (phone/tablet) battery death
+  - WiFi connection drops
+  - ESP32 AP mode limitations (single channel, limited clients)
+  - 2.4GHz interference from microwaves, Bluetooth, etc.
+
+  Mitigations Present:
+  - Smartwatch (ESP-NOW) as backup control (very reliable, no WiFi needed)
+  - Physical toggle button for AP on/off
+  - IR remote as additional backup
+  - AP broadcasts its own WiFi (no router dependency)
+
+  Mitigations MISSING:
+  - No automatic timeout/disengage if WiFi command stream stops
+  - No heartbeat/watchdog from web interface
+  - No connection status awareness in PID loop
+  - If phone disconnects while AP is ON, it stays on (good for safety
+    but means no control changes possible)
+
+  Assessment:
+  - WiFi as supplementary control: FINE
+  - WiFi as ONLY control: RISKY
+  - Smartwatch + physical button provide adequate backup
+  - The multi-input approach is fundamentally sound
+
+
+================================================================================
+4. OPENCPN AUTOPILOT INTEGRATION (APB/NMEA 0183)
+================================================================================
+
+4.1 CONFIGURING OPENCPN TO OUTPUT APB SENTENCES
+------------------------------------------------
+
+  Step-by-step configuration:
+
+  1) CONNECTIONS → Add Connection
+     - Data Source: "Serial" or "Network"
+     - For serial: select COM port, set baud to 4800
+     - For network: select "Network" → "UDP" or "TCP"
+     - Protocol: NMEA 0183
+     - Check BOTH "Input" and "Output" checkboxes
+     - Talker ID: typically "EC" (ECDIS) or "GN" (GNSS)
+     - Baud Rate: 4800 (NMEA 0183 standard)
+     - Parity: None, 8 data bits, 1 stop bit (8N1)
+
+  2) ROUTE/WAYPOINT SETUP
+     - Create route with waypoints
+     - Activate route (right-click → "Activate Route")
+     - OpenCPN will now generate APB sentences when route is active
+
+  3) AUTOPILOT OUTPUT ENABLED
+     - In Connections → ensure the connection to the autopilot is
+       checked for OUTPUT
+     - OpenCPN Settings → Connections → check "Output NMEA sentences"
+     - Ensure APB is in the output filter list
+
+  4) VERIFY APB OUTPUT
+     - Connect a terminal to the output port
+     - Example APB sentence:
+       $ECAPB,A,A,0.10,R,N,A,A,045.0,T,WP001,045.0,T,045.0,M*3E
+     - Fields: status, lock, XTE (0.10nm), XTE dir (R), XTE units,
+       arrival, perpendicular, bearing (045.0T), waypoint, bearing
+       present to dest (045.0T), heading to steer (045.0M)
+
+4.2 CONNECTION OPTIONS
+----------------------
+
+  Physical Connections:
+  a) Direct serial: RS-232/RS-422 from PC to autopilot
+     - Most reliable
+     - Requires serial port or USB-serial adapter
+     - Max cable length: RS-232 ~15m, RS-422 ~1000m
+
+  b) USB to NMEA: USB adapter with isolated NMEA 0183 output
+     - Good for short distances
+     - Isolation important for ground loop prevention
+
+  c) Network (UDP/TCP): WiFi or Ethernet bridge
+     - Convenient but less reliable
+     - Requires network configuration
+     - OpenCPN can output via UDP broadcast or TCP connection
+
+  For ESP32 Integration:
+  - Best option: direct serial from OpenCPN computer to ESP32 UART
+  - Alternative: UDP on local WiFi network (port 10110 standard)
+  - ESP32 should LISTEN for APB sentences on serial or UDP
+
+4.3 AUTOPILOT ROUTE PLUGIN
+---------------------------
+
+  The autopilot_route_pi plugin (by pypilot author Sean D'Epagnier):
+  - Improves route following behavior vs built-in OpenCPN tracking
+  - Provides configurable parameters for route tracking:
+    - XTE acceptance radius
+    - Wheel-over point distance
+    - Rate of turn limiting
+  - Works with pypilot's native data format (not standard APB)
+  - When used with pypilot: better performance than standard APB approach
+  - When used with generic autopilot: still needs APB output from OpenCPN
+
+  Standard OpenCPN APB behavior (without plugin):
+  - Generates APB at 1Hz typically
+  - Heading to steer field (field 13) is what the autopilot follows
+  - Updates when boat approaches each waypoint
+  - Switches to next leg automatically
+
+4.4 BAUD RATE, PARITY, TALKER ID
+---------------------------------
+
+  Baud Rate:
+  - NMEA 0183 standard: 4800 baud
+  - Some modern devices support 38400 (pypilot motor controller)
+  - APB sentences are short (~50 bytes) → 4800 is sufficient
+  - Higher baud rates provide no benefit for APB-only data
+
+  Parity:
+  - Standard: 8N1 (no parity, 8 data bits, 1 stop bit)
+  - Some older devices use 8N2 (2 stop bits)
+  - NMEA 0183 spec allows 4800/8N1 or 38400/8N1
+
+  Talker IDs commonly used:
+  - EC: Electronic Chart Display and Information System
+  - GN: Global Navigation Satellite System (GPS)
+  - GP: GPS (older standard)
+  - AP: Autopilot (when autopilot sends data)
+  - OpenCPN typically uses "EC" as talker ID
+
+4.5 KNOWN ISSUES AND WORKAROUNDS
+---------------------------------
+
+  Issue 1: APB not output when route is not active
+  Workaround: Must activate a route for APB generation
+
+  Issue 2: APB heading jumps at waypoint transitions
+  Workaround: Use autopilot_route_pi plugin for smoother transitions
+  or set generous XTE limits
+
+  Issue 3: OpenCPN 5.x changed NMEA connection handling
+  Workaround: Use "Advanced" connection mode, explicitly check
+  both input and output boxes
+
+  Issue 4: NMEA 0183 has no acknowledgment/retransmission
+  Workaround: None possible (use NMEA 2000 for acknowledged transport)
+
+  Issue 5: Multiple autopilot connections cause duplicate APB
+  Workaround: Only enable APB output on ONE connection
+
+  Issue 6: OpenCPN on macOS/Linux may need port permissions
+  Workaround: Add user to dialout group (Linux) or use Prolific driver
+
+4.6 TIMEZERO OUTPUT COMPARISON
+-------------------------------
+
+  TimeZero (MaxSea):
+  - Also outputs APB sentences for route following
+  - Talker ID typically "EC" or manufacturer-specific
+  - Additional sentences: BWR (bearing and distance to waypoint)
+  - NMEA 2000 output option available in newer versions
+  - Generally outputs at 1Hz like OpenCPN
+
+  Key Differences from OpenCPN:
+  - TimeZero has dedicated autopilot configuration wizard
+  - Built-in autopilot offset adjustment (calibrate APB vs compass)
+  - TimeZero may output additional proprietary sentences
+  - Both use same APB format → compatible with any APB receiver
+
+  For ESP32 integration: SAME approach works for both. Parse APB,
+  extract field 13 (heading to steer), use as heading command in NAV mode.
+
+
+================================================================================
+5. KEY DESIGN LESSONS FOR OUR ESP32 AUTOPILOT
+================================================================================
+
+5.1 PROVEN ARCHITECTURE PATTERNS
+---------------------------------
+
+  Pattern 1: SEPARATION OF CONCERNS (All Projects)
+  - pypilot: Server (compute) + Servo (motor)
+  - Nautinect: Phone (compute/sensors) + ESP32 (motor)
+  - ESP32-WiFi: ESP32 (everything, but modular tabs)
+  LESSON: Keep motor control hardware-isolated. Even on single-chip,
+          separate motor driver code from navigation code.
+
+  Pattern 2: COMMAND + TELEMETRY LOOP (pypilot, Nautinect)
+  - Controller sends commands → Motor driver sends back status
+  - Enables current monitoring, stall detection, temperature protection
+  LESSON: Always have bidirectional communication with motor controller.
+
+  Pattern 3: MULTIPLE HEADING SOURCES (All Projects)
+  - Internal compass (fallback, always available)
+  - External GPS (for ground track)
+  - External NMEA compass/wind (from network)
+  - Phone sensors (Nautinect unique approach)
+  LESSON: Support multiple sources with automatic fallback.
+
+  Pattern 4: DEADBAND IN CONTROL (All Projects)
+  - ESP32-WiFi: configurable deadband in rudder error
+  - pypilot: servo.period prevents tiny movements
+  - Nautinect: min_motor_speed threshold
+  LESSON: Don't move the motor for tiny corrections. Reduces wear,
+          power consumption, and noise. But keep deadband tight for
+          accuracy.
+
+  Pattern 5: GAIN SCHEDULING / PROFILES (pypilot primarily)
+  - Different gains for different conditions
+  - One-button profile switching
+  LESSON: Even a simple "calm" / "rough" profile selection is
+          dramatically better than fixed gains.
+
+5.2 SAFETY FEATURES IN ALL SUCCESSFUL PROJECTS
+----------------------------------------------
+
+  MUST HAVE (present in all working projects):
+  1. MANUAL DISENGAGE - Physical button or switch to disable AP
+  2. MOTOR STOP ON DISCONNECT - BLE disconnect → motor off (Nautinect)
+     or command = 0 on communication loss (pypilot)
+  3. OVERCURRENT PROTECTION - Hardware current limit or fuse
+  4. DODGE MODE - Immediate manual rudder control override
+  5. MAX RUDDER LIMITS - Hard limits on rudder travel
+
+  SHOULD HAVE (present in pypilot, missing in others):
+  6. WATCHDOG TIMER - Auto-disengage if control loop stops
+  7. OVER-TEMPERATURE PROTECTION - Monitor motor/controller temp
+  8. STALL DETECTION - Current spike + no movement → fault
+  9. END-OF-TRAVEL SWITCHES - Hardware limit switches
+  10. CLUTCH CONTROL - Mechanical disengage for emergency manual steering
+
+  NICE TO HAVE:
+  11. Communication timeout (disengage if no command for N seconds)
+  12. Power loss recovery (resume last state)
+  13. Motor run-time limit (prevent runaway)
+  14. Voltage monitoring (detect low battery)
+
+5.3 COMMON FAILURE MODES AND MITIGATIONS
+-----------------------------------------
+
+  Failure Mode 1: COMPASS CALIBRATION DRIFT
+  - Cause: Temperature changes, nearby metal, electrical interference
+  - pypilot approach: Continuous calibration (risky - can cause maneuvers)
+  - Better approach: Calibrate once, lock calibration, warn if heading
+    becomes inconsistent with GPS track
+  - Our approach: Periodic self-check; if GPS track and compass heading
+    disagree by > X degrees for > Y seconds, flag calibration warning
+
+  Failure Mode 2: MOTOR STALL (rudder jammed)
+  - pypilot: Overcurrent detection, stops motor, reports fault
+  - ESP32-WiFi: No explicit stall detection
+  - Nautinect: Current limit but no stall feedback
+  - Our approach: Monitor current; if current > threshold AND no rudder
+    position change → stop motor, report FAULT, do NOT retry automatically
+
+  Failure Mode 3: COMMUNICATION LOSS
+  - pypilot: Sync detection, re-sync protocol
+  - Nautinect: BLE disconnect → motor stop
+  - ESP32-WiFi: No explicit handling
+  - Our approach: If no valid heading data for > 2 seconds → DISENGAGE
+    with audible alarm. If no control command for > 10 seconds while
+    engaged → DISENGAGE.
+
+  Failure Mode 4: SENSOR FAILURE
+  - pypilot: Mode fallback chain
+  - Others: No fallback
+  - Our approach: Implement sensor health monitoring. If compass data
+    becomes "flat" (no variation) or GPS lost → degrade gracefully.
+
+  Failure Mode 5: CONTROL LOOP CRASH
+  - pypilot: Linux process management, pipe monitoring
+  - ESP32-WiFi: ESP32 watchdog timer (built-in)
+  - Our approach: Use ESP32 Task Watchdog Timer + our own application-
+    level heartbeat. If PID loop misses a cycle → FAULT.
+
+  Failure Mode 6: BATTERY DEPLETION
+  - pypilot: Voltage monitoring
+  - Others: No monitoring
+  - Our approach: Monitor supply voltage. Below threshold → warn.
+    Below critical → disengage and alarm.
+
+5.4 MINIMUM VIABLE AUTOPILOT FEATURE SET
+-----------------------------------------
+
+  ABSOLUTE MINIMUM (to hold a course safely):
+  [ ] Compass heading hold (P + D gains only)
+  [ ] Motor control (on/off or PWM H-bridge)
+  [ ] Physical engage/disengage button
+  [ ] Course adjustment (±1, ±10 degrees)
+  [ ] Heading display (LCD or LED)
+  [ ] Overcurrent protection (fuse or electronic)
+  [ ] Deadband to prevent motor hunting
+
+  VIABLE FOR CRUISING (useful on real passages):
+  [ ] + Integral gain for weather helm compensation
+  [ ] + GPS mode (ground track hold)
+  [ ] + Rudder feedback (position sensing)
+  [ ] + End-of-travel limits
+  [ ] + Stall detection
+  [ ] + NMEA 0183 input (wind, GPS)
+  [ ] + NMEA 0183 APB input (route following)
+  [ ] + Wind mode (apparent wind angle hold)
+  [ ] + Tacking function
+  [ ] + Temperature monitoring
+  [ ] + Gain profiles (2-3 presets)
+  [ ] + Calibration (compass, rudder)
+  [ ] + Watchdog timer
+  [ ] + Power loss detection
+
+5.5 "NICE TO HAVE" (SEPARATES GOOD FROM GREAT)
+----------------------------------------------
+
+  [ ] + True wind mode (GPS + apparent wind → true wind)
+  [ ] + Feed-forward gain for responsive course changes
+  [ ] + Proportional root gain for reduced overshoot
+  [ ] + Rate-of-rate gain for improved reaction time
+  [ ] + Auto-gain tuning (systematic optimization)
+  [ ] + OpenCPN plugin integration
+  [ ] + SignalK support
+  [ ] + NMEA 2000 support
+  [ ] + WiFi control interface
+  [ ] + Bluetooth control
+  [ ] + Multiple rudder feedback types (voltage, pulse, pot)
+  [ ] + Clutch control (solenoid engagement)
+  [ ] + Motor brake (short windings for weather helm)
+  [ ] + Adaptive gain scheduling (auto-switch by conditions)
+  [ ] + Motion prediction (look-ahead for wave patterns)
+  [ ] + Log/data recording (post-voyage analysis)
+  [ ] + OTA firmware updates
+
+5.6 SPECIFIC CODE PATTERNS WORTH ADOPTING
+-----------------------------------------
+
+  Pattern 1: pypilot's servo period system
+    // Don't move for less than 'period' seconds
+    // This prevents motor hunting and reduces wear
+    // Apply as: minimum time between direction changes
+
+  Pattern 2: pypilot's heading error clamping
+    // err = minmax(resolv(heading - heading_command), 60)
+    // Always clamp heading error to ±60 degrees
+    // Prevents wild corrections on large errors
+
+  Pattern 3: pypilot's integral anti-windup
+    // integral = minmax(integral + (error/1500)*dt, 5)
+    // Slow accumulation (divided by 1500)
+    // Hard clamp to ±5 degrees
+    // Integral accumulates only when |error| > deadband
+
+  Pattern 4: ESP32-WiFi's DCM sensor fusion
+    // Direction Cosine Matrix for IMU integration
+    // Gyro integration + compass drift correction
+    // Produces stable heading and bearing rate
+    // We should use Madgwick or Mahony filter (simpler, similar results)
+
+  Pattern 5: pypilot's command ignore-after-manual-override
+    // if (t - self.set_time < 0.8): return  # ignore pilot command
+    // Prevents autopilot from fighting manual override
+    // 0.8 second grace period after any manual command
+
+  Pattern 6: pypilot's servo.speed.min
+    // Many DC motors are inefficient at low speed
+    // Better to make short fast corrections and rest
+    // Set minimum speed threshold; motor is either at min speed or off
+
+  Pattern 7: Nautinect's unified command processor
+    // void processCommand(const std::string& rxString);
+    // All channels feed into same parser
+    // Clean architecture: add a new input method, just feed it strings
+    // We should implement this for Serial + WiFi + BLE + NMEA
+
+  Pattern 8: ESP32-WiFi's dodge mode
+    // Immediate manual rudder control
+    // Disengages autopilot automatically
+    // Time-limited (2 second burst) then releases
+    // Safer than having to toggle AP off first
+
+
+================================================================================
+6. COMPARISON TABLE
+================================================================================
+
+  Feature                    | pypilot           | Nautinect          | ESP32-WiFi          | Our Proposed
+  ---------------------------|-------------------|--------------------|--------------------|------------------
+  PLATFORM                   | RPi + Arduino     | ESP32 + Phone      | ESP32 only          | ESP32 (single-chip)
+  LANGUAGE                   | Python + C++ + C  | C++ (Arduino)      | C/C++ (Arduino)     | C/C++ (ESP-IDF)
+  MOTOR CONTROLLER           | Custom Arduino    | IBT-2 / L298N      | IBT-2               | IBT-2 + current sense
+  IMU                        | ICM20948 (9DOF)   | ESP32 built-in     | LSM303 (9DOF)       | BNO055 or ICM20948
+  SENSOR FUSION              | RTIMU (Kalman)    | Basic compass      | DCM                 | Madgwick/Mahony
+
+  COMMUNICATION PROTOCOL     | Binary + CRC8     | Text (BLE GATT)    | WebSocket + ESP-NOW | Binary + CRC8
+  BAUD RATE (MOTOR LINK)     | 38400             | N/A (same chip)    | N/A (same chip)     | N/A (same chip)
+
+  PID GAINS                  | P,I,D,DD,PR,FF    | P,I,D,DD,FF        | P,I,D (3 modes)     | P,I,D,DD,PR,FF
+  GAIN SCHEDULING            | Yes (profiles)    | No                 | No                  | Yes (profiles)
+  FEED FORWARD               | Yes               | Yes                | No                  | Yes
+  PROPORTIONAL ROOT          | Yes               | No                 | No                  | Yes
+  RATE-OF-RATE               | Yes               | Yes                | No                  | Yes
+  AUTO-GAIN TUNING           | Experimental      | No                 | No                  | Future
+  CONTROL LOOP RATE          | ~100Hz            | Unknown (OTA fw)   | 10Hz PID, 50Hz IMU | 20-50Hz
+
+  SAFETY: WATCHDOG           | Commented out     | Motor timeout       | ESP32 WDT           | WDT + heartbeat
+  SAFETY: OVERCURRENT        | Yes (ADC)         | Yes (ADC)          | No                  | Yes (ACS712)
+  SAFETY: OVERTEMP           | Yes (onboard+NTC) | No (in OTA fw?)    | No                  | Yes
+  SAFETY: STALL DETECT       | Yes               | No                 | No                  | Yes
+  SAFETY: END SWITCHES       | Optional          | No                 | No                  | Optional
+  SAFETY: CLUTCH             | Yes (PWM hold)    | Yes (GPIO)         | No                  | Yes
+  SAFETY: DISCONNECT FAIL    | Yes (desync)      | Yes (BLE disc.)    | No                  | Yes (timeout)
+  SAFETY: DODGE MODE         | Yes (buttons)     | No                 | Yes (timed)         | Yes
+
+  NAV INTEGRATION            | OpenCPN plugin,   | NMEA 0183/2000,   | No                  | NMEA 0183 APB,
+                             | SignalK, NMEA     | BLE from phone     |                     | NMEA 2000 (future)
+  GPS MODE                   | Yes               | Yes (7 sources)    | GPS was in Arduino  | Yes
+  WIND MODE                  | AWA + True Wind   | AWA + TWA          | No                  | AWA + TWA
+  ROUTE FOLLOWING (NAV)      | APB + route plugin| APB route mode     | No                  | APB input
+  NMEA INPUT                 | RMC,MWV,VHW,LWY,  | Full APB, MWV      | None                | RMC,MWV,VHW,APB
+                             | APB,RSA           |                    |                     |
+  NMEA OUTPUT                | HDM,ROT,RMC,MWV,  | No (in OTA fw?)    | No                  | HDM,ROT,RSA
+                             | RSA,XDR           |                    |                     |
+
+  DISPLAY                    | COG LCD, Web,     | Phone app,         | 16x2 LCD, Web,      | OLED or LCD,
+                             | OpenCPN           | Touch controller   | Smartwatch          | Web interface
+  REMOTE CONTROLS            | 433MHz, IR, Web,  | BLE phone, NMEA,   | WiFi, IR,           | BLE, WiFi,
+                             | Python, GPIO      | WiFi, Serial       | ESP-NOW, button     | physical button
+
+  CALIBRATION                | Accel, compass,   | Gyro, mag, compass | Compass heading     | Compass, rudder,
+                             | rudder, heading   | (in OTA fw)        | offset, rudder      | heading offset
+  OTA UPDATES                | SD card reimage   | Yes (BLE OTA)      | Yes (Web OTA)       | Yes (WiFi/BLE)
+
+  COMPLEXITY (build)         | Medium-High        | Low                | Low-Medium          | Medium
+  COMPLEXITY (code)          | High (7 processes) | Unknown (OTA)      | Medium (~15 tabs)   | Medium
+  COST (components)          | $200-400           | $50-100 (+ phone)  | ~$150               | $100-200
+  RELIABILITY                | High (mature)      | Medium (new)       | Medium (tested)     | Target: High
+  COMMUNITY SIZE             | Large (~2500★)     | Small (~60★)       | Small (~19★)        | N/A
+  LICENSE                    | GPLv3              | CC BY-NC-SA 4.0    | Open (unspecified)  | MIT or GPLv3
+
+  KEY STRENGTH               | Most complete,     | Phone as sensor,   | Cheap, multi-input, | Single-chip,
+                             | best PID, mature   | multi-protocol     | WiFi interface      | integrated safety
+  KEY WEAKNESS               | Complex, RPi       | Closed firmware,   | Basic PID, no      | TBD - must
+                             | dependency, slow   | phone dependency   | sensor fusion      | execute well
+
+
+================================================================================
+7. RECOMMENDATIONS FOR OUR ESP32 AUTOPILOT
+================================================================================
+
+Based on this analysis, our architecture should:
+
+1. RUN EVERYTHING ON ONE ESP32 (like Nautinect/ESP32-WiFi)
+   - Modern ESP32-S3 has plenty of processing power
+   - Eliminates inter-processor communication complexity
+   - Use FreeRTOS tasks for separation of concerns (not processes)
+   - Use hardware watchdog timer
+
+2. ADOPT PYPILOT'S EXTENDED PID (P, I, D, DD, PR, FF)
+   - These gains are proven over thousands of installations
+   - Start with P+D only for minimum viable, add others incrementally
+
+3. ADOPT NAUTINECT'S UNIFIED COMMAND PROCESSOR
+   - Single function processes commands from ALL input sources
+   - Easy to add new input methods (BLE, WiFi, Serial, NMEA)
+
+4. ADOPT ESP32-WIFI'S MULTI-INPUT APPROACH
+   - Physical button (always works, always available)
+   - WiFi web interface (primary, most capable)
+   - BLE phone/tablet (backup, always in pocket)
+   - NMEA serial input (navigation integration)
+
+5. USE MADGWICK FILTER FOR SENSOR FUSION
+   - Proven, lightweight alternative to DCM
+   - Better than pypilot's RTIMU for ESP32 (less CPU)
+   - Good heading stability and rate-of-turn output
+
+6. IMPLEMENT pypilot-LEVEL SAFETY
+   - Watchdog timer (hardware + application level)
+   - Overcurrent protection (ACS712 sensor)
+   - Temperature monitoring
+   - Communication timeout (disengage if no valid data for 2s)
+   - Manual override grace period (0.8s as pypilot)
+   - Command = 0 on any fault condition
+
+7. KEEP NMEA 0183 APB INPUT SIMPLE
+   - Parse APB sentence, extract heading-to-steer
+   - Apply as heading command in NAV mode
+   - No need for NMEA 2000 in v1 (add later)
+
+8. IMPLEMENT CALIBRATION STORED IN NVS (not EEPROM)
+   - ESP32 NVS is more reliable than EEPROM
+   - Store: compass offsets, rudder calibration, gain profiles
+   - Factory reset capability
+
+================================================================================
+END OF ANALYSIS
+================================================================================

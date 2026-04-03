@@ -1,0 +1,1256 @@
+================================================================================
+                    NEXUS: DISTRIBUTED INTELLIGENCE FRAMEWORK
+          General-Purpose Autonomous Robotics Architecture
+================================================================================
+  Document Version:   1.0
+  Date:               2025
+  Classification:     Open Architecture Specification
+  Target Hardware:    ESP32-S3 (Reflex Layer) + Jetson Orin Nano (Reasoning Layer)
+  Domains:            Agriculture, Construction, Warehouses, Factories, Mining,
+                      Marine, Environmental Monitoring, Logistics, and beyond
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SECTION 1: NEXUS FRAMEWORK PHILOSOPHY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1  THE BIOLOGICAL INSPIRATION
+─────────────────────────────────────────────────────────────────────────────────
+
+Every complex organism on Earth shares a fundamental architectural pattern: a
+spinal cord that handles reflexes and a brain that handles learning, planning,
+and adaptation. A chicken with its forebrain removed can still run, peck, and
+maintain posture. The spinal cord alone is sufficient for survival behaviors.
+The brain makes the chicken BETTER at being a chicken -- it learns where food
+is, recognizes predators, navigates complex terrain -- but the organism does
+not DIE when the brain goes offline.
+
+NEXUS applies this principle directly to distributed robotics. The ESP32-S3
+microcontroller is the spinal cord. The Jetson Orin Nano is the brain. When
+the Jetson is disconnected, powered off, or has crashed, every ESP32 node
+continues performing its last-known-good behavior with full safety guarantees.
+The system degrades gracefully from "intelligent" to "functional" without
+ever passing through "dangerous."
+
+This is not a theoretical nicety. In agricultural fields, construction sites,
+mining operations, and warehouse floors, network reliability is never guaranteed.
+Starlink dishes lose alignment. Wi-Fi access points reboot. Cables get severed
+by heavy machinery. If the control architecture requires a persistent connection
+to a central computer to maintain basic safety, it is unfit for deployment in
+any physically demanding environment.
+
+NEXUS makes independence the DEFAULT, not the fallback.
+
+
+1.2  DURABLE ARTIFACTS
+─────────────────────────────────────────────────────────────────────────────────
+
+Definition: A Durable Artifact is the complete, self-contained program that an
+ESP32 executes to perform its function. It is stored in the ESP32's internal
+flash memory. It does not load code from the network. It does not depend on
+shared libraries hosted elsewhere. It is a monolithic, compiled binary that
+contains everything the node needs to operate.
+
+The Durable Artifact principle has three absolute rules:
+
+  Rule 1: Every ESP32 ships from the factory with a verified, tested artifact
+          (the "Genesis Artifact") burned into a protected flash partition.
+          This artifact provides complete, safe, baseline functionality for
+          the node's role. A temperature sensor node ships with artifact that
+          reads the sensor and publishes readings. A motor controller node
+          ships with an artifact that implements safe PWM output with current
+          limiting. A gateway node ships with an artifact that routes messages
+          between networks. None of these artifacts require a Jetson to exist.
+
+  Rule 2: The Genesis Artifact partition is hardware-protected (read-only via
+          eFuse on ESP32-S3). No OTA update mechanism can modify it. It can
+          only be replaced by physical JTAG/SWD programming. This means that
+          no matter what happens -- corrupt OTA, malicious actor, software bug
+          in the update pipeline -- the node can ALWAYS be restored to its
+          factory state by a simple hardware reset sequence.
+
+  Rule 3: Network communication is an ENHANCEMENT, never a REQUIREMENT. An
+          ESP32 node may USE network connectivity to receive improved artifacts,
+          report telemetry, or coordinate with peers. But if the network
+          disappears at any moment, the node continues executing its current
+          artifact without interruption. There is no "cloud dependency," no
+          "heartbeat timeout that kills the node," no "license check that
+          expires." The artifact is the node, and the node is the artifact.
+
+Implications for system design:
+
+When designing any NEXUS node, the engineer must answer a single question:
+"What does this node do when it has NO network, NO Jetson, and NO human
+interaction?" The answer to that question IS the Genesis Artifact. Everything
+else is progressive enhancement layered on top.
+
+
+1.3  ARTIFACT EVOLUTION
+─────────────────────────────────────────────────────────────────────────────────
+
+The Jetson Orin Nano serves as the Research & Development brain of the NEXUS
+system. Its primary function is not real-time control -- that belongs to the
+ESP32s. Its primary function is OBSERVATION, HYPOTHESIS, and ARTIFACT
+IMPROVEMENT.
+
+The Artifact Evolution cycle operates as follows:
+
+  OBSERVE: The Jetson collects telemetry from all ESP32 nodes. This includes
+           sensor readings, actuator states, control outputs, error rates,
+           timing jitter, energy consumption, and any domain-specific metrics.
+           Over time, the Jetson builds a statistical model of "normal"
+           operation for each node.
+
+  ANALYZE: The Jetson examines telemetry for patterns that suggest suboptimal
+           performance. Examples across domains:
+           - Agriculture: Spray nozzle flow rate drifts over time due to
+             viscosity changes; the current PID parameters produce oscillation
+             above 40 degrees Celsius.
+           - Warehousing: A lidar-processing node exhibits higher latency
+             during shift changes when more robots are active, causing path
+             planning delays.
+           - Construction: An excavator's bucket control produces jerky
+             motion at certain load ranges, increasing mechanical wear.
+           - Mining: Ventilation fan controllers cycle too aggressively in
+             response to dust sensor noise, wasting energy.
+
+  HYPOTHESIZE: The Jetson generates a specific, testable hypothesis. "If I
+               increase the PID low-pass filter cutoff from 2 Hz to 5 Hz on
+               the spray nozzle controller, flow oscillation will decrease by
+               >30% without increasing overshoot."
+
+  ARTIFACT GENERATION: The Jetson generates a new artifact -- a complete,
+                       compiled ESP32 binary -- that implements the proposed
+                       change. This is not a parameter tweak sent over MQTT.
+                       This is a complete, self-contained program that the
+                       ESP32 can run independently. The Jetson has a cross-
+                       compilation toolchain (xtensa-esp32s3-elf-gcc) and
+                       generates artifacts locally.
+
+  PROPOSE: The Jetson presents the proposed artifact to a human operator via
+           the HMI (Human-Machine Interface). The presentation includes:
+           - What changed (diff of control logic or parameters)
+           - Why the change was proposed (telemetry evidence)
+           - Predicted improvement (simulation results)
+           - Risk assessment (what could go wrong)
+           - Recommended A/B test duration
+
+  A/B TEST: The human approves the test. The new artifact is deployed to a
+            BACKUP or REDUNDANT ESP32 (never the primary alone). Both the
+            old artifact (on primary) and new artifact (on backup) run
+            simultaneously under the same conditions. Metrics are collected
+            from both and compared.
+
+  PROMOTE or REJECT: After the test period, the human reviews comparative
+                     metrics and decides whether to promote the new artifact
+                     to PRIMARY status across all redundant nodes, or reject
+                     it and revert the backup.
+
+This cycle can repeat indefinitely. Each cycle produces a new artifact version,
+building an evolutionary history of the system's control logic. The Jetson
+learns what works. The ESP32s become progressively better at their jobs.
+The human remains in the approval loop for all changes that affect physical
+actuators.
+
+
+1.4  REFLEX LAYER vs REASONING LAYER
+─────────────────────────────────────────────────────────────────────────────────
+
+NEXUS explicitly separates computation into two layers with fundamentally
+different properties:
+
+  REFLEX LAYER (ESP32-S3 nodes):
+  - Deterministic timing. Control loops run at fixed rates with bounded
+    jitter. A 100 Hz PID loop runs within +/- 1% of its period.
+  - Hard real-time constraints. Safety checks (overcurrent, overtemperature,
+    limit switches, watchdog) execute with microsecond-level response times.
+  - Simple logic. PID controllers, state machines, threshold comparisons,
+    signal filtering. No neural networks, no large memory allocations, no
+    dynamic resource contention.
+  - Independent operation. Each node runs its artifact regardless of network
+    state or Jetson availability.
+  - Resource constrained. 512 KB SRAM, 8 MB flash, dual-core 240 MHz.
+    Programs must fit within these bounds. This is a FEATURE, not a bug:
+    constraints force simplicity and reliability.
+
+  REASONING LAYER (Jetson Orin Nano):
+  - Asynchronous operation. No hard real-time deadlines. A computation that
+    takes 500 ms instead of 200 ms is suboptimal but not dangerous.
+  - Complex logic. Neural networks, optimization algorithms, statistical
+    analysis, simulation, computer vision, natural language processing.
+  - Advisory role. The Jetson PROPOSES changes to reflex layer artifacts.
+    It does not directly command actuators in real-time (except through
+    explicit, human-approved override channels for specific use cases).
+  - Resource rich. 8 GB LPDDR5, 6-core ARM Cortex-A78AE, 1024-core NVIDIA
+    GPU with 40 TOPS INT8. Programs can use all available resources.
+  - Network dependent. The Jetson's value proposition requires connectivity
+    to ESP32 nodes. If the network goes down, the Jetson loses its ability
+    to observe and influence, but the ESP32s continue unaffected.
+
+The key insight is that these layers are not equals. The Reflex Layer is the
+foundation. The Reasoning Layer is the roof. A building without a roof is
+uncomfortable but functional. A building without a foundation is rubble.
+
+
+1.5  PROGRESSIVE ENHANCEMENT LEVELS
+─────────────────────────────────────────────────────────────────────────────────
+
+NEXUS defines four operational levels that describe the relationship between
+ESP32 nodes and Jetson brains. A system can operate at any level and degrade
+to lower levels without human intervention:
+
+  LEVEL 0 -- ISOLATED (Factory Firmware Only):
+  Each ESP32 node runs its Genesis Artifact independently. No network
+  coordination. No Jetson. No telemetry beyond local indicators. The system
+  is fully functional but not optimized. This is the out-of-the-box state
+  for new deployments.
+
+  Use case: A farmer buys a NEXUS-compatible sprayer. Out of the box, the
+  sprayer works. It sprays at a fixed rate with basic GPS guidance. The
+  farmer can use it immediately without any network setup.
+
+  LEVEL 1 -- CONNECTED (Telemetry and Monitoring):
+  ESP32 nodes form a local network (ESP-NOW, Wi-Fi, CAN bus, or RS-485).
+  A Jetson Orin Nano is present and connected. ESP32s stream telemetry to
+  the Jetson. The Jetson displays dashboards, logs data, and alerts the
+  human operator to anomalies. No artifact changes occur. The Jetson is
+  purely observational.
+
+  Use case: The farmer connects the sprayer to a Jetson mounted in the
+  cab. Now they see real-time flow rates, coverage maps, GPS tracks, and
+  fuel consumption on a tablet. The sprayer still runs its factory firmware.
+
+  LEVEL 2 -- ADVISORY (Proposed Improvements):
+  The Jetson analyzes accumulated telemetry and begins proposing artifact
+  improvements. Proposals are presented to the human operator. A/B testing
+  infrastructure is available. The human must approve every artifact change.
+  The Jetson cannot modify any node without explicit human consent.
+
+  Use case: After 50 hours of operation, the Jetson notices that the spray
+  flow rate oscillates in certain field conditions. It proposes a revised
+  PID artifact. The farmer reviews the proposal on their tablet, approves
+  an A/B test, and after 5 hours of comparison, approves the new artifact
+  for all sprayer nodes.
+
+  LEVEL 3 -- AUTONOMOUS (Full Optimization with Human Approval):
+  The Jetson operates a complete optimization pipeline. It generates
+  artifacts, runs simulations, proposes A/B tests, collects results, and
+  recommends promotions -- all automatically. The human operator sets
+  high-level objectives ("minimize chemical waste while maintaining 95%
+  coverage") and approval policies ("auto-approve changes that improve
+  efficiency by >5% with no safety regression"). The human reviews a daily
+  summary and can override any decision.
+
+  Use case: The farmer sets a policy: "Auto-approve PID parameter changes
+  that reduce flow variance by >5% without increasing overshoot above 3%."
+  The Jetson now autonomously tunes the sprayer's performance over multiple
+  seasons, adapting to different crops, chemicals, and field conditions.
+  The farmer reviews a weekly report but does not need to approve each
+  individual change.
+
+  Degradation is automatic: Level 3 -> Level 2 -> Level 1 -> Level 0 based
+  on connectivity and Jetson health. Upgrade is manual: Level 0 -> 1 -> 2
+  -> 3 requires human setup and approval.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SECTION 2: GENERALIZED NODE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1  THE CONTROL LOOP ABSTRACTION
+─────────────────────────────────────────────────────────────────────────────────
+
+NEXUS replaces the concept of an "autopilot" (which is domain-specific to
+marine or aerospace) with the general-purpose "Control Loop" abstraction.
+A Control Loop is any repeating computation that:
+
+  1. Reads one or more sensor inputs
+  2. Executes deterministic control logic
+  3. Produces one or more actuator outputs
+  4. Is monitored by a safety system
+
+This abstraction applies universally:
+
+  - Agricultural sprayer: GPS position + flow sensor -> PID -> valve actuator
+  - Warehouse robot: Lidar + wheel encoders -> path planning -> motor drivers
+  - Construction excavator: Joystick + load cell -> hydraulic valve -> boom
+  - Mining ventilation: Gas sensor + airflow sensor -> bang-bang -> fan VFD
+  - Factory assembly: Vision + proximity -> state machine -> pneumatic valve
+  - Environmental monitor: Water quality sensors -> threshold -> sampler pump
+
+The Control Loop abstraction is the universal building block. Domain-specific
+behavior emerges from WHICH sensors, WHICH control logic, and WHICH actuators
+are connected, not from a fundamentally different architecture.
+
+
+2.2  UNIVERSAL NODE INTERNAL ARCHITECTURE
+─────────────────────────────────────────────────────────────────────────────────
+
+Every NEXUS node, regardless of type, follows this internal architecture:
+
+  ┌─────────────────────────────────────────────────────────┐
+  │                    NEXUS NODE                           │
+  │                                                         │
+  │  ┌──────────────┐   ┌──────────────────┐   ┌────────┐ │
+  │  │  SENSOR      │──▶│  CONTROL LOGIC   │──▶│ACTUATOR│ │
+  │  │  INPUTS      │   │  (SWAPPABLE)     │   │OUTPUTS │ │
+  │  │              │   │                  │   │        │ │
+  │  │  ADC/I2C/SPI │   │  C function or   │   │ PWM/   │ │
+  │  │  UART/CAN    │   │  parameterized   │   │ DAC/   │ │
+  │  │  GPIO        │   │  state machine   │   │ CAN/   │ │
+  │  │  ESP-NOW     │   │                  │   │ RS-485 │ │
+  │  └──────────────┘   │  [Artifact v3.2] │   └────────┘ │
+  │                      └──────────────────┘              │
+  │                              │                         │
+  │                              ▼                         │
+  │  ┌──────────────────────────────────────────────────┐  │
+  │  │          SAFETY MONITOR (NON-SWAPPABLE)          │  │
+  │  │                                                  │  │
+  │  │  - Overcurrent protection                        │  │
+  │  │  - Overtemperature shutdown                      │  │
+  │  │  - Limit switch enforcement                      │  │
+  │  │  - Watchdog timer (hardware + software)          │  │
+  │  │  - Communication heartbeat timeout                │  │
+  │  │  - Rate limiting (prevent runaway actuators)     │  │
+  │  │  - [Factory Partition - eFuse Protected]         │  │
+  │  └──────────────────────────────────────────────────┘  │
+  │                              │                         │
+  │                      ┌───────┴───────┐                 │
+  │                      ▼               ▼                 │
+  │               ┌──────────┐   ┌────────────┐           │
+  │               │ TELEMETRY│   │ ARTIFACT   │           │
+  │               │ PUBLISH  │   │ MANAGER    │           │
+  │               │          │   │            │           │
+  │               │ Current  │   │ Dual-slot  │           │
+  │               │ metrics  │   │ OTA update │           │
+  │               │ + health │   │ + rollback │           │
+  │               └──────────┘   └────────────┘           │
+  └─────────────────────────────────────────────────────────┘
+
+Critical design decisions:
+
+  - The Safety Monitor has ABSOLUTE VETO POWER over actuator outputs. If the
+    Safety Monitor triggers, it overrides the Control Logic output and forces
+    actuators to a safe state (typically "off" or "neutral"). The Safety Monitor
+    cannot be modified by any OTA mechanism.
+
+  - The Control Logic is the swappable artifact. It is a single C function with
+    a standardized signature: void control_logic(sensor_data_t* in, actuator_cmd_t*
+    out, control_state_t* state). The function runs at a fixed rate defined in
+    the artifact metadata. The Jetson can generate new versions of this function
+    with different algorithms, parameters, or logic, package them as artifacts,
+    and deploy them.
+
+  - The Telemetry Publisher runs asynchronously and streams operational data to
+    any connected Jetson. It includes current sensor readings, actuator commands,
+    control state, safety monitor status, artifact version hash, and diagnostic
+    information. Telemetry is best-effort; if the network is unavailable,
+    telemetry is silently dropped.
+
+
+2.3  NODE TYPES
+─────────────────────────────────────────────────────────────────────────────────
+
+NEXUS defines five canonical node types. Real deployments instantiate these
+types with domain-specific sensor/actuator configurations:
+
+  CONTROL_NODE:
+  The primary decision-making node. Contains a full control loop. Receives
+  sensor data (locally or from SENSOR_NODEs via network), executes control
+  logic, sends commands to ACTUATOR_NODEs. Examples: spray rate controller,
+  motor speed controller, temperature regulation controller, path following
+  controller.
+
+  SENSOR_NODE:
+  Reads one or more physical sensors and publishes the readings to the agent
+  network. No actuator outputs. No control logic. Pure measurement function.
+  May perform local signal conditioning (filtering, linearization, unit
+  conversion). Examples: temperature/humidity node, load cell node, GPS
+  node, gas detection node, vibration sensor node, water quality probe node.
+
+  ACTUATOR_NODE:
+  Receives commands from CONTROL_NODEs and drives physical actuators. Includes
+  built-in safety limits (min/max position, current limits, temperature
+  limits). Cannot operate autonomously -- requires commands from a CONTROL_NODE.
+  If no commands arrive within a configurable timeout, moves to safe position.
+  Examples: valve controller node, motor driver node, pump controller node,
+  relay bank node, pneumatic solenoid node.
+
+  GATEWAY_NODE:
+  Bridges between the NEXUS agent network and external systems. Translates
+  between NEXUS messaging protocol and external protocols (MQTT, ROS 2, OPC-UA,
+  Modbus, REST APIs). Provides protocol isolation -- external systems cannot
+  directly address individual ESP32 nodes. Also serves as the primary bridge
+  to the Jetson Orin Nano. Examples: Wi-Fi gateway, CAN-to-ESP-NOW bridge,
+  cellular uplink, Starlink terminal interface.
+
+  HMI_NODE:
+  Human-Machine Interface. Provides local display, buttons, and indicators for
+  operators who are physically present at the machine. Shows current system
+  status, artifact versions, safety alerts. Provides local rollback capability
+  (physical button to revert to previous artifact). Does not require a Jetson
+  to function. Examples: cab-mounted LCD with status display, handheld remote
+  with joystick and status LEDs, wall-mounted control panel in a factory.
+
+
+2.4  NODE COMMUNICATION PATTERN
+─────────────────────────────────────────────────────────────────────────────────
+
+Nodes communicate through a publish-subscribe message system over the agent
+network. Each message type has a defined schema:
+
+  SENSOR_DATA:    {node_id, sensor_type, timestamp, values[], quality_flags}
+  COMMAND:        {source_id, target_id, command_type, parameters[], priority}
+  STATUS:         {node_id, artifact_hash, health_flags, uptime, error_count}
+  ALERT:          {node_id, severity, alert_type, description, timestamp}
+  ARTIFACT_META:  {node_id, artifact_hash, parent_hash, version, description}
+
+All messages are compact binary-encoded (CBOR or Protocol Buffers) for
+efficiency on the ESP32's constrained network stack. Each message includes a
+sequence number for deduplication and ordering at the receiver.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SECTION 3: ARTIFACT LIFECYCLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1  ARTIFACT STRUCTURE
+─────────────────────────────────────────────────────────────────────────────────
+
+Every NEXUS artifact is a complete ESP32 firmware image with the following
+metadata structure:
+
+  artifact_t {
+      // Identity
+      uint8_t     hash[32];           // SHA-256 of the entire artifact binary
+      uint8_t     parent_hash[32];    // SHA-256 of the previous artifact this evolved from
+      uint8_t     genesis_hash[32];   // SHA-256 of the original factory artifact
+      uint32_t    version_major;
+      uint32_t    version_minor;
+      uint32_t    version_patch;
+
+      // Provenance
+      uint64_t    timestamp;          // Unix epoch when artifact was generated
+      uint8_t     author[32];         // "jetson-001" or "human-operator"
+      uint8_t     signature[64];      // Ed25519 signature of (hash || metadata)
+
+      // Description
+      char        description[256];   // Human-readable description of what changed
+      char        reasoning[512];     // Why this change was proposed (telemetry refs)
+
+      // Performance
+      metric_set  predicted_metrics;  // Jetson's simulation predictions
+      metric_set  observed_metrics;   // Actual measured performance during A/B test
+
+      // Deployment
+      uint32_t    target_node_type;   // CONTROL_NODE, SENSOR_NODE, etc.
+      uint8_t     target_node_id;     // Which node this artifact is for
+      uint8_t     deployment_state;   // TEST, APPROVED, ROLLED_BACK, REJECTED
+  }
+
+The artifact binary itself contains:
+  - NEXUS RTOS kernel (FreeRTOS configuration for the node)
+  - Hardware abstraction layer for the target node's specific sensors/actuators
+  - Control logic function (the swappable part)
+  - Safety monitor (always identical, compiled from the same protected source)
+  - Telemetry publisher
+  - Artifact manager (dual-slot OTA logic)
+  - Network stack (ESP-NOW, Wi-Fi, or wired, depending on node configuration)
+
+
+3.2  MERKLE-TREE ARTIFACT STORAGE ON JETSON
+─────────────────────────────────────────────────────────────────────────────────
+
+The Jetson Orin Nano maintains a complete, immutable history of every artifact
+ever generated for every node. This history is stored as a Merkle tree:
+
+  Genesis Artifact (hash: 0abc...)
+  ├── v1.1 (hash: 1def...) - parent: 0abc...
+  │   ├── v1.2 (hash: 2ghi...) - parent: 1def... [APPROVED]
+  │   │   └── v1.3 (hash: 3jkl...) - parent: 2ghi... [TESTING]
+  │   └── v1.1.1 (hash: 4mno...) - parent: 1def... [REJECTED]
+  └── v2.0 (hash: 5pqr...) - parent: 0abc... [APPROVED]
+      └── v2.1 (hash: 6stu...) - parent: 2.0... [APPROVED]
+
+Properties:
+  - Each artifact's hash is computed over its entire binary plus metadata.
+  - Each artifact records its parent hash, forming a chain.
+  - The Merkle tree allows efficient verification that the Jetson's artifact
+    history has not been tampered with. Any single corrupted artifact breaks
+    the tree hash.
+  - The Jetson can reconstruct the complete evolution path of any node's
+    control logic: "v1.1 improved PID damping ratio based on field data.
+    v1.2 further tuned gains after chemical viscosity change. v1.3 is
+    currently being A/B tested with a neural-augmented controller."
+  - Full artifact history is valuable for debugging, compliance, and
+    organizational learning across multiple deployments.
+
+
+3.3  ESP32 ARTIFACT STORAGE
+─────────────────────────────────────────────────────────────────────────────────
+
+Each ESP32 stores exactly three artifacts in its flash:
+
+  Slot 0 (Current):   The artifact currently executing.
+  Slot 1 (Previous):  The previous artifact, kept for instant rollback.
+  Factory (Protected): The Genesis Artifact, in a hardware-protected partition.
+
+Additionally, the ESP32 stores in non-volatile storage:
+  - current_hash:     SHA-256 of the artifact in Slot 0
+  - previous_hash:    SHA-256 of the artifact in Slot 1
+  - factory_hash:     SHA-256 of the Genesis Artifact
+  - rollback_count:   Number of times the node has been rolled back
+  - last_update_time: Timestamp of the most recent artifact update
+  - jetson_id:        ID of the Jetson that last deployed an artifact
+
+Flash layout (ESP32-S3 with 8 MB flash):
+  0x0000 - 0x1000:   Bootloader
+  0x1000 - 0x8000:   Partition table
+  0x8000 - 0xF000:   NVS (Non-Volatile Storage) - artifact metadata
+  0xF000 - 0x10000:  Safety Monitor (eFuse protected)
+  0x10000 - 0x510000: Slot 0 (Current Artifact) - 3 MB
+  0x510000 - 0xA10000: Slot 1 (Previous Artifact) - 3 MB
+  0xA10000 - 0xA20000: Artifact manager metadata
+  0xA20000 - 0xA30000: Telemetry buffer (ring buffer for store-and-forward)
+  0xA30000 - 0x800000: Reserved / OTA data / other partitions
+
+Dual-slot OTA mechanism:
+  1. Jetson sends new artifact binary to ESP32 Artifact Manager
+  2. Artifact Manager writes new artifact to INACTIVE slot (the slot not
+     currently executing)
+  3. Artifact Manager computes SHA-256 of received binary and compares to
+     expected hash from the Jetson's signed metadata
+  4. If hash matches and Ed25519 signature validates, Artifact Manager sets
+     OTA update pending flag
+  5. On next reboot, bootloader swaps active slot and boots from new artifact
+  6. If the new artifact fails the post-boot self-test (watchdog fires
+     within 10 seconds, or self-test function returns error), bootloader
+     automatically reverts to previous slot
+  7. Anti-rollback counter in eFuse prevents loading artifacts older than
+     the current minimum version, protecting against downgrade attacks
+
+
+3.4  A/B TESTING PROTOCOL
+─────────────────────────────────────────────────────────────────────────────────
+
+For safety-critical nodes, NEXUS supports A/B testing using redundant hardware:
+
+  Prerequisites:
+  - Two identical ESP32 nodes (PRIMARY and BACKUP) controlling the same or
+    equivalent physical systems
+  - Both nodes running different artifacts
+  - Both nodes publishing telemetry to the same Jetson
+
+  Test Setup:
+  1. Jetson proposes new artifact V_NEW for a CONTROL_NODE
+  2. Human approves A/B test
+  3. Jetson deploys V_NEW to BACKUP node (PRIMARY continues on V_OLD)
+  4. If physical system allows, both nodes drive identical actuators in
+     alternating fashion (time-sliced), or drive separate but equivalent
+     actuators simultaneously
+  5. Jetson collects comparative metrics for the agreed test duration
+
+  Metrics Collected (generalized, domain-specific metrics added per manifest):
+  - Control error RMS: How well does the node track its setpoint?
+  - Control output variance: How smoothly does the node command actuators?
+  - Energy consumption: Total energy used by the node's actuators during test
+  - Actuator cycle count: How many actuator state changes occurred?
+  - Safety trigger count: Did the safety monitor trigger? How often?
+  - Communication reliability: Packet loss, latency, jitter
+  - CPU utilization: How much of the ESP32's processing capacity is used?
+
+  Test Completion:
+  1. Jetson generates comparative report: V_OLD vs V_NEW across all metrics
+  2. Report includes statistical significance tests (t-test, Mann-Whitney)
+  3. Report highlights improvements and regressions
+  4. Human reviews report and makes one of three decisions:
+     a. PROMOTE: Deploy V_NEW to PRIMARY (and optionally all similar nodes)
+     b. REJECT: Revert BACKUP to V_OLD, archive V_NEW as rejected
+     c. EXTEND: Continue A/B test for longer duration or different conditions
+
+  Single-Node Testing (for non-safety-critical nodes):
+  If redundant hardware is not available, the Jetson can still test by:
+  - Running the new artifact in simulation first (ESP32 emulator on Jetson)
+  - Deploying to a non-critical secondary node in the system
+  - Deploying during a maintenance window with human supervision present
+
+
+3.5  ROLLBACK MECHANISM
+─────────────────────────────────────────────────────────────────────────────────
+
+NEXUS provides three levels of rollback, from fastest to most thorough:
+
+  Level 1 -- Instant Software Rollback:
+  The HMI_NODE provides a physical "ROLLBACK" button. When pressed, it sends
+  a signed rollback command to the target node. The node's Artifact Manager
+  immediately sets the OTA flag to boot from Slot 1 (Previous) on next
+  reboot and triggers a software reset. Total time: < 2 seconds. This is the
+  recommended first response to any suspected artifact problem.
+
+  Level 2 -- Automatic Rollback:
+  If the Safety Monitor triggers three times within 60 seconds, or if the
+  hardware watchdog fires, the ESP32 automatically reverts to Slot 1 on the
+  next boot cycle. This happens without any human or Jetson intervention.
+
+  Level 3 -- Genesis Factory Reset:
+  A physical button sequence (hold button for 10 seconds during boot) forces
+  the ESP32 to boot from the Factory partition, regardless of OTA state.
+  This is the nuclear option. It restores the node to its exact factory
+  configuration. Used when all other artifacts are suspect. Requires JTAG
+  for re-deployment of any custom artifacts afterward.
+
+  Rollback Audit Trail:
+  Every rollback event is logged with timestamp, trigger reason, artifact
+  hashes before and after, and the ID of whoever initiated it (human,
+  automatic, or watchdog). This log is stored in NVS and transmitted to the
+  Jetson when connectivity is restored.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SECTION 4: NETWORK GENERALIZATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  THREE-TIER NETWORK MODEL
+─────────────────────────────────────────────────────────────────────────────────
+
+NEXUS organizes all communication into three tiers with distinct characteristics:
+
+  TIER 0 -- SENSOR/ACTUATOR BUS (Physical I/O Layer):
+  Technology: I2C, SPI, UART, CAN bus, RS-485, 1-Wire, analog signals
+  Purpose: Direct connection between microcontrollers and physical hardware
+  Latency: Microseconds to milliseconds
+  Topology: Point-to-point or multi-drop bus, physically wired
+  Reliability: Extremely high (wired connections, short distances)
+  Protocol: Hardware-specific, no NEXUS framing overhead
+  Scope: Within a single physical enclosure or mounting point
+
+  Examples:
+  - I2C bus connecting an ESP32 to temperature, humidity, and pressure sensors
+  - CAN bus connecting a CONTROL_NODE to multiple ACTUATOR_NODEs on a vehicle
+  - SPI bus connecting to a high-speed ADC for vibration monitoring
+  - PWM signals directly driving motor controllers
+  - RS-485 daisy chain connecting nodes along a conveyor belt in a factory
+
+  TIER 1 -- AGENT NETWORK (Node-to-Node Layer):
+  Technology: ESP-NOW, Wi-Fi (802.11b/g/n), Thread/6LoWPAN, Ethernet
+  Purpose: Communication between NEXUS nodes and between nodes and Jetsons
+  Latency: 1-100 milliseconds (depending on technology and topology)
+  Topology: Mesh (peer-to-peer) with optional hierarchical structure
+  Reliability: Moderate to high (wireless with retransmission, or wired Ethernet)
+  Protocol: NEXUS Message Protocol (compact binary, CBOR-encoded)
+  Scope: Within a single machine, vehicle, or facility
+
+  Communication patterns:
+  - Peer-to-peer: CONTROL_NODE sends commands directly to ACTUATOR_NODEs
+    without routing through a central coordinator. This ensures that even
+    if the Jetson or GATEWAY_NODE fails, control nodes can still command
+    actuators.
+  - Hierarchical: SENSOR_NODEs report to a CONTROL_NODE, which reports to
+    the Jetson via a GATEWAY_NODE. The hierarchy is logical, not enforced
+    by routing -- nodes can also communicate peer-to-peer when needed.
+  - Broadcast: Alerts and status messages are broadcast to all nodes.
+  - Jetson Communication: The Jetson connects to the agent network via a
+    GATEWAY_NODE (Wi-Fi or Ethernet bridge). The Jetson is a peer on the
+    network, not a master. It receives telemetry and sends proposals, but
+    does not route normal node-to-node traffic.
+
+  Network technology selection:
+  - ESP-NOW: For low-power, short-range, high-reliability node-to-node
+    communication. No access point required. 250 byte max payload. Ideal
+    for sensor reporting and actuator commands between nearby nodes.
+  - Wi-Fi: For higher-bandwidth communication with Jetsons, HMIs, and
+    cloud connectivity. Requires access point (provided by GATEWAY_NODE).
+  - Thread/6LoWPAN: For large-scale deployments (hundreds of nodes) where
+    mesh networking with automatic routing is needed.
+  - Ethernet: For fixed installations where wired reliability is required
+    (factory floors, warehouse infrastructure).
+
+  TIER 2 -- CLOUD LINK (External Connectivity Layer):
+  Technology: Starlink, cellular (4G/5G), satellite Iridium, long-range
+              LoRa, fiber optic internet
+  Purpose: Communication with cloud services, remote monitoring, fleet
+           management, heavy compute offloading
+  Latency: 100 milliseconds to seconds (highly variable)
+  Topology: Star (single uplink to cloud)
+  Reliability: Lowest tier -- intermittent connectivity is assumed
+  Protocol: MQTT over TLS, HTTPS REST APIs, gRPC
+  Scope: Machine/facility to cloud/backend services
+
+  Usage policy:
+  - Cloud link is for HEAVY COMPUTE ONLY. The Jetson offloads tasks that
+    exceed its local capacity: training large neural networks, running
+    complex simulations, accessing global weather/agricultural databases,
+    syncing artifact histories across multiple deployments.
+  - Real-time control NEVER traverses Tier 2. No actuator command ever
+    depends on a cloud round-trip. The cloud is for batch processing and
+    data aggregation, not real-time operation.
+  - Store-and-forward: If the cloud link is down, the Jetson buffers data
+    locally (up to several days of telemetry) and transmits when
+    connectivity is restored. This is implemented via a persistent local
+    queue with priority levels.
+
+
+4.2  STORE-AND-FORWARD WITH EVENTUAL CONSISTENCY
+─────────────────────────────────────────────────────────────────────────────────
+
+NEXUS does not require reliable, ordered, low-latency network communication
+for correct operation. The architecture is designed around the assumption that
+messages may be lost, delayed, reordered, or duplicated.
+
+  Telemetry store-and-forward:
+  - Each ESP32 maintains a circular buffer of recent telemetry messages
+    (typically 100-1000 messages, depending on available flash/RAM)
+  - Messages are published to the agent network when connectivity is available
+  - If the Jetson is unreachable, messages accumulate in the buffer
+  - When connectivity is restored, buffered messages are transmitted in order
+  - The Jetson's telemetry ingestion pipeline handles out-of-order and
+    duplicate messages using sequence numbers and timestamps
+
+  Command store-and-forward:
+  - Commands from the Jetson (artifact deployment proposals, configuration
+    changes) are queued on the Jetson until acknowledged by the target node
+  - If the target node does not acknowledge within a timeout, the command
+    is retransmitted
+  - Commands have TTL (time-to-live) to prevent stale commands from being
+    executed after prolonged network outages
+
+  Eventual consistency model:
+  - The system does NOT require all nodes to have the same view of the world
+    at all times
+  - Each node operates based on its local sensor data and its current artifact
+  - Coordination between nodes is "best effort" -- if a CONTROL_NODE cannot
+    reach an ACTUATOR_NODE, the Safety Monitor on the ACTUATOR_NODE will
+    detect the communication loss and move to a safe state
+  - The Jetson's global view of the system may lag real-time by seconds to
+    minutes depending on network conditions. This is acceptable because the
+    Jetson's role is advisory, not real-time control
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SECTION 5: DOMAIN MANIFEST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  MANIFEST PURPOSE AND STRUCTURE
+─────────────────────────────────────────────────────────────────────────────────
+
+The Domain Manifest is a JSON document that describes the physical layout,
+node configuration, and relationships of a NEXUS deployment. It is the
+single source of truth that both the Jetson and human operators use to
+understand what nodes exist, what they do, and how they connect.
+
+The manifest is domain-agnostic. The same NEXUS framework software runs on
+an agricultural sprayer, a warehouse robot, a mining haul truck, and a
+factory assembly line. The manifest is what makes each deployment specific.
+
+The manifest is loaded onto the Jetson during initial deployment setup. The
+Jetson uses the manifest to:
+  - Validate incoming telemetry (is this sensor reading from a known node?)
+  - Generate appropriate artifacts (what sensors/actuators does this node have?)
+  - Detect configuration errors (missing nodes, mismatched types)
+  - Provide human-readable system visualization on the HMI
+
+5.2  MANIFEST SCHEMA (SIMPLIFIED)
+─────────────────────────────────────────────────────────────────────────────────
+
+{
+  "manifest_version": "1.0",
+  "deployment_id": "ag-sprayer-007",
+  "deployment_name": "North Field Sprayer Unit 7",
+  "created": "2025-01-15T10:00:00Z",
+  "last_modified": "2025-06-20T14:30:00Z",
+
+  "hardware": {
+    "esp32_variant": "ESP32-S3-WROOM-1-N8R8",
+    "jetson_variant": "Jetson Orin Nano Developer Kit 8GB",
+    "power_source": "vehicle_12V",
+    "enclosure_rating": "IP67"
+  },
+
+  "network": {
+    "tier0": [
+      {
+        "bus_type": "CAN",
+        "bitrate": 500000,
+        "nodes": ["ctrl-spray", "actuator-valve-left", "actuator-valve-right"]
+      },
+      {
+        "bus_type": "I2C",
+        "address_range": "0x40-0x4F",
+        "nodes": ["sensor-flow-left", "sensor-flow-right", "sensor-pressure"]
+      }
+    ],
+    "tier1": {
+      "protocol": "ESP-NOW",
+      "channel": 1,
+      "gateway": "gw-main"
+    },
+    "tier2": {
+      "type": "starlink",
+      "endpoint": "mqtt://nexus.example.com:8883"
+    }
+  },
+
+  "nodes": [
+    {
+      "node_id": "ctrl-spray",
+      "type": "CONTROL_NODE",
+      "role": "Spray rate controller",
+      "hardware_id": "0x12345678",
+      "esp32_flash_id": "0xABCDEF01",
+      "sensors": ["sensor-flow-left", "sensor-flow-right", "sensor-pressure",
+                   "sensor-gps", "sensor-boom-height"],
+      "actuators": ["actuator-valve-left", "actuator-valve-right"],
+      "control_loop_hz": 50,
+      "safety_limits": {
+        "max_flow_rate_lpm": 40.0,
+        "max_pressure_kpa": 800.0,
+        "min_boom_height_m": 0.3
+      },
+      "artifact": {
+        "genesis_hash": "a1b2c3...",
+        "current_hash": "d4e5f6...",
+        "previous_hash": "b2c3d4..."
+      }
+    },
+    {
+      "node_id": "sensor-gps",
+      "type": "SENSOR_NODE",
+      "role": "GPS position and velocity",
+      "hardware_id": "0x87654321",
+      "sensor_config": {
+        "protocol": "UART",
+        "baud_rate": 115200,
+        "nmea_sentences": ["GGA", "VTG", "RMC"]
+      }
+    },
+    {
+      "node_id": "actuator-valve-left",
+      "type": "ACTUATOR_NODE",
+      "role": "Left spray valve proportional control",
+      "hardware_id": "0x11111111",
+      "actuator_config": {
+        "protocol": "CAN",
+        "type": "proportional_valve",
+        "min_pulse": 0,
+        "max_pulse": 4095,
+        "timeout_safe_state": "closed"
+      }
+    },
+    {
+      "node_id": "gw-main",
+      "type": "GATEWAY_NODE",
+      "role": "Wi-Fi and ESP-NOW gateway to Jetson",
+      "hardware_id": "0x22222222",
+      "interfaces": {
+        "wifi": {"ssid": "NEXUS-Sprayer7", "channel": 6},
+        "espnow": {"channel": 1},
+        "ethernet": {"enabled": false}
+      }
+    },
+    {
+      "node_id": "hmi-cab",
+      "type": "HMI_NODE",
+      "role": "Cab-mounted display and controls",
+      "hardware_id": "0x33333333",
+      "display": {"type": "ST7789", "resolution": "240x320"},
+      "buttons": ["rollback", "mode_select", "acknowledge"]
+    }
+  ],
+
+  "jetson": {
+    "jetson_id": "jetson-sprayer7",
+    "role": "Spray optimization brain",
+    "optimization_targets": [
+      {"metric": "coverage_uniformity", "direction": "maximize"},
+      {"metric": "chemical_waste", "direction": "minimize"},
+      {"metric": "energy_consumption", "direction": "minimize"}
+    ],
+    "approval_policy": {
+      "auto_approve": false,
+      "require_human_for": ["actuator_artifacts", "safety_limit_changes"]
+    }
+  }
+}
+
+5.3  CROSS-DOMAIN MANIFEST EXAMPLES
+─────────────────────────────────────────────────────────────────────────────────
+
+To demonstrate NEXUS's domain-agnostic nature, here are simplified manifests
+for three additional domains:
+
+  WAREHOUSE AUTONOMOUS MOBILE ROBOT:
+  Nodes:
+    ctrl-navigation    CONTROL_NODE  - Path planning, obstacle avoidance
+    ctrl-drive         CONTROL_NODE  - Motor speed and steering control
+    sensor-lidar-front SENSOR_NODE   - 2D lidar, 10 Hz, UART
+    sensor-lidar-rear  SENSOR_NODE   - 2D lidar, 10 Hz, UART
+    sensor-imu         SENSOR_NODE   - 9-DOF IMU, I2C, 100 Hz
+    sensor-battery     SENSOR_NODE   - Voltage, current, temperature, I2C
+    actuator-motor-l   ACTUATOR_NODE - Left wheel motor driver, CAN
+    actuator-motor-r   ACTUATOR_NODE - Right wheel motor driver, CAN
+    gw-fleet           GATEWAY_NODE  - Wi-Fi bridge to fleet management server
+    hmi-status         HMI_NODE      - LED status ring, button panel
+
+  Key differences from agriculture:
+    - Real-time path planning requires lower latency between lidar sensors
+      and navigation controller (ESP-NOW at 100 Hz)
+    - Safety limits include maximum speed, minimum obstacle distance, and
+      battery voltage thresholds
+    - Multiple CONTROL_NODEs must coordinate (navigation -> drive)
+    - Tier 2 connects to a warehouse management system for task assignment
+
+  MINING HAUL TRUCK:
+  Nodes:
+    ctrl-engine       CONTROL_NODE  - Engine RPM and transmission control
+    ctrl-hydraulic    CONTROL_NODE  - Hydraulic system pressure management
+    ctrl-brake        CONTROL_NODE  - Braking system with ABS
+    sensor-payload    SENSOR_NODE   - Load cell, strain gauge, weight
+    sensor-gps-rtk    SENSOR_NODE   - RTK GPS, 20 Hz, centimeter accuracy
+    sensor-slope      SENSOR_NODE   - Inclinometer, accelerometer
+    sensor-camera     SENSOR_NODE   - Rear-view camera, processed on Jetson
+    actuator-throttle ACTUATOR_NODE - Electronic throttle body, CAN
+    actuator-brake    ACTUATOR_NODE - Brake proportional valve, CAN
+    actuator-steering ACTUATOR_NODE - Steering hydraulic valve, CAN
+    gw-mine           GATEWAY_NODE  - Long-range radio to mine operations center
+    hmi-dashboard     HMI_NODE      - Full dashboard display, physical gauges
+
+  Key differences:
+    - Safety is paramount: braking system has redundant ACTUATOR_NODEs
+    - Engine and hydraulic controllers are independent safety domains
+    - Slope sensor triggers automatic speed limiting on steep grades
+    - Jetson runs computer vision for obstacle detection and haul road analysis
+    - Tier 2 uses mine-specific radio system (not Starlink, underground)
+    - Genesis artifacts include conservative speed limits that the Jetson
+      can only tighten, never loosen, without two-factor human approval
+
+  FACTORY ASSEMBLY LINE STATION:
+  Nodes:
+    ctrl-assembly      CONTROL_NODE  - Assembly sequence state machine
+    sensor-vision      SENSOR_NODE   - Machine vision camera, Jetson-processed
+    sensor-proximity   SENSOR_NODE   - Capacitive proximity sensors, 1 kHz
+    sensor-force       SENSOR_NODE   - Force/torque sensor on robotic arm
+    actuator-gripper   ACTUATOR_NODE - Pneumatic gripper, solenoid valve
+    actuator-conveyor  ACTUATOR_NODE - Conveyor belt motor, VFD control
+    actuator-press     ACTUATOR_NODE - Hydraulic press, proportional valve
+    gw-factory         GATEWAY_NODE  - Ethernet bridge to factory MES system
+    hmi-operator       HMI_NODE      - Touchscreen panel, physical E-stop
+
+  Key differences:
+    - Very high sensor update rates (1 kHz proximity sensing for safety)
+    - Assembly sequence is a complex state machine with many branches
+    - Vision processing done on Jetson, results sent to CONTROL_NODE
+    - Factory MES integration via OPC-UA on Tier 2
+    - Regulatory compliance requires artifact audit trail
+    - E-stop is a hardwired safety input, NOT a network message
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SECTION 6: FAILURE MODES AND RESILIENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1  FAILURE TAXONOMY
+─────────────────────────────────────────────────────────────────────────────────
+
+NEXUS anticipates and mitigates the following failure categories:
+
+  Category 1: Artifact Failures (software bugs in control logic)
+  Category 2: Brain Failures (Jetson crashes, power loss, compute errors)
+  Category 3: Network Failures (connectivity loss, interference, congestion)
+  Category 4: Hardware Failures (sensor/actuator faults, power supply issues)
+  Category 5: Human Error (misconfiguration, accidental commands)
+  Category 6: Security Threats (unauthorized access, malicious artifacts)
+
+
+6.2  CATEGORY 1: ARTIFACT FAILURES
+─────────────────────────────────────────────────────────────────────────────────
+
+Scenario: The Jetson generates an artifact that causes a CONTROL_NODE to
+produce erratic actuator commands (e.g., a PID controller with gains tuned
+too aggressively, causing oscillation).
+
+Detection:
+  - Safety Monitor detects actuator output exceeding rate limits
+  - Safety Monitor detects control error exceeding maximum thresholds
+  - Telemetry shows unusual patterns (high variance in actuator commands)
+
+Mitigation chain:
+  1. Safety Monitor triggers, forcing actuators to safe state. System stops
+     its active task but remains safe.
+  2. Safety Monitor counts trigger events. After 3 triggers in 60 seconds,
+     automatic rollback to previous artifact is initiated.
+  3. HMI displays alert: "SAFETY TRIGGER: ctrl-spray. Artifact rollback
+     available. Press ROLLBACK to revert."
+  4. Human presses ROLLBACK button. Node reboots with previous artifact.
+     System resumes normal operation within seconds.
+  5. If previous artifact also fails, Level 3 rollback (Genesis factory
+     reset) is available.
+  6. When Jetson connectivity is restored, the rollback event is reported.
+     The Jetson marks the failed artifact as REJECTED in the Merkle tree
+     and analyzes what went wrong.
+
+  Prevention:
+  - All artifacts undergo static analysis on the Jetson before deployment
+  - Simulation testing runs the artifact against historical telemetry data
+  - Control output bounds are enforced by the Safety Monitor regardless
+    of what the artifact commands
+  - New artifacts must pass a "sanity check" boot sequence that verifies
+    basic functionality before being promoted to active duty
+
+
+6.3  CATEGORY 2: BRAIN FAILURES (JETSON)
+─────────────────────────────────────────────────────────────────────────────────
+
+Scenario: The Jetson Orin Nano experiences a kernel panic, power supply
+failure, or thermal throttling that renders it non-functional.
+
+Impact on ESP32 nodes: ZERO. This is the fundamental design guarantee of
+NEXUS. The ESP32 nodes continue running their current artifacts. Control
+loops continue. Safety monitors continue. The system operates at Level 0
+(Isolated) or Level 1 (if the agent network is still functioning for
+node-to-node communication).
+
+What is lost:
+  - Telemetry visualization (no dashboards)
+  - Artifact evolution (no new improvements proposed)
+  - Cloud sync (telemetry not forwarded to backend)
+  - A/B testing (cannot compare metrics)
+
+Recovery:
+  - Jetson reboots automatically (watchdog timer, hardware reset circuit)
+  - On boot, Jetson reconnects to GATEWAY_NODE, requests current artifact
+    hashes from all nodes, and verifies its Merkle tree is consistent
+  - Telemetry buffering on ESP32s means no data is lost during the outage
+    (up to buffer capacity)
+  - If the Jetson is physically damaged, it can be replaced with a new unit.
+    The new unit syncs artifact history from the cloud (Tier 2) or from
+    other Jetsons in the fleet. ESP32 nodes do not need to be touched.
+
+Multi-Jetson deployments:
+  In large systems, multiple Jetson Orin Nanos can be deployed for
+  redundancy. They share the same Merkle tree via the agent network.
+  If one Jetson fails, another takes over the advisory role. This is
+  recommended for high-value deployments (mining trucks, construction
+  equipment, autonomous vehicles).
+
+
+6.4  CATEGORY 3: NETWORK FAILURES
+─────────────────────────────────────────────────────────────────────────────────
+
+Scenario A: Tier 1 (Agent Network) intermittent connectivity:
+  - ESP-NOW packets occasionally lost due to RF interference from heavy
+    machinery, metal structures, or competing Wi-Fi signals
+  Mitigation:
+  - SENSOR_NODEs buffer readings and retransmit. CONTROL_NODEs use last-known
+    good sensor values (with staleness tracking) if readings are missed.
+  - ACTUATOR_NODEs have communication timeout: if no command from
+    CONTROL_NODE within 500 ms, move to safe state.
+  - All node-to-node commands include sequence numbers. Receiver discards
+    duplicates and detects gaps. Gaps are logged but do not trigger alerts
+    unless they persist beyond a configurable threshold.
+
+Scenario B: Tier 1 complete failure:
+  - GATEWAY_NODE loses power, or RF environment becomes unusable
+  Mitigation:
+  - Nodes that communicate via Tier 0 (CAN bus, I2C) continue unaffected.
+  - A CONTROL_NODE that receives sensor data via CAN and sends actuator
+    commands via CAN continues full operation without any Tier 1 dependency.
+  - Only Jetson communication is lost. System degrades to Level 0.
+  - HMI_NODE (if connected via direct I2C/SPI) continues to display status.
+
+Scenario C: Tier 2 (Cloud Link) failure:
+  - Starlink dish misalignment, cellular tower outage, fiber cut
+  Mitigation:
+  - Jetson buffers cloud-bound telemetry locally (SSD storage, days of data)
+  - Artifact history is maintained locally on the Jetson's Merkle tree
+  - Cloud-dependent features (fleet management, remote monitoring, global
+    data aggregation) are unavailable but local operation is unaffected
+  - Jetson continues to propose artifact improvements based on local data
+  - When connectivity is restored, buffered data is uploaded automatically
+
+
+6.5  CATEGORY 4: HARDWARE FAILURES
+─────────────────────────────────────────────────────────────────────────────────
+
+Sensor failure:
+  - SENSOR_NODE detects failure via self-diagnostics (open circuit, out-of-
+    range reading, communication timeout)
+  - Publishes ALERT message with severity = ERROR, alert_type = SENSOR_FAILURE
+  - CONTROL_NODE receiving the alert marks the sensor as FAILED and switches
+    to a fallback strategy:
+    a. Use redundant sensor (if available)
+    b. Use estimated value from other correlated sensors
+    c. Use last-known-good value with increasing uncertainty
+    d. If no fallback is possible, trigger safe state (e.g., reduce speed,
+       stop active task)
+  - Jetson is notified and adds sensor replacement to maintenance schedule
+
+Actuator failure:
+  - ACTUATOR_NODE detects failure (overcurrent, no movement despite command,
+    feedback error)
+  - ACTUATOR_NODE forces output to safe state (disables driver, opens relay)
+  - Publishes ALERT with severity = CRITICAL, alert_type = ACTUATOR_FAILURE
+  - CONTROL_NODE marks actuator as FAILED and adjusts strategy:
+    a. Use redundant actuator
+    b. Operate in degraded mode (e.g., reduced capacity, lower speed)
+    c. If actuator is safety-critical, trigger system-wide safe shutdown
+  - Human operator is immediately notified via HMI visual and audible alerts
+
+ESP32 node failure:
+  - Hardware watchdog triggers system reset
+  - If reset fails (hardware fault), the node is non-responsive
+  - GATEWAY_NODE detects node absence via heartbeat timeout
+  - Jetson is notified and logs the failure
+  - If the failed node is a CONTROL_NODE, dependent ACTUATOR_NODEs detect
+    communication loss and move to safe state
+  - If the failed node is a SENSOR_NODE, dependent CONTROL_NODEs switch to
+    fallback strategies
+  - Human is notified to replace the node
+
+Power supply failure:
+  - ESP32 has brown-out detection: if supply voltage drops below threshold,
+    the Safety Monitor forces all actuators to safe state before the MCU
+    resets
+  - Jetson has UPS (uninterruptible power supply): continues operating for
+    several minutes after main power loss, allowing graceful shutdown
+  - Battery-powered nodes (agricultural, mining) report battery level via
+    telemetry. Jetson monitors battery trends and predicts replacement
+    intervals.
+
+
+6.6  CATEGORY 5: HUMAN ERROR
+─────────────────────────────────────────────────────────────────────────────────
+
+Misconfiguration:
+  - The Domain Manifest includes type constraints. If a human attempts to
+    assign an artifact intended for a SENSOR_NODE to a CONTROL_NODE, the
+    Jetson rejects the deployment.
+  - Safety limit changes require explicit human confirmation with the exact
+    values displayed. No "confirm" without reading.
+
+Accidental rollback:
+  - The ROLLBACK button requires a 2-second hold (not a momentary press)
+    to prevent accidental activation
+  - After rollback, the system presents a confirmation prompt on the HMI
+
+Accidental artifact approval:
+  - A/B test promotion requires explicit human action on the HMI
+  - Auto-approve policies in Level 3 have configurable restrictions
+    (e.g., never auto-approve changes to safety limits or actuator types)
+
+
+6.7  CATEGORY 6: SECURITY THREATS
+─────────────────────────────────────────────────────────────────────────────────
+
+Unauthorized artifact deployment:
+  - All artifacts are signed with Ed25519 keys
+  - The ESP32's Artifact Manager verifies the signature against a trusted
+    public key stored in eFuse-protected NVS
+  - The Jetson signs artifacts with its private key, which never leaves the
+    Jetson's secure storage
+  - If an attacker injects a malicious artifact via the network, the ESP32
+    rejects it because the signature does not match
+
+Man-in-the-middle attacks:
+  - Tier 1 communication can optionally use AES-128-CCM encryption (ESP32
+    hardware accelerated) with pre-shared keys
+  - Keys are provisioned during factory setup and stored in eFuse-protected
+    NVS
+  - Tier 2 communication uses TLS 1.3 with certificate pinning
+
+Replay attacks:
+  - Every command message includes a monotonic sequence number and timestamp
+  - The receiver rejects messages with sequence numbers less than or equal
+    to the last accepted sequence number
+
+Denial of service:
+  - RF jamming of Tier 1 network is mitigated by the fundamental principle
+    that ESP32 nodes continue operating independently
+  - If Tier 0 (wired buses) are operational, the system continues at full
+    capability even under complete Tier 1 jamming
+
+Firmware extraction:
+  - The Genesis Artifact is readable from flash, but this is acceptable:
+    the Genesis Artifact is the MINIMUM functionality, not a secret
+  - Improved artifacts generated by the Jetson represent organizational
+    intellectual property and can optionally be encrypted at rest on the
+    Jetson's SSD
+
+
+6.8  SUMMARY: FAILURE MODE RESPONSE MATRIX
+─────────────────────────────────────────────────────────────────────────────────
+
+  Failure                  Detection              Response                Recovery
+  ─────────────────────────────────────────────────────────────────────────────────
+  Bad artifact             Safety Monitor          Auto-rollback            Manual
+  (erratic control)        trigger                 after 3 faults            redeploy
+
+  Jetson crash             Heartbeat timeout       ESP32s continue           Jetson
+  (brain offline)          on GATEWAY_NODE          at Level 0               reboots
+
+  Tier 1 intermittent      Packet loss counters    Store-and-forward,       Automatic
+  (network flaky)          on GATEWAY_NODE          last-known-good          recovery
+
+  Tier 1 complete          No heartbeat from        Level 0 operation,       Fix GW or
+  (network down)           any node                 Tier 0 unaffected        RF issue
+
+  Tier 2 failure           Jetson link monitor      Local buffering on        Auto-sync
+  (cloud down)             Jetson                   Jetson SSD               on restore
+
+  Sensor failure           SENSOR_NODE self-test   Fallback strategy        Replace
+                                                      (redundant/estimate)    sensor
+
+  Actuator failure         ACTUATOR_NODE current    Safe state, degraded     Replace
+                           monitoring               operation                actuator
+
+  ESP32 hardware           Watchdog timeout,        Dependent nodes go       Replace
+  failure                  heartbeat loss           safe                     node
+
+  Power loss               Brown-out detector       Safe state before        Power
+                                                      MCU reset                restore
+
+  OTA power failure        Post-boot checksum       Anti-rollback counter    Redeploy
+  (corrupt update)         verification             prevents bad boot        artifact
+
+  Unauthorized             Signature verification   Reject artifact          Audit and
+  artifact                 on ESP32                                          rekey
+
+  RF jamming               Signal quality metrics   Continue on Tier 0       Locate and
+                           on GATEWAY_NODE          if available             remove
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CLOSING: THE NEXUS PROMISE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NEXUS is built on a single promise: no single point of failure should be able
+to make the system dangerous. The ESP32 reflex layer is the bedrock. It runs.
+It always runs. It runs the same code it shipped with, or a carefully tested
+improvement that a human approved. The Jetson reasoning layer is the
+evolutionary advantage. It makes the system smarter over time. But the system
+does not need to be smart to be SAFE.
+
+In a world where robotics is pushing into increasingly demanding physical
+environments -- fields, mines, construction sites, factory floors, warehouse
+aisles -- the conventional approach of "compute in the cloud, actuate at the
+edge" is insufficient. The cloud is not always there. The network is not always
+reliable. The software will always have bugs.
+
+NEXUS starts from the other direction: "actuators are always safe, compute
+makes them better." This inversion of the typical robotics architecture produces
+systems that are simultaneously more reliable (because they never depend on
+external infrastructure for safety) and more capable (because they can evolve
+their behavior over time based on real-world experience).
+
+The biological analogy is precise and complete. The spinal cord keeps the
+organism alive. The brain makes it thrive. NEXUS gives every robot a spinal
+cord that never fails and a brain that never stops learning.
+
+
+================================================================================
+  END OF DOCUMENT
+  NEXUS Distributed Intelligence Framework v1.0
+  Total Sections: 6
+  Target Audience: Robotics system architects, embedded engineers, CTOs
+  License Concept: Open architecture, reference implementation encouraged
+================================================================================

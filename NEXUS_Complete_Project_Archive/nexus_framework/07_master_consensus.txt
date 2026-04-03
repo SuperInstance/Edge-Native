@@ -1,0 +1,1158 @@
+================================================================================
+           NEXUS MASTER CONSENSUS ARCHITECTURE DOCUMENT
+     Definitive Reference — Synthesized from Six Expert Briefs
+================================================================================
+  Document:       NXS-007-MASTER
+  Status:          DEFINITIVE REFERENCE
+  Synthesized by:  NEXUS Chief Architect
+  Date:            2025
+  Source Documents: 01_distributed_intelligence_framework.txt
+                    02_nexuslink_protocol.txt
+                    03_learning_and_optimization.txt
+                    04_bulletproof_coding.txt
+                    05_cross_domain_use_cases.txt
+                    06_evolutionary_code_system.txt
+  Classification:  Open Architecture Specification — Canonical Reference
+================================================================================
+
+
+TABLE OF CONTENTS
+  1.  NEXUS Framework Vision
+  2.  Contradiction Resolution Log
+  3.  Architecture Overview Diagram (ASCII)
+  4.  Glossary of Canonical Terms
+  5.  Three-Layer Code Architecture Summary
+  6.  NEXUSLINK Protocol Summary
+  7.  Artifact Lifecycle Summary
+  8.  Evolution Loop Summary
+  9.  Cross-Domain Applicability Matrix
+  10. Safety Architecture Summary
+  11. Progressive Enhancement Levels
+  12. Implementation Roadmap
+================================================================================
+
+
+================================================================================
+ 1. NEXUS FRAMEWORK VISION
+================================================================================
+
+The NEXUS distributed intelligence framework is founded on one irreducible
+insight drawn from biology: every complex organism separates REFLEX from
+REASONING. The spinal cord handles fast, deterministic survival behaviors. The
+brain handles slow, deliberative learning and planning. A chicken with its
+forebrain removed still runs, pecks, and maintains posture. The organism does
+not DIE when the brain goes offline. NEXUS applies this principle directly to
+distributed robotics and industrial automation.
+
+NEXUS deploys ESP32-S3 microcontrollers as autonomous REFLEX AGENTS — the
+spinal cord of the system. Each node runs a complete, self-contained artifact
+(a compiled firmware binary) burned into flash memory at the factory. These
+artifacts provide safe, deterministic, real-time control loops (PID
+controllers, state machines, threshold guards) that operate with hard timing
+guarantees — 100 Hz control loops with +/- 1% jitter, microsecond-level safety
+response times, and zero network dependency. When the network disappears, when
+the higher-level brain crashes, when Starlink goes offline, every ESP32
+continues performing its last-known-good behavior with full safety guarantees.
+The system degrades gracefully from "intelligent" to "functional" without ever
+passing through "dangerous." Independence is the DEFAULT, not the fallback.
+
+The Jetson Orin Nano serves as the collective R&D BRAIN — a CORTEX that
+observes, hypothesizes, and improves. Its primary function is not real-time
+control; that belongs to the ESP32s. Its primary function is observation,
+pattern discovery, hypothesis generation, simulation, and artifact improvement.
+It watches what the human operator does differently from what the control code
+would do, forms testable hypotheses about what change would eliminate the
+correction, simulates the proposed change against historical data, and presents
+evidence-based proposals to the human operator for A/B testing and approval.
+
+CODE IS HYPOTHESIS. Every line of control code running on an ESP32 is not a
+finished product — it is a proposed relationship between sensor inputs and
+actuator outputs that the system BELIEVES will produce good outcomes. The human
+operator accepted that hypothesis when they approved the artifact. The
+environment accepted it when it didn't break anything. But neither acceptance
+constitutes proof. The NEXUS evolution loop provides that proof through
+statistical validation: observe, discover patterns, hypothesize, simulate,
+propose, A/B test, measure, decide, deploy, and repeat — continuously
+improving.
+
+The PROVENANCE CHAIN is the audit trail that makes this evolution trustworthy.
+Every artifact carries its parent hash, its author (human or Cortex), its
+timestamp, its reasoning, its performance predictions, and its observed test
+results. The full history is stored as an immutable Merkle tree on the Cortex,
+enabling complete traceability: "v1.1 improved PID damping based on field
+data. v1.2 further tuned gains after chemical viscosity change. v1.3 is
+currently being A/B tested." No change is invisible. No change is irreversible.
+Every change can be audited, explained, and rolled back.
+
+NEXUS is not a marine autopilot. It is not an agricultural sprayer controller.
+It is not a warehouse robot brain. NEXUS is a GENERAL-PURPOSE distributed
+intelligence architecture that maps onto ANY system where physical actuators
+must respond to sensor inputs with hard real-time guarantees while
+higher-level optimization runs asynchronously. The architecture is
+domain-agnostic: the same framework, the same safety core, the same protocol,
+the same evolution loop — instantiated with different sensors, actuators, and
+domain-specific parameters for each deployment. The Genesis Artifact
+guarantees that a brand-new NEXUS-compatible machine works the moment it is
+unboxed, before any network is configured, before any Cortex is installed.
+Intelligence is an optional upgrade, not a prerequisite.
+
+
+================================================================================
+ 2. CONTRADICTION RESOLUTION LOG
+================================================================================
+
+The six expert briefs were authored independently by specialized teams. This
+section identifies, resolves, and documents ALL contradictions found between
+them. Each resolution represents the canonical NEXUS position.
+
+CONTRADICTION #1: MESSAGE ENCODING FORMAT
+  Brief 01 states messages use "compact binary-encoded (CBOR or Protocol
+  Buffers)." Brief 02 defines a purpose-built binary framing format with sync
+  byte 0x4E, fixed header fields, and CRC-32.
+  RESOLUTION: NEXUSLINK (Brief 02) IS the canonical wire protocol. All node-
+  to-node communication uses the NEXUSLINK binary frame format exclusively.
+  CBOR or Protocol Buffers may be used as payload ENCODING within NEXUSLINK
+  frames where self-describing data is beneficial (e.g., telemetry channel
+  bundles), but the framing, addressing, and integrity layers are always
+  NEXUSLINK. Brief 01's reference to CBOR/PB is demoted to an implementation
+  detail for payload serialization, not a protocol-level specification.
+  DECISION: NEXUSLINK binary framing is mandatory. CBOR is optional for
+  specific payload sub-formats.
+
+CONTRADICTION #2: NODE TYPE TAXONOMY
+  Brief 01 defines 5 types: CONTROL_NODE, SENSOR_NODE, ACTUATOR_NODE,
+  GATEWAY_NODE, HMI_NODE. Brief 02 defines 7 type codes: Control (0x01),
+  Sensor (0x02), Actuator (0x03), Power (0x10), Comm (0x20), Virtual (0xFE),
+  Cortex (0xFF). The GATEWAY_NODE and HMI_NODE from Brief 01 are missing from
+  Brief 02's type codes. Brief 02 adds Power and Virtual nodes not in Brief
+  01.
+  RESOLUTION: The canonical node type set is the UNION of both briefs. Seven
+  types are defined: CONTROL (0x01), SENSOR (0x02), ACTUATOR (0x03), GATEWAY
+  (0x04), HMI (0x05), POWER (0x10), CORTEX (0xFF). GATEWAY maps to Brief
+  02's Comm concept. HMI receives its own type code. Virtual (0xFE) is
+  retained for software-only agents. The NEXUSLINK type code field is expanded
+  to accommodate all seven.
+  DECISION: Seven canonical node types with defined type codes.
+
+CONTRADICTION #3: A/B TESTING TOPOLOGY
+  Brief 01 describes A/B testing with two identical ESP32 nodes (PRIMARY and
+  BACKUP), with alternating or simultaneous actuator control. Brief 06
+  describes traffic splitting (5%/95% for safety-critical, 50/50 for non-
+  critical). Brief 03 describes a three-phase protocol: shadow validation
+  (backup logs but doesn't drive actuators), active A/B (human switches),
+  then statistical analysis.
+  RESOLUTION: The canonical A/B testing protocol is the three-phase model from
+  Brief 03, which is the most detailed and safety-conscious:
+    Phase 1: SHADOW VALIDATION — New artifact runs on backup in shadow mode
+    (outputs logged but not sent to actuators). Minimum 1 hour.
+    Phase 2: ACTIVE A/B TESTING — Human alternates between primary and
+    backup with configurable duration. Both publish telemetry.
+    Phase 3: STATISTICAL ANALYSIS — Paired comparison with t-test or Wilcoxon.
+  Brief 01's dual-hardware model is the physical prerequisite. Brief 06's
+  traffic splitting is a future enhancement for Level 3 (Autonomous) mode
+  only, and applies only to non-safety-critical deployments.
+  DECISION: Three-phase A/B protocol is mandatory. Traffic splitting is
+  optional for autonomous mode only.
+
+CONTRADICTION #4: OBSERVATION DATA VOLUME
+  Brief 06 estimates ~200 bytes per record, ~2 MB/min, ~3 GB/day per node.
+  Brief 03 estimates ~50 KB/s, which yields ~4.3 GB/day.
+  RESOLUTION: Both estimates are domain-dependent. Brief 03's figure assumes
+  marine telemetry with 10Hz IMU and extensive behavioral cloning data. Brief
+  06's figure assumes a more typical industrial deployment. The canonical
+  specification uses Brief 06's figure (3 GB/day) as the planning baseline
+  with Brief 03's figure (up to 4.3 GB/day) as the upper bound for data-rich
+  domains. Storage planning uses the upper bound.
+  DECISION: Storage planned at 5 GB/day per node to cover all domains.
+
+CONTRADICTION #5: DATA RETENTION POLICY
+  Brief 06 specifies: 30 days full, 1 year minute-resolution, indefinite
+  hourly. Brief 03 specifies: 90 days raw, 2 years aggregated.
+  RESOLUTION: The canonical retention policy adopts Brief 06's three-tier
+  model with Brief 03's extended periods as configurable options:
+    Tier 1 (Full Resolution): 30 days default, configurable up to 90 days
+    (if NVMe capacity allows). ~3-5 GB/day per node.
+    Tier 2 (Minute Resolution): 1 year default, configurable up to 2 years.
+    ~5 MB/day per node.
+    Tier 3 (Hourly Resolution): Indefinite. Cloud-only storage. ~50 KB/day.
+  DECISION: Three-tier retention with configurable durations.
+
+CONTRADICTION #6: CRYPTOGRAPHIC SIGNATURE ALGORITHM
+  Brief 01 specifies Ed25519 for artifact signing. Brief 04 specifies ECDSA
+  P-256 for artifact verification.
+  RESOLUTION: Both algorithms provide comparable security (128-bit security
+  level). ECDSA P-256 is chosen as the canonical algorithm because Brief 04
+  provides the most detailed security engineering specification and ECDSA P-256
+  is more widely supported in embedded hardware security modules (HSMs) and
+  is explicitly referenced in IEC 61508 safety assessments. Ed25519 may be
+  used as a faster alternative for non-safety-critical artifact distribution
+  in future protocol versions.
+  DECISION: ECDSA P-256 for artifact signing. Ed25519 reserved.
+
+CONTRADICTION #7: ARTIFACT GRANULARITY — FULL BINARY VS. MODULE
+  Brief 01 describes an artifact as a COMPLETE firmware binary containing
+  RTOS, HAL, control logic, safety monitor, telemetry, artifact manager, and
+  network stack. Brief 02 describes artifacts as "firmware binary or compiled
+  Reflex module" and for Cortex as "behavior graph, neural network model, or
+  configuration bundle." Brief 04's three-layer architecture has Genesis
+  (immutable) and Reflex (swappable) as separate layers compiled into a
+  single binary. Brief 06 treats artifacts as code diffs against a baseline.
+  RESOLUTION: Artifacts have two forms depending on target platform:
+    ESP32 Node Artifacts: Complete firmware binaries that include Genesis
+    (immutable safety core, always identical) + Reflex (swappable control
+    logic) + Layer 3 (Cortex interface). Genesis is compiled once and is
+    hardware-protected. Reflex is the part that evolves. The artifact binary
+    is the atomic deployment unit.
+    Cortex Artifacts: Compiled behavior graphs, neural network models, or
+    configuration bundles. These are NOT firmware binaries — they are
+    higher-level artifacts that evolve the Cortex's reasoning behavior.
+  The diff-based representation (Brief 06) is used for HUMAN REVIEW and
+  PROVENANCE TRACKING. The complete binary is used for DEPLOYMENT. The diff
+  is the human-readable face of the binary.
+  DECISION: Dual representation — diffs for review, binaries for deployment.
+
+CONTRADICTION #8: EVOLUTION CYCLE STEP COUNT AND NAMES
+  Brief 01: OBSERVE -> ANALYZE -> HYPOTHESIZE -> ARTIFACT GENERATION ->
+  PROPOSE -> A/B TEST -> PROMOTE/REJECT (7 steps). Brief 06: OBSERVE ->
+  DISCOVER -> HYPOTHESIZE -> SIMULATE -> PROPOSE -> TEST -> MEASURE ->
+  DECIDE -> DEPLOY -> REPEAT (10 steps).
+  RESOLUTION: Brief 06's 10-step model is canonical because it provides
+  finer granularity and clearer separation of concerns. The mapping to Brief
+  01's steps: ANALYZE = DISCOVER + HYPOTHESIZE. ARTIFACT GENERATION = HYPOTHESIZE
+  + SIMULATE. PROMOTE/REJECT = DECIDE + DEPLOY.
+  DECISION: 10-step evolution loop: OBSERVE -> DISCOVER -> HYPOTHESIZE ->
+  SIMULATE -> PROPOSE -> TEST -> MEASURE -> DECIDE -> DEPLOY -> REPEAT.
+
+CONTRADICTION #9: SIMULATION CONFIDENCE THRESHOLDS
+  Brief 03 requires HIGHER confidence for HIGHER-risk changes: L1 >= 60%,
+  L2 >= 75%, L3 >= 90%. Brief 06 assigns LOWER confidence to higher-risk
+  changes: L1 confidence = 0.9, L2 = 0.7, L3 = 0.5.
+  RESOLUTION: The apparent contradiction reflects two different uses of
+  "confidence." Brief 03's threshold is the MINIMUM ACCEPTABLE simulation
+  confidence to proceed to A/B testing. Brief 06's value is the EXPECTED
+  confidence of the simulation result given the synthesis method used.
+  Both are correct but refer to different metrics. The canonical rule:
+    SIMULATION CONFIDENCE THRESHOLD (to proceed to A/B test):
+      Level 1 (parameter): >= 60%
+      Level 2 (conditional logic): >= 75%
+      Level 3 (algorithm replacement): >= 90%
+    EXPECTED SIMULATION QUALITY (synthesis-level characteristic):
+      Level 1: Typically 85-95% (parameter changes are well-modeled)
+      Level 2: Typically 65-80% (logic changes may have unmodeled effects)
+      Level 3: Typically 40-70% (algorithm changes have high uncertainty)
+  If expected quality falls below the threshold, the proposal is routed to
+  human review regardless of level.
+  DECISION: Rising thresholds for A/B approval; falling expected quality by
+  level. Both coexist as separate metrics.
+
+CONTRADICTION #10: DISCOVERY RUN FREQUENCY
+  Brief 06 specifies pattern discovery every 4 hours. Brief 03 specifies
+  every 6-12 hours.
+  RESOLUTION: The canonical frequency is configurable with a default of 6
+  hours. The range 4-12 hours is valid. Shorter intervals increase
+  responsiveness but consume more Jetson compute. Longer intervals are
+  appropriate for domains where conditions change slowly (greenhouses,
+  water treatment). The system administrator configures this per-deployment.
+  DECISION: Default 6 hours, configurable 4-12 hours.
+
+CONTRADICTION #11: MINIMUM IMPROVEMENT THRESHOLD FOR ACCEPTANCE
+  Brief 06 specifies >= 5% absolute improvement. Brief 03 requires > 10%
+  for primary metric in some hypothesis examples but >= 5% in the formal
+  acceptance criteria.
+  RESOLUTION: The canonical minimum improvement threshold is 5% absolute
+  for the primary metric, with p < 0.05 statistical significance. This is
+  consistent with Brief 03's formal acceptance criteria. The 10% figure in
+  Brief 03's example is a RECOMMENDATION for hypothesis formation (the
+  system should aim for changes that are clearly impactful), not a hard
+  acceptance floor.
+  DECISION: 5% minimum improvement, p < 0.05 significance, no safety
+  regression.
+
+CONTRADICTION #12: NODE HEARTBEAT TIMEOUT FOR CORTEX
+  Brief 01 mentions "heartbeat timeout that kills the node" as something
+  NEXUS explicitly avoids (Rule 3 of Durable Artifacts: no heartbeat timeout
+  that kills the node). Brief 04 specifies a 10-second Cortex heartbeat
+  timeout that causes Genesis to set cortex_connected = false and enter
+  reduced mode. Brief 02's NEXUSLINK watchdog escalates to SAFE_STATE
+  after 10 consecutive misses.
+  RESOLUTION: These are different mechanisms with different scopes:
+    (a) Cortex heartbeat loss: After 10 seconds of missed Cortex heartbeats,
+    Genesis enters REDUCED MODE (Layer 3 deactivates, Reflex continues with
+    local autonomous behavior). The node does NOT stop. The node does NOT
+    enter SAFE_STATE. This is consistent with Brief 01's Rule 3.
+    (b) Peer node heartbeat loss (Brief 02): If a peer CONTROL_NODE or
+    ACTUATOR_NODE misses 10 heartbeats, the monitoring node escalates to
+    SAFE_STATE for its OWN actuators. This applies to inter-node safety, not
+    to Cortex connectivity.
+  Brief 01's prohibition against "heartbeat timeout that kills the node"
+  specifically refers to Cortex heartbeat loss NOT causing node death.
+  NEXUS correctly distinguishes between "brain offline" (degrade to local
+  autonomy) and "peer offline" (safe-state affected actuators).
+  DECISION: Cortex heartbeat loss = reduced mode. Peer heartbeat loss = safe
+  state for dependent actuators.
+
+
+================================================================================
+ 3. ARCHITECTURE OVERVIEW DIAGRAM
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │                         NEXUS SYSTEM ARCHITECTURE                           │
+  │                                                                         │
+  │  TIER 2: CLOUD LINK (Starlink / 4G-5G / Satellite)                      │
+  │  ┌──────────────────────────────────────────────────────────────────┐    │
+  │  │  Cloud Fleet Manager  │  Heavy Compute (NN Training)  │  Global   │    │
+  │  │  Cross-Deployment    │  Complex Simulation              │  Artifact │    │
+  │  │  Artifact Sync       │  Weather / Agricultural DBs     │  History  │    │
+  │  └───────────────────────────┬──────────────────────────────┴────────┘    │
+  │                              │ Store-and-Forward Queue                    │
+  │                              │ (days of buffered telemetry)              │
+  │  ══════════════════════════════╪════════════════════════════════════════  │
+  │  TIER 1: AGENT NETWORK (NEXUSLINK Protocol over WiFi/Ethernet/ESP-NOW) │
+  │                              │                                           │
+  │         ┌────────────────────┼────────────────────┐                     │
+  │         │              JETSON ORIN NANO           │                     │
+  │         │              (CORTEX)                   │                     │
+  │         │                                        │                     │
+  │         │  ┌──────────┐  ┌───────────────┐  ┌────┐ │                     │
+  │         │  │ Observe  │  │ Discover &    │  │Sim │ │                     │
+  │         │  │ Pipeline │  │ Hypothesize   │  │Eng │ │                     │
+  │         │  └────┬─────┘  └──────┬────────┘  └──┬─┘ │                     │
+  │         │       │              │              │   │                     │
+  │         │  ┌────┴──────────────┴──────────────┴───┐│                     │
+  │         │  │       EVOLUTION LOOP                     ││                     │
+  │         │  │  Propose -> Test -> Measure -> Decide   ││                     │
+  │         │  │  -> Deploy -> Repeat                     ││                     │
+  │         │  └────────────────┬───────────────────────┘│                     │
+  │         │                   │  Artifact Distribution  │                     │
+  │         │                   │  (NEXUSLINK)           │                     │
+  │         └───────────────────┼───────────────────────┘                     │
+  │                             │ NEXUSLINK Bus                                │
+  │    ┌────────────────────────┼─────────────────────────┐                   │
+  │    │                        │                          │                   │
+  │    │   ┌─────────┐  ┌──────┴──────┐  ┌──────────┐   │                   │
+  │    │   │CONTROL  │  │   ACTUATOR  │  │ SENSOR   │   │  TIER 0:         │
+  │    │   │NODE     │  │   NODE(s)   │  │ NODE(s)  │   │  PHYSICAL I/O    │
+  │    │   │(ESP32)  │  │  (ESP32)     │  │ (ESP32)  │   │  (I2C/SPI/      │
+  │    │   │         │  │             │  │          │   │   CAN/UART/      │
+  │    │   │Reflex:  │  │Safety:      │  │Sense:    │   │   PWM/GPIO)      │
+  │    │   │PID, FSM │  │OC, OT, LL,  │  │ADC, I2C │   │                   │
+  │    │   │         │  │Rate Limit   │  │Filter   │   │                   │
+  │    │   └────┬────┘  └──────┬──────┘  └────┬─────┘   │                   │
+  │    │        │              │              │          │                   │
+  │    │   ┌────┴────┐  ┌─────┴──────┐  ┌─────┴─────┐  │                   │
+  │    │   │GATEWAY  │  │   HMI      │  │  POWER    │  │                   │
+  │    │   │NODE     │  │  NODE      │  │  NODE     │  │                   │
+  │    │   │(ESP32)  │  │  (ESP32)    │  │  (ESP32)  │  │                   │
+  │    │   │Bridge   │  │Display,    │  │Battery,  │  │                   │
+  │    │   │Ext Sys  │  │Rollback    │  │Shutdown  │  │                   │
+  │    │   └─────────┘  └────────────┘  └──────────┘  │                   │
+  │    │                                                   │                   │
+  │    │              GENESIS LAYER (eFuse Protected)      │                   │
+  │    │   Safety Monitor │ Watchdog │ Artifact Manager   │                   │
+  │    │   API Enforcement │ Comms Stack │ C Fallback     │                   │
+  │    └───────────────────────────────────────────────────┘                   │
+  │                                                                           │
+  │  ARTIFACT FLOW:                                                          │
+  │  Cortex generates -> Signs (ECDSA P-256) -> Distributes via NEXUSLINK  │
+  │  -> ESP32 verifies hash & signature -> Writes to inactive slot ->          │
+  │  -> Reboot -> Self-test -> Promote or Auto-rollback                      │
+  │                                                                           │
+  │  EVOLUTION FLOW:                                                         │
+  │  Sensors -> Cortex Observe -> Discover Patterns -> Form Hypothesis ->     │
+  │  Simulate -> Propose to Human -> A/B Test -> Measure -> Decide ->          │
+  │  Deploy -> Provenance Record -> Observe (REPEAT)                          │
+  │                                                                           │
+  └───────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+ 4. GLOSSARY OF CANONICAL TERMS
+================================================================================
+
+This glossary defines the canonical vocabulary of the NEXUS framework. ALL
+documentation, source code, protocol specifications, operator manuals, and
+academic publications MUST use these terms consistently. No synonyms. No
+variant spellings.
+
+  NODE
+    An ESP32-series microcontroller (ESP32-S3 or compatible) running the
+    NEXUSLINK protocol and one or more Reflex loops. Nodes operate in
+    hard real-time with deterministic timing constraints. Nodes are typed:
+    CONTROL, SENSOR, ACTUATOR, GATEWAY, HMI, POWER, and CORTEX. Each node
+    stores a Genesis artifact in an eFuse-protected flash partition and
+    maintains dual-slot OTA capability for artifact updates.
+
+  CORTEX
+    A Jetson Orin Nano (or compatible edge compute platform) running the NEXUS
+    reasoning layer: observation pipeline, pattern discovery, hypothesis
+    generation, simulation, artifact compilation, and provenance management.
+    The Cortex is the collective "brain" of the NEXUS system. Multiple Cortex
+    nodes may exist in a swarm deployment, coordinated via the cloud link.
+    The Cortex never commands actuators in real-time (except through explicit,
+    human-approved override channels).
+
+  ARTIFACT
+    The atomic unit of deployable behavior in NEXUS. For ESP32 Nodes, an
+    artifact is a complete, compiled firmware binary containing the Genesis
+    safety core and the Reflex control logic layer. For the Cortex, an
+    artifact is a compiled behavior graph, neural network model, or
+    configuration bundle. Every artifact carries a SHA-256 hash, an ECDSA
+    P-256 signature, a parent hash (linking to the artifact it evolved from),
+    and a provenance record identifying its author and reasoning.
+
+  REFLEX
+    A real-time control loop running on a Node as part of its artifact. Reflexes
+    are the fundamental unit of autonomous behavior. A Reflex reads sensor
+    inputs via sense_read(), executes a control algorithm (PID, state machine,
+    Kalman filter), and produces actuator outputs via actuator_set(). Reflexes
+    run at deterministic intervals (e.g., 100 Hz for motor control, 10 Hz for
+    environmental regulation). Reflexes are the "hypothesis" that the Cortex
+    tests and improves.
+
+  IMPULSE
+    A command sent from one agent to another via NEXUSLINK. Impulses are the
+    mechanism for deliberate, high-level action. The Cortex sends Impulses to
+    Nodes to trigger artifact updates, mode changes, or parameter adjustments.
+    Nodes may send Impulses to other Nodes for peer-to-peer coordination.
+    Impulses are carried in COMMAND messages (type 0x03) with defined command
+    codes.
+
+  SENSE
+    Telemetry data published by a Node via NEXUSLINK. Senses are the mechanism
+    for environmental awareness. The Cortex subscribes to Senses from all Nodes
+    to build a world model. Senses are carried in TELEMETRY messages (type 0x02)
+    using the typed channel encoding format with quality flags.
+
+  BIND
+    An active, negotiated relationship between two agents. A Bind represents
+    mutual acknowledgment of identity, capabilities, and communication
+    parameters. Binds are created through the DISCOVERY and NEGOTIATE protocol
+    exchange. Binds have a defined lifecycle: BIND_ACTIVE (healthy traffic),
+    BIND_STALE (10 seconds without traffic), BIND_DEAD (60 seconds without
+    traffic). Dead binds are cleaned up and trigger alerts for control-capable
+    peers.
+
+  DOMAIN
+    A logical grouping of Nodes and Cortex nodes that share a common purpose.
+    Domains are defined in the deployment Manifest. Examples: "drive_train,"
+    "spray_system," "sensor_array," "power_system," "greenhouse_climate."
+    Domains limit the scope of broadcast messages and simplify network
+    management. Cross-domain communication requires explicit routing through a
+    GATEWAY_NODE.
+
+  MANIFEST
+    A complete declarative description of a NEXUS deployment: all Nodes, their
+    types, their hardware capabilities (sensor/actuator lists), their Bind
+    relationships, their initial Artifacts, and their Domain assignments. The
+    Manifest is the source of truth for the system's intended configuration.
+    It is created by the system integrator and stored on the Cortex.
+
+  GENESIS
+    The factory-default, hardware-protected state of a Node. Genesis is the
+    artifact and configuration that was programmed at the factory, stored in an
+    eFuse-protected flash partition that no OTA mechanism can modify. If a Node
+    has no valid artifact (corruption, failed rollback, empty storage), it
+    enters Genesis mode and runs the factory-default Reflex with minimal but
+    safe functionality. Genesis is immutable after production.
+
+  EVOLUTION
+    The process by which a Cortex improves the behavior of the NEXUS system
+    over time. Evolution produces new Artifacts by analyzing Senses, evaluating
+    performance metrics, discovering patterns (especially where humans
+    disagree with the current artifact), forming hypotheses, simulating
+    proposed changes, and deploying validated improvements through A/B testing.
+    Evolution is the key differentiator of NEXUS from static robotic systems.
+
+  PROVENANCE
+    The complete, immutable history of an Artifact: who created it, when, from
+    what parent Artifact, why it was created, what evidence supported it, what
+    the A/B test results were, and whether it was accepted or rejected.
+    Provenance enables traceability, rollback, accountability, regulatory
+    compliance, and organizational learning across multiple deployments.
+
+  NEXUS
+    The name of the distributed intelligence framework itself. "NEXUS" refers to
+    the connection point between the Reflex layer (ESP32 nodes) and the
+    Reasoning layer (Jetson Cortex). The NEXUS is not a centralized component —
+    it is the emergent intelligence that arises from the continuous dialogue
+    between observation, hypothesis, and artifact deployment across the entire
+    system.
+
+  IMPULSE (COMMAND)
+    See IMPULSE above. Also used generically to mean any deliberate message
+    that alters system state, as distinct from passive telemetry (Sense).
+
+  HYPOTHESIS
+    A formal, testable proposal for improving a Node's behavior. A Hypothesis
+    states: "Under conditions {C}, replacing behavior {B_old} with {B_new}
+    will improve metric {M} by at least delta% with 95% confidence." Each
+    Hypothesis carries a structured record including its pattern reference,
+    proposed code diff, simulation confidence, safety review status, and
+    acceptance criteria.
+
+  MESH
+    The NEXUS Tier 1 agent network when operating over wireless technologies
+    (ESP-NOW, Wi-Fi, Thread/6LoWPAN). The Mesh uses peer-to-peer communication
+    without a central coordinator. Nodes can communicate directly with each
+    other without routing through the Cortex.
+
+
+================================================================================
+ 5. THREE-LAYER CODE ARCHITECTURE SUMMARY
+================================================================================
+
+NEXUS firmware is divided into three layers with strictly decreasing privilege
+and increasing mutability. This architecture is the foundation of the safety
+guarantee that "software alone, no matter how buggy, MUST NOT be able to
+override safety."
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  LAYER 3: REASONING (Cortex Connection) — ~2000 lines C             │
+  │  ────────────────────────────────────────────────────────────────  │
+  │  PRIVILEGE:  Lowest — Advisory role only.                          │
+  │  MUTABILITY:  Mutable via artifact updates.                         │
+  │  OWNERSHIP:  Domain-specific development team.                      │
+  │  TESTING:     Standard unit and integration tests.                  │
+  │  RESPONSIBILITIES:                                                │
+  │    - Cortex command interpretation and acknowledgment               │
+  │    - Telemetry enrichment (derived values from raw sensor data)    │
+  │    - High-level coordination with other Nodes                     │
+  │    - Reduced-mode autonomous behavior when Cortex disconnected    │
+  │  FAILURE IMPACT: Transparent to safety. System continues on Layer 2.│
+  └──────────────────────────┬────────────────────────────────────────┘
+                             │  Four API Functions ONLY
+  ┌──────────────────────────┼────────────────────────────────────────┐
+  │  LAYER 2: REFLEX (Swappable Control Artifact) — ~3000 lines C     │
+  │  ──────────────────────────────────────────────────────────────   │
+  │  PRIVILEGE:  Medium — Calls only Genesis API functions.           │
+  │  MUTABILITY:  Mutable via artifact updates (THE EVOLUTION TARGET). │
+  │  OWNERSHIP:  Cortex-generated, human-approved.                     │
+  │  TESTING:     MISRA C:2012 mandatory for safety paths + 72-hour   │
+  │               stress test + HIL + A/B validation.                │
+  │  RESPONSIBILITIES:                                                │
+  │    - Domain-specific control algorithms (PID, FSM, Kalman filters)│
+  │    - Sensor data processing and fusion                             │
+  │    - Reference trajectory generation                            │
+  │    - Mode management (auto/manual/standby)                       │
+  │  API CONTRACT:                                                      │
+  │    sense_read(sensor_id) -> sense_result_t                       │
+  │    actuator_set(actuator_id, cmd) -> safety_status_t               │
+  │    safety_get_state() -> safety_state_t                            │
+  │    telemetry_log(channel, data, len) -> void                      │
+  │  CONSTRAINTS:                                                     │
+  │    - NO direct hardware access. Linker rejects undefined symbols.  │
+  │    - No malloc/free in control loops.                              │
+  │    - Must check safety_get_state() before every actuator command.  │
+  │    - Must complete within allocated WCET budget or Genesis          │
+  │      terminates the cycle and enters safe state.                   │
+  │  FAILURE IMPACT: Genesis overrides. Safe state or C fallback.     │
+  └──────────────────────────┬────────────────────────────────────────┘
+                             │  Hardware Register Access
+  ┌──────────────────────────┴────────────────────────────────────────┐
+  │  LAYER 1: GENESIS (Factory Safety Core) — ~5000 lines C            │
+  │  ──────────────────────────────────────────────────────────────   │
+  │  PRIVILEGE:  HIGHEST — Absolute veto over all actuator commands.   │
+  │  MUTABILITY:  NEVER modified after production. eFuse protected.     │
+  │  OWNERSHIP:  Core safety engineering team. Sign-off required.       │
+  │  TESTING:     MISRA C:2012 ALL rules. 72-hour stress test. AFL++   │
+  │               fuzzing. Property-based testing. WCET measurement.   │
+  │               External hardware watchdog. HIL fault injection.     │
+  │  RESPONSIBILITIES (exhaustive):                                   │
+  │    (a) Hardware initialization (clock, GPIO, ADC, PWM, watchdog)    │
+  │    (b) Watchdog management (TWDT, IWDT, external hardware WD)      │
+  │    (c) Safe-state machine (50ms execution, priority-based)         │
+  │    (d) NEXUSLINK communication stack (parser, serializer, CRC, QoS)  │
+  │    (e) Artifact manager (dual-slot OTA, SHA-256, ECDSA, rollback)   │
+  │    (f) API enforcement layer (6-check validation on every command)   │
+  │    (g) C FALLBACK ENGINE ("Reptile Brain") — bang-bang control,     │
+    │        ~200 lines, activates when Layer 2 artifact fails          │
+  │  CODING RULES:                                                     │
+  │    - MISRA C:2012 mandatory, ALL rules, NO deviations.             │
+  │    - No dynamic memory allocation. All buffers static.              │
+  │    - No recursion. Maximum call depth statically analyzable.        │
+  │    - No floating-point in safety-critical paths (Q16.16 fixed-point).│
+  │    - All ISRs: no blocking, no mutex, no I/O.                     │
+  │    - Cyclomatic complexity <= 15 per function.                      │
+  │    - Every function has measured WCET annotation.                   │
+  │  FAILURE IMPACT: Impossible. Genesis IS the safety system.        │
+  └─────────────────────────────────────────────────────────────────┘
+
+  C FALLBACK ENGINE ("REPTILE BRAIN"):
+  When the Layer 2 Reflex artifact fails its post-boot self-test, or when
+  no valid artifact is present in either OTA slot, Genesis automatically
+  activates the C Fallback Engine. This is approximately 200 lines of C code
+  implementing bang-bang (on/off) control instead of PID. It is provably
+  safe because it cannot produce oscillation (no integrator), cannot
+  overshoot (binary output), and has trivially bounded execution time. It
+  maintains basic functionality while waiting for a valid artifact to be
+  deployed. The C fallback is compiled into Genesis and cannot be modified
+  by any OTA mechanism.
+
+
+================================================================================
+ 6. NEXUSLINK PROTOCOL SUMMARY
+================================================================================
+
+NEXUSLINK is a purpose-built, peer-to-peer binary protocol for autonomous
+agents communicating over unreliable, intermittent serial links. It is NOT a
+client-server or pub-sub protocol. Every node on the bus is an equal peer.
+
+BINARY FRAME FORMAT (minimum 16 bytes):
+  Offset  Size  Field         Description
+  0       1     Sync Byte     0x4E ('N')
+  1       2     Length        Total frame length (uint16 BE, 12-8192 bytes)
+  3       1     MessageType   13 defined types (0x01-0x0D)
+  4       1     Flags         RETRANSMIT, ACK_REQUEST, COMPRESSED,
+                                ENCRYPTED, FRAGMENT, PRIORITY, RESERVED
+  5       4     SrcID         Source node (uint32 BE, type code + serial)
+  9       4     DstID         Destination node (0xFFFFFFFF = broadcast)
+  13      2     SeqNo          Per-source monotonically increasing (uint16 BE)
+  15      var   Payload        Variable (format depends on MessageType)
+  15+L     4     CRC32         CRC-32/ISO-HDLC over bytes [1..14+L]
+
+MESSAGE TYPE CATALOG (13 types):
+  Code  Name             Priority   Description
+  ----  ----             --------   -----------
+  0x01  HEARTBEAT        P0 SAFETY  Alive/healthy check
+  0x02  TELEMETRY        P2 TELE    Sensor data bundles (typed channels)
+  0x03  COMMAND          P1 CTRL   Actuator commands, mode changes
+  0x04  RESPONSE         P1 CTRL   Command acknowledgment with status
+  0x05  ARTIFACT_META    P3 CONFIG  Artifact descriptor before transfer
+  0x06  ARTIFACT_CHUNK   P3 CONFIG  4KB data chunk of artifact binary
+  0x07  ARTIFACT_ACK     P3 CONFIG  Transfer status (chunk-level)
+  0x08  NEGOTIATE        P1 CTRL   Capability negotiation (bind creation)
+  0x09  STATUS           P2 TELE    Node status report, telemetry declaration
+  0x0A  ALARM            P0 SAFETY  Alarm codes with severity levels
+  0x0B  SYNC_REQUEST     P4 OTA    Full state request after reconnection
+  0x0C  SYNC_RESPONSE    P4 OTA    State snapshot response
+  0x0D  DISCOVERY        P2 TELE    Identity broadcast on boot
+
+PRIORITY SYSTEM (5 levels, strictly ordered):
+  P0 SAFETY:     ALARM, HEARTBEAT — Always transmitted first. Never dropped.
+  P1 CONTROL:    COMMAND, RESPONSE, NEGOTIATE — Can preempt P2-P4.
+  P2 TELEMETRY:  TELEMETRY, STATUS, DISCOVERY — Standard processing.
+  P3 CONFIG:     ARTIFACT_META, ARTIFACT_CHUNK, ARTIFACT_ACK — Normal processing.
+  P4 OTA:        SYNC_REQUEST, SYNC_RESPONSE — Lowest priority.
+
+HEARTBEAT SYSTEM (two tiers):
+  Tier 1 — "I'm Alive": Empty payload, 1-second interval. 16 bytes/frame.
+  Tier 2 — "I'm Healthy": 1-byte health bitmap, 5-second interval. Reports
+    status of reflex loop, sensors, actuators, memory, temperature, power,
+    artifact, and link quality.
+
+WATCHDOG ESCALATION:
+  3 consecutive misses (3 sec) -> WARNING (ALARM sent)
+  5 consecutive misses (5 sec) -> ALARM (safe-state to affected actuators)
+  10 consecutive misses (10 sec) -> SAFE_STATE (bind marked dead, recovery
+    requires re-negotiation)
+
+ARTIFACT DISTRIBUTION:
+  1. ARTIFACT_META sent to target node (name, version, size, chunks, hash)
+  2. Target ACKs with ACCEPTED status
+  3. ARTIFACT_CHUNK sent (4KB chunks with per-chunk CRC32)
+  4. Target ACKs each chunk (OK, CRC_MISMATCH, WRITE_ERROR)
+  5. Sliding window protocol (default window = 4 chunks)
+  6. After all chunks: SHA-256 verification, atomic slot swap
+  7. If REQUIRES_REBOOT: schedule reboot after buffer flush
+  8. If CAN_ROLLBACK: copy current to rollback slot before swap
+
+STORE-AND-FORWARD:
+  64KB buffer on ESP32 (persistent storage), 1MB on Cortex. Frames requiring
+  ACK are stored until acknowledged. On reconnection, all un-ACKed frames
+  replayed in order. Entries purged after 24 hours maximum.
+
+TELEMETRY ENCODING:
+  Self-describing binary (NOT JSON). Each channel carries: Channel ID (uint8),
+  type code (bool to raw, 11 types), quality flags (stale, estimated, saturated,
+  fault), and typed data value. Delta timestamps save bytes. 5-channel
+  frame at 50Hz uses ~40-60 bytes payload (vs. ~120 bytes for JSON).
+
+
+================================================================================
+ 7. ARTIFACT LIFECYCLE SUMMARY
+================================================================================
+
+The artifact lifecycle is the core mechanism by which NEXUS achieves safe,
+auditable, progressive improvement. Every stage has defined entry/exit
+conditions, cryptographic verification, and rollback capability.
+
+  STAGE 1: CREATION
+    The Cortex generates a new artifact by:
+    (a) Running the Code Synthesis Pipeline on a validated pattern
+    (b) Compiling the complete firmware binary (xtensa-esp32s3-elf-gcc)
+    (c) Computing SHA-256 hash of the entire binary
+    (d) Signing with ECDSA P-256 private key (human or Cortex)
+    (e) Recording parent hash, author UUID, timestamp, and reasoning text
+
+  STAGE 2: SIGNING
+    Every artifact carries a cryptographic signature proving its authenticity
+    and integrity:
+    - ECDSA P-256 signature over (SHA-256 hash || metadata fields)
+    - Author identification (Cortex UUID or human operator ID)
+    - Parent artifact hash (linking to the artifact it evolved from)
+    - Genesis hash (traceable to factory root)
+    - The signature is verified by the receiving Node's Genesis layer BEFORE
+      the artifact is written to flash
+
+  STAGE 3: DISTRIBUTION
+    The Cortex distributes the artifact via NEXUSLINK:
+    - ARTIFACT_META message sent first (describes the artifact)
+    - Target Node verifies it can accept the artifact (CAN_RECEIVE_ARTIFACTS
+      capability, sufficient flash space, compatible firmware version)
+    - ARTIFACT_CHUNK messages transfer the binary in 4KB chunks with per-chunk
+      CRC32 verification and sliding window flow control
+    - ARTIFACT_ACK confirms each chunk receipt
+    - After all chunks received: full SHA-256 verification
+    - Atomic slot swap: current artifact copied to rollback slot, new artifact
+      written to active slot
+
+  STAGE 4: A/B TESTING
+    - Shadow validation phase (minimum 1 hour): new artifact runs on backup
+      node, outputs logged but NOT sent to actuators
+    - Active A/B testing phase: human alternates between primary (old) and
+      backup (new) under controlled conditions
+    - Test duration computed by statistical power analysis to ensure
+      sufficient sample size for meaningful comparison
+    - Both artifacts publish telemetry to Cortex simultaneously
+
+  STAGE 5: ACCEPT OR REJECT
+    Acceptance criteria (ALL must be met):
+      - Primary metric improved by >= 5% absolute
+      - Statistical significance: p < 0.05
+      - No safety metric regression (zero tolerance)
+      - No stability metric regression > 2%
+      - Human operator reports acceptable or improved experience
+    ACCEPT: New artifact promoted to PRIMARY across all applicable nodes.
+    REJECT: Backup reverted to previous artifact. New artifact archived as
+      rejected with failure analysis.
+    EXTEND: Test duration increased or conditions broadened.
+
+  STAGE 6: PROVENANCE
+    Every artifact, whether accepted or rejected, is recorded in the
+    immutable Merkle tree on the Cortex:
+    - Full artifact binary stored permanently
+    - SHA-256 hash, parent hash, timestamp, author, reasoning
+    - Simulation results (predicted vs. observed metrics)
+    - A/B test results (comparative metrics, statistical tests)
+    - Human decision (accept/reject/extend) with justification
+    - Safety violation count during test period
+    This chain is the audit trail for regulatory compliance, debugging,
+    organizational learning, and cross-deployment knowledge transfer.
+
+
+================================================================================
+ 8. EVOLUTION LOOP SUMMARY
+================================================================================
+
+The Evolution Loop is the master cycle governing all self-improvement
+activity in NEXUS. It runs continuously as a background daemon on each Cortex,
+with a cloud-side orchestrator coordinating across deployments.
+
+  OBSERVE (every 60 seconds)
+    Collect raw sensor readings, artifact outputs, human inputs (overrides,
+    corrections, explicit feedback), environmental context, and computed
+    performance metrics. Write to observation store with nanosecond
+    timestamps. Mark episodes when anomaly detectors trigger.
+
+  DISCOVER (every 6 hours, configurable 4-12 hours)
+    Run batch analysis on accumulated episode database. Extract features,
+    cluster similar conditions using DBSCAN, compare human behavior vs.
+    artifact behavior within each cluster. Rank candidates by composite
+    score: improvement magnitude * statistical confidence * occurrence
+    frequency * correction consistency.
+
+  HYPOTHESIZE (triggered by valid discovery)
+    For each ranked pattern, form a formal, testable hypothesis with
+    structured fields: conditions, old behavior, new behavior, target metric,
+    expected improvement, synthesis level (1-4), proposed diff, safety review
+    status. Generate hypothesis through the Code Synthesis Pipeline.
+
+  SIMULATE (triggered by valid hypothesis)
+    Run proposed change against historical data in the digital twin
+    simulation engine. Replay episode inputs through both old and new
+    artifact simultaneously. Compare outputs across all metrics. Compute
+    simulation confidence score (0.0-1.0). Check for safety violations
+    in simulated behavior. If simulation confidence < threshold,
+    route to human review.
+
+  PROPOSE (triggered by sufficient confidence)
+    Generate proposal package: hypothesis, pattern evidence, simulation
+    results, LLM-generated human-readable explanation, unified diff,
+    risk assessment, estimated test duration, rollback plan. Route to
+    appropriate approval queue based on synthesis level:
+      Level 1 (parameter): Auto-approve if confidence > 0.8
+      Level 2 (conditional logic): Requires operator acknowledgment
+      Level 3 (algorithm): Requires engineer review
+      Level 4 (architecture): Requires engineering manager approval
+
+  TEST (triggered by approval)
+    Deploy approved artifact to backup node. Execute three-phase A/B
+    protocol: shadow validation, active testing, statistical analysis.
+    Duration determined by power analysis to achieve statistical power.
+
+  MEASURE (triggered by test completion)
+    Compute paired comparison between old and new artifacts. Perform
+    appropriate statistical test (t-test or Wilcoxon). Compute effect size
+    (Cohen's d). Compute confidence intervals. Check all metrics including
+    safety metrics (zero regression tolerance).
+
+  DECIDE (triggered by measurement)
+    Apply acceptance criteria:
+      Safety regression > 0% -> REJECT
+      Primary improvement < 5% -> REJECT
+      p-value >= 0.05 -> REJECT
+      Stability regression > 2% -> REJECT
+      Human explicit negative -> REJECT
+      Human explicit positive + any improvement -> ACCEPT
+      Otherwise -> ACCEPT if all criteria met
+
+  DEPLOY (triggered by accept decision)
+    Merge candidate into provenance tree. Promote to PRIMARY across
+    applicable nodes. Deployment is atomic (activated at tick boundary).
+    All nodes receive update within 30 seconds.
+
+  REPEAT
+    Return to OBSERVE, monitoring whether deployed change produces expected
+    real-world improvement. If real-world metrics diverge >10% from
+    simulation predictions, trigger automated rollback and create new
+    hypothesis to investigate divergence.
+
+
+================================================================================
+ 9. CROSS-DOMAIN APPLICABILITY MATRIX
+================================================================================
+
+The NEXUS architecture is domain-agnostic. This matrix summarizes the
+applicability across eight validated domains, drawn from Brief 05.
+
+  ┌────────────────┬──────────┬───────────┬───────────┬──────────────┐
+  │ Domain         │ Nodes    │ Cost     │Complexity│ NEXUS Fit    │
+  │                │ (est.)   │ (NEXUS   │ (1-10)   │ Score (1-10) │
+  │                │          │  elecs)   │          │              │
+  ├────────────────┼──────────┼─────────┬──────────┼──────────────┤
+  │ Agriculture    │ 7-12     │ $883     │ 6        │ 10           │
+  │ (Crop Spray)   │          │          │          │              │
+  ├────────────────┼──────────┼─────────┼──────────┼──────────────┤
+  │ Construction   │ 8-12     │ $1,582   │ 8        │ 9            │
+  │ (Excavator)    │          │          │          │              │
+  ├────────────────┼──────────┼─────────┼──────────┼──────────────┤
+  │ Warehouse      │ 8        │ $1,253   │ 7        │ 9            │
+  │ (AMR)          │          │          │          │              │
+  ├────────────────┼──────────┼─────────┼──────────┼──────────────┤
+  │ Greenhouse     │ 19       │ $1,400   │ 5        │ 10           │
+  │ (Climate Ctrl)  │          │          │          │              │
+  ├────────────────┼──────────┼─────────┼──────────┼──────────────┤
+  │ Mining         │ 5-8      │ $980     │ 7        │ 10           │
+  │ (Ventilation)  │          │          │          │              │
+  ├────────────────┼──────────┼─────────┬──────────┼──────────────┤
+  │ Water Treatment│ 6-10     │ $1,120   │ 5        │ 8            │
+  │ (Pump Station) │          │          │          │              │
+  ├────────────────┼──────────┼─────────┬──────────┼──────────────┤
+  │ Solar Farm     │ 5-8      │ $1,050   │ 6        │ 9            │
+  │ (Panel Track)  │          │          │          │              │
+  ├────────────────┼──────────┼─────────┬──────────┼──────────────┤
+  │ Food Process   │ 8-12     │ $1,890   │ 7        │ 8            │
+  │ (Conveyor)     │          │          │          │              │
+  └────────────────┴──────────┴─────────┴──────────┴──────────────┘
+
+  Cost column: NEXUS electronics only (ESP32s + Jetson + sensors +
+  actuators + enclosures). Does NOT include the mechanical system, vehicle,
+  or structure. Cost is competitive with or below commercial alternatives
+  while providing superior adaptive capability through the evolution system.
+
+  NEXUS Fit Score rationale:
+  10 = Perfect fit: Safety-critical operations in unreliable
+      connectivity environments, clear value proposition for
+      artifact evolution, strong regulatory alignment.
+  9  = Excellent fit: High value from evolution, some connectivity
+      requirements but WiFi/Ethernet typically available.
+  8  = Good fit: Evolution provides value but domain already has
+      adequate commercial solutions or regulatory complexity
+      limits autonomy.
+
+  Common safety requirements across ALL domains:
+  - Overcurrent protection (hardware-implemented in ACTUATOR_NODE)
+  - Overtemperature shutdown (hardware-implemented)
+  - Watchdog timeout (three-tier: task, interrupt, external hardware)
+  - Physical E-stop (hardwired, bypasses all network logic)
+  - Genesis artifact as immutable safe fallback
+  - Anti-rollback counter (prevents downgrade attacks)
+
+
+================================================================================
+ 10. SAFETY ARCHITECTURE SUMMARY
+================================================================================
+
+NEXUS implements seven layers of defense, from hardware to provenance.
+The engineering requirement: the ONLY thing that can put the system in an
+unsafe state is simultaneous, independent, multi-component hardware failure.
+Software alone, no matter how buggy, MUST NOT override safety.
+
+  LAYER 1: HARDWARE GUARDS
+  - Physical E-stop buttons hardwired to motor driver power relays,
+    bypassing ALL network and software logic
+  - External watchdog IC strobed by Genesis GPIO; 500ms miss = hard reset
+  - Brown-out detector (2.44V default) prevents operation during voltage
+    sag
+  - Current limit fuses and overcurrent protection circuits on actuator
+    driver boards
+  - Limit switches and mechanical end stops on actuators
+
+  LAYER 2: GENESIS SAFETY MONITOR (eFuse-Protected)
+  - Absolute veto power over all actuator commands
+  - Cannot be modified by any OTA mechanism, artifact swap, or Cortex command
+  - Six-check validation on every actuator_set() call:
+    (1) RANGE CHECK: target within configured min/max
+    (2) RATE LIMIT: slew rate within configured maximum
+    (3) INTERLOCK CHECK: all interlock conditions satisfied
+    (4) CURRENT LIMIT: actuator current below threshold
+    (5) SAFETY STATE CHECK: system not in SAFE_STATE
+    (6) AUTHORIZATION CHECK: calling artifact is authorized for this actuator
+  - Safe-state machine executes within 50ms of trigger
+  - Safe state is DEFAULT on every boot; Layer 2 must explicitly LEAVE safe state
+  - Violation rate exceeds threshold (10/sec for 5 sec) -> automatic SAFE_STATE
+
+  LAYER 3: WATCHDOG SYSTEM (Three Tiers)
+  - Tier 1: Task Watchdog Timer (TWDT) — missed feed = task reset
+  - Tier 2: Interrupt Watchdog Timer (IWDT) — missed handler = safe state
+  - Tier 3: External hardware watchdog — missed strobe = hard reset
+  - Each tier is independent; escalation is automatic and unrecoverable
+
+  LAYER 4: API MEMBRANE (Link-Time Enforced)
+  - Reflex layer compiled as separate object with defined symbol table
+  - Genesis exports exactly four functions; all other symbols invisible to Reflex
+  - Reflex CANNOT call gpio_set_level(), adc_read(), or any ESP-IDF function
+  - The linker rejects undefined symbols at build time
+  - Every sensor read and every actuator command passes through Genesis
+    validation; no bypass is possible
+
+  LAYER 5: ARTIFACT INTEGRITY
+  - SHA-256 hash verification of received artifact before flash write
+  - ECDSA P-256 signature verification (Genesis layer)
+  - Anti-rollback counter in eFuse (prevents loading artifacts older than
+    current minimum version)
+  - Dual-slot OTA: new artifact written to inactive slot, verified, then
+    atomic swap on reboot
+  - Post-boot self-test: if artifact fails within 10 seconds, automatic
+    rollback to previous slot
+  - Genesis partition integrity check on every boot (hash and compare)
+
+  LAYER 6: TESTING REGIME
+  - Level 1: Unit tests (2500+ cases, 95% line coverage, 90% branch coverage)
+  - Level 2: HIL integration tests (fault injection on real hardware)
+  - Level 3: 72-hour continuous stress test with random fault injection
+    (1 fault/minute). ZERO tolerance: any violation = artifact rejected
+  - Level 4: Safety violation tests (boundary conditions, rate limit bypass,
+    authorization violations, adversarial input)
+  - AFL++ fuzz testing of NEXUSLINK parser (72 hours continuous, 98% line
+    coverage, 95% branch coverage)
+  - Property-based testing (100,000 generated inputs per property)
+
+  LAYER 7: PROVENANCE AND AUDIT TRAIL
+  - Complete, immutable Merkle tree of every artifact ever generated
+  - Every change linked to evidence (pattern, telemetry, human approval)
+  - Safety violation count included in every A/B test evaluation
+  - Rollback audit trail (timestamp, trigger reason, artifact hashes)
+  - Cross-deployment artifact history sync via cloud link
+  - Regulatory export: full traceability for compliance audits
+
+
+================================================================================
+ 11. PROGRESSIVE ENHANCEMENT LEVELS
+================================================================================
+
+NEXUS defines four operational levels describing the relationship between
+Nodes and the Cortex. The system degrades automatically but upgrades
+manually, ensuring safety at every level.
+
+  LEVEL 0 — ISOLATED (Factory Firmware Only)
+    DESCRIPTION: Each Node runs its Genesis Artifact independently. No
+    network coordination. No Cortex. No telemetry beyond local indicators.
+    FUNCTIONALITY: Full but not optimized. Every safety function works.
+    CONNECTIVITY: None required.
+    HUMAN ROLE: Direct operator of the machine.
+    USE CASE: Out-of-the-box deployment. A farmer buys a NEXUS-compatible
+    sprayer, mounts it, and starts spraying immediately.
+    DEGRADATION TO: N/A (this IS the floor).
+
+  LEVEL 1 — CONNECTED (Telemetry and Monitoring)
+    DESCRIPTION: Nodes form a local network (ESP-NOW, Wi-Fi, CAN, RS-485).
+    Cortex present and connected. Nodes stream telemetry to Cortex. Cortex
+    displays dashboards, logs data, alerts on anomalies.
+    FUNCTIONALITY: Same as Level 0 plus full visibility.
+    CONNECTIVITY: Local network required (Tier 1).
+    HUMAN ROLE: Operator monitors system health via Cortex dashboards.
+    USE CASE: Farmer installs Jetson in cab. Now sees real-time metrics,
+    coverage maps, GPS tracks, fuel consumption. Sprayer still runs
+    factory firmware.
+    DEGRADATION TO: Level 0 (automatic on network/Cortex loss).
+
+  LEVEL 2 — ADVISORY (Proposed Improvements)
+    DESCRIPTION: Cortex analyzes accumulated telemetry and proposes artifact
+    improvements. Proposals presented to human operator. A/B testing
+    infrastructure available. Human must approve every change.
+    FUNCTIONALITY: Level 1 plus evolutionary optimization proposals.
+    CONNECTIVITY: Local network required. Cloud optional for heavy compute.
+    HUMAN ROLE: Operator reviews and approves proposals.
+    USE CASE: After 50 hours of operation, Cortex notices spray flow rate
+    oscillation in certain conditions. Proposes revised PID artifact.
+    Farmer reviews, approves A/B test, promotes after validation.
+    DEGRADATION TO: Level 1 (automatic on Cortex capability loss).
+
+  LEVEL 3 — AUTONOMOUS (Full Optimization with Policy)
+    DESCRIPTION: Cortex runs complete optimization pipeline automatically.
+    Generates artifacts, runs simulations, proposes tests, collects results,
+    recommends promotions. Human sets high-level objectives and approval
+    policies ("auto-approve PID changes that improve efficiency >5% with
+    no safety regression"). Reviews periodic summaries.
+    FUNCTIONALITY: Level 2 plus autonomous continuous improvement.
+    CONNECTIVITY: Local network + cloud link (for heavy compute).
+    HUMAN ROLE: Policy setter and periodic reviewer.
+    USE CASE: Farmer sets policy. Cortex autonomously tunes sprayer over
+    multiple seasons, adapting to crops, chemicals, and conditions.
+    DEGRADATION TO: Level 2 (automatic if policy cannot be maintained).
+
+  AUTOMATIC DEGRADATION:
+    Level 3 -> Level 2: Cortex heartbeat timeout or capability failure.
+    Level 2 -> Level 1: Network loss or Cortex crash.
+    Level 1 -> Level 0: Network failure.
+    Degradation takes < 10 seconds and produces NO actuator glitch.
+
+  MANUAL UPGRADE:
+    Level 0 -> 1: Operator configures local network and connects Cortex.
+    Level 1 -> 2: Operator enables analysis features and approves first proposal.
+    Level 2 -> 3: Operator sets approval policies and enables autonomous mode.
+
+
+================================================================================
+ 12. IMPLEMENTATION ROADMAP
+================================================================================
+
+The NEXUS framework implementation proceeds in four phases, starting with a
+narrow, high-value application and progressively expanding to the full
+general-purpose framework.
+
+  PHASE 1: MARINE AUTOPILOT (Months 1-6)
+    OBJECTIVE: Prove the core architecture on a single, high-value domain
+    where safety-critical operation and unreliable connectivity make NEXUS's
+    biological model essential.
+    SCOPE:
+      - 2 ESP32-S3 nodes (navigation control + motor driver)
+      - 1 Jetson Orin Nano (Cortex)
+      - NEXUSLINK protocol over CAN bus
+      - Genesis safety core + Reflex autopilot artifact
+      - Level 0-1 operation (isolated + telemetry)
+    DELIVERABLES:
+      - Genesis Layer 1 (eFuse-protected safety core)
+      - NEXUSLINK protocol implementation (13 message types)
+      - Reflex autopilot artifact (heading/course PID, waypoint navigation)
+      - Cortex observation pipeline (marine telemetry ingestion)
+      - Dashboard visualization
+      - Safety validation: 72-hour stress test + HIL fault injection
+    SUCCESS CRITERIA: 72-hour continuous operation with zero safety
+    violations during random fault injection. Zero uncommanded actuator
+    movements.
+
+  PHASE 2: EVOLUTION ENGINE (Months 4-9)
+    OBJECTIVE: Implement the core evolution loop — the capability that
+    differentiates NEXUS from every other control system.
+    SCOPE:
+      - Pattern discovery engine (DBSCAN clustering + human vs. artifact
+        comparison)
+      - Hypothesis generation (Level 1 parameter + Level 2 conditional
+        logic)
+      - Digital twin simulation engine (historical data replay)
+      - A/B testing infrastructure (shadow + active phases)
+      - Provenance chain (Merkle tree)
+      - Level 2-3 operation (advisory + autonomous with policy)
+    DELIVERABLES:
+      - Observation store (time-series database on Cortex NVMe)
+      - Discovery daemon (batch analysis pipeline)
+      - Code synthesis pipeline (sensitivity analysis + LLM-assisted diff
+        generation for Level 2)
+      - Simulation engine (environment replay + comparative metrics)
+      - A/B testing protocol (three-phase: shadow, active, analysis)
+      - Provenance tree (immutable Merkle tree storage)
+      - Human approval interface (tablet/web dashboard for proposals)
+    SUCCESS CRITERIA: Demonstrate at least one validated artifact
+    improvement in real-world operation, with full provenance chain.
+
+  PHASE 3: MULTI-DOMAIN EXPANSION (Months 7-14)
+    OBJECTIVE: Validate domain-agnostic applicability across at least 3
+    additional domains beyond marine.
+    SCOPE:
+      - Generalized Control Loop abstraction (domain-agnostic artifact
+        signature)
+      - Domain Manifest specification format
+      - Additional Node type support (SENSOR_NODE, ACTUATOR_NODE,
+        GATEWAY_NODE, HMI_NODE, POWER_NODE)
+      - Tier 1 network technology flexibility (ESP-NOW, Wi-Fi, Ethernet,
+        RS-485, Thread)
+      - Level 3 code synthesis (LLM-assisted algorithm replacement via
+        cloud pipeline)
+    DELIVERABLES:
+      - Standardized artifact interface (control_logic function signature
+        independent of domain)
+      - Domain Manifest schema and validator
+      - Expanded NEXUSLINK capabilities (discovery, negotiation, multi-hop)
+      - Gateway Node implementation (protocol bridging: NEXUSLINK to MQTT,
+        ROS 2, OPC-UA, Modbus)
+      - Cloud LLM integration for Level 3 synthesis
+      - At least 3 domain-specific deployments with validated A/B tests
+    SUCCESS CRITERIA: Successful artifact evolution in 3+ domains with
+    different network topologies and node compositions.
+
+  PHASE 4: GENERAL-PURPOSE FRAMEWORK (Months 12-18)
+    OBJECTIVE: Release NEXUS as a production-ready, general-purpose
+    distributed intelligence framework with full documentation, tooling, and
+    certification support.
+    SCOPE:
+      - Full Level 0-3 operational stack
+      - All 7 Node types supported
+      - All network technologies (UART, CAN, RS-485, ESP-NOW, Wi-Fi,
+        Ethernet, Thread)
+      - Complete provenance and compliance tooling
+      - Developer SDK (artifact authoring, Cortex plugin development)
+      - Fleet management (multi-Cortex coordination via cloud)
+      - Safety certification packages (IEC 61508, ISO 26262 reference)
+    DELIVERABLES:
+      - Production SDK (artifact development toolkit, Cortex plugin API)
+      - Fleet management dashboard (multi-deployment monitoring)
+      - Certification documentation package (safety case, test evidence)
+      - Migration guide (from existing PLC/SCADA systems)
+      - Training materials (tutorials, domain-specific quickstarts)
+      - Open-source Genesis core (with safety certification evidence)
+    SUCCESS CRITERIA: Independent third-party safety audit passes.
+    Deployment by at least 2 organizations outside the core team.
+    Zero critical safety incidents in cumulative 10,000 hours of
+    operation across all deployments.
+
+  PHASE 4+ (CONTINUOUS): REFINEMENT AND ECOSYSTEM
+    - Additional domain specializations
+    - Performance optimization (reduced observation latency, faster simulation)
+    - Expanded LLM capabilities (better code synthesis, broader domain
+      knowledge)
+    - Community contributions (open-source Genesis, domain-specific
+      Reflex templates)
+    - Regulatory engagement (standards body participation)
+    - Hardware platform expansion (STM32, RISC-V alternatives to ESP32;
+      Xavier/Orin NX alternatives to Orin Nano)
+
+
+================================================================================
+  DOCUMENT INTEGRITY
+================================================================================
+
+This master consensus document is the single authoritative reference for the
+NEXUS framework. All contradictions between the six source briefs have been
+resolved herein. When a conflict arises between this document and any source
+brief, THIS DOCUMENT PREVAILS.
+
+  Approved by: NEXUS Chief Architect
+  Date: 2025
+  Status: DEFINITIVE
+
+================================================================================
+  END OF MASTER CONSENSUS DOCUMENT
+================================================================================

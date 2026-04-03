@@ -1,0 +1,1079 @@
+================================================================================
+                    NEXUSLINK PROTOCOL SPECIFICATION v1.0
+         Purpose-Built Binary Agent-to-Agent Communication Protocol
+              for the NEXUS Autonomous Robotics Framework
+================================================================================
+  Document:  NXLP-001-2025
+  Status:    DESIGN SPECIFICATION
+  Author:    Agent B -- Protocol Architecture Division
+  Date:      2025-07-12
+  Words:     ~5200
+================================================================================
+
+TABLE OF CONTENTS
+  1.  Design Philosophy and Motivation
+  2.  Binary Frame Format
+  3.  Message Type Catalog
+  4.  Node Identity System
+  5.  Agent Discovery and Binding
+  6.  Telemetry Streaming
+  7.  Artifact Distribution Protocol
+  8.  Safety Heartbeat and Watchdog
+  9.  Priority and QoS Architecture
+  10. Disconnection Tolerance and Store-and-Forward
+  11. NEXUS Terminology Reference
+  12. Protocol State Machine
+  13. Security Considerations
+  14. Wire Encoding Reference
+  Appendix A -- Message Type Quick Reference
+  Appendix B -- CRC-32 Implementation Notes
+  Appendix C -- Capability Bitmap Registry
+================================================================================
+
+
+================================================================================
+1. DESIGN PHILOSOPHY AND MOTIVATION
+================================================================================
+
+Every existing machine-to-machine protocol was designed for a world that does
+not match ours. MQTT assumes a reliable central broker and persistent TCP
+connections. gRPC assumes low-latency HTTP/2 transports and request-response
+semantics. CoAP assumes constrained nodes that are mostly asleep. CAN bus
+assumes a single shared physical medium with deterministic arbitration.
+
+NEXUSLINK assumes none of these things. It was designed from first principles
+for the reality of autonomous robotic agents communicating over unreliable,
+intermittent serial links (UART, RS-485, CAN, LoRa, and sometimes raw TCP
+over lossy WiFi). In the NEXUS framework, agents may be disconnected for
+hours. A Jetson companion computer (a "Cortex") may reboot while an ESP32
+control node (a "Node") continues running its last-known behavior. A sensor
+node may lose power and reappear with stale sequence numbers. A command issued
+before a disconnection must still arrive, in order, after reconnection.
+
+The fundamental architectural insight is this: NEXUSLINK is NOT a
+client-server protocol. It is NOT a pub-sub protocol. It is a PEER-TO-PEER
+protocol for AUTONOMOUS AGENTS. Every node on the bus is an equal peer with
+its own identity, its own state machine, and its own authority to publish
+telemetry, issue commands, and distribute artifacts.
+
+Key design goals, in order of priority:
+  (a) SAFETY -- The protocol must never silently drop a safety-critical
+      message. Heartbeat failures must escalate predictably.
+  (b) RESILIENCE -- The protocol must operate correctly over links that drop
+      packets, reorder packets, duplicate packets, and vanish for hours.
+  (c) EFFICIENCY -- Frames must be compact. A heartbeat must fit in under 16
+      bytes. Telemetry bundles must be binary-encoded, never JSON.
+  (d) SIMPLICITY -- The protocol must be implementable on an ESP32-S3 with
+      512KB SRAM. No dynamic memory allocation in the hot path. No TLS
+      handshake in the hot path. No JSON parser. Ever.
+  (e) EVOLUTION -- The protocol must support in-band artifact distribution so
+      that agents can upgrade each other's behavior without a centralized
+      build server.
+
+
+================================================================================
+2. BINARY FRAME FORMAT
+================================================================================
+
+Every NEXUSLINK frame has the following structure:
+
+  Offset  Size  Field           Description
+  ------  ----  -----           -----------
+  0       1     Sync Byte       0x4E ('N') -- marks frame start
+  1       2     Length          Total frame length in bytes (uint16, big-endian)
+                                Includes all fields except Sync and Length
+                                themselves. Min=12 (header + CRC), Max=8192.
+  3       1     MessageType     Message type identifier (see Section 3)
+  4       1     Flags           Bitfield (see below)
+  5       4     SrcID           Source node identifier (uint32, big-endian)
+  9       4     DstID           Destination node identifier (uint32, big-endian)
+                                0xFFFFFFFF = broadcast
+  13      2     SeqNo           Sequence number (uint16, big-endian)
+                                Sender-local, monotonically increasing,
+                                wraps at 65535. Receiver tracks last-seen
+                                per-source to detect gaps.
+  15      var   Payload         Variable-length payload. Format depends on
+                                MessageType. May be zero-length.
+  15+L    4     CRC32          CRC-32/ISO-HDLC (polynomial 0xEDB88320)
+                                Computed over bytes [1..14+L], i.e.
+                                Length through end of Payload.
+                                Stored as uint32, little-endian.
+
+Minimum frame (no payload, broadcast):
+  4E 00 0C 0A 00 FF FF FF FF 01 00 00 00 XX XX XX XX
+  Sync Len  Tp Fl ---------DstID--------- --SrcID-- Sq  CRC32
+
+Flags byte layout (MSB first):
+  Bit 7: RETRANSMIT  -- Set if this frame is a retransmission of a
+                        previously sent frame (same SeqNo, same payload).
+  Bit 6: ACK_REQUEST -- Receiver MUST send a RESPONSE with ack status.
+  Bit 5: COMPRESSED  -- Payload is LZ4-compressed. Applies to ARTIFACT_CHUNK
+                        and SYNC_RESPONSE only.
+  Bit 4: ENCRYPTED   -- Payload is encrypted with pre-shared AES-128-CTR.
+  Bit 3: FRAGMENT    -- This is a fragment of a larger logical message.
+                        Fragments carry a 2-byte fragment index in the
+                        first two bytes of payload.
+  Bit 2: PRIORITY    -- 1=high priority queue, 0=normal queue.
+  Bit 1: RESERVED    -- Must be zero.
+  Bit 0: RESERVED    -- Must be zero.
+
+Rationale for each field:
+  - Single sync byte (0x4E = 'N' for NEXUS) minimizes framing overhead.
+    The receiver resynchronizes on every 0x4E and validates Length + CRC
+    to confirm frame boundaries. False sync detection is handled by CRC
+    rejection -- probability < 1e-9 for random byte streams.
+  - Length is uint16 big-endian, max 8192 bytes. This limits any single
+    frame payload to ~8KB, which is intentionally conservative for ESP32
+    DMA ring buffers on UART.
+  - MessageType is a single byte, giving 256 possible types. Current
+    allocation uses 13; the remainder are reserved for future expansion.
+  - SrcID and DstID are 32-bit node identifiers with embedded type hints
+    (see Section 4). 0xFFFFFFFF is the universal broadcast address.
+  - SeqNo is per-source, wrapping. Receivers maintain a 16-bit window to
+    detect duplicates and gaps. No per-connection setup required.
+
+
+================================================================================
+3. MESSAGE TYPE CATALOG
+================================================================================
+
+  Code  Name            Payload                    Section
+  ----  ----            -------                    -------
+  0x01  HEARTBEAT       Empty or 1B health bitmap  Sec 8
+  0x02  TELEMETRY       Channel bundle             Sec 6
+  0x03  COMMAND         Command + params           Sec 8
+  0x04  RESPONSE        Status + data              Sec 8
+  0x05  ARTIFACT_META   Artifact descriptor        Sec 7
+  0x06  ARTIFACT_CHUNK  4KB data chunk             Sec 7
+  0x07  ARTIFACT_ACK    Transfer status            Sec 7
+  0x08  NEGOTIATE       Capability offer           Sec 5
+  0x09  STATUS          Node status report         Sec 5
+  0x0A  ALARM           Alarm code + details       Sec 8
+  0x0B  SYNC_REQUEST    "Send me everything"       Sec 10
+  0x0C  SYNC_RESPONSE   State snapshot             Sec 10
+  0x0D  DISCOVERY       Identity broadcast         Sec 5
+
+Each message type is described in detail in the sections referenced above.
+The type byte is also used for priority classification (see Section 9):
+
+  SAFETY  (P0): ALARM, HEARTBEAT
+  CONTROL (P1): COMMAND, RESPONSE, NEGOTIATE
+  TELEMETRY(P2): TELEMETRY, STATUS, DISCOVERY
+  CONFIG  (P3): ARTIFACT_META, ARTIFACT_CHUNK, ARTIFACT_ACK
+  OTA     (P4): SYNC_REQUEST, SYNC_RESPONSE
+
+
+================================================================================
+4. NODE IDENTITY SYSTEM
+================================================================================
+
+4.1 Node ID Structure (32 bits, big-endian)
+--------------------------------------------
+The 32-bit SrcID and DstID fields encode both a unique identifier and a
+node type hint:
+
+  Bits 31-24: Node Type Code
+  Bits 23-0:  Node Serial Number (24-bit unique ID)
+
+  Node Type Codes:
+    0x01 = Control Node    (ESP32 running motor control, PID loops)
+    0x02 = Sensor Node     (ESP32 reading IMU, ToF, encoders)
+    0x03 = Actuator Node   (ESP32 driving servos, stepper drivers)
+    0x10 = Power Node      (ESP32 monitoring battery, managing shutdown)
+    0x20 = Comm Node       (ESP32 bridging LoRa, WiFi, Bluetooth)
+    0xFE = Virtual Node    (Software-only agent, no hardware)
+    0xFF = Cortex Node     (Jetson Orin Nano, high-level reasoning)
+
+  Example IDs:
+    0xFF000001 = Cortex #1 (the main Jetson)
+    0x01000017 = Control Node #23
+    0x02000042 = Sensor Node #66
+    0x030000AB = Actuator Node #171
+
+The type byte allows receivers to make immediate routing and scheduling
+decisions without looking up the full identity card. A Cortex frame gets
+more buffer space; a sensor frame gets higher telemetry priority.
+
+4.2 Full Identity Card (64-bit UUID + metadata)
+-------------------------------------------------
+Each node also carries a 64-bit UUID for disambiguation (in case two nodes
+share the same 24-bit serial due to manufacturing collision):
+
+  UUID structure (8 bytes):
+    Bytes 0-5: MAC address of primary interface (6 bytes)
+    Bytes 6-7: Factory serial number (uint16)
+
+  Human-readable name: Up to 32 bytes, UTF-8, null-terminated.
+    Example: "left_wheel_controller"
+    Example: "nav_cortex"
+    Example: "front_tof_array"
+
+  Role string: Up to 16 bytes, UTF-8, null-terminated.
+    Examples: "drive", "sense", "compute", "power", "bridge"
+
+  Capabilities bitmap: 32-bit field advertising what the node can do.
+    See Appendix C for the full registry. Key bits:
+      Bit 0:  CAN_CONTROL -- Can receive motor commands
+      Bit 1:  CAN_STREAM_TELEMETRY -- Can send typed telemetry
+      Bit 2:  CAN_RECEIVE_ARTIFACTS -- Can accept firmware updates
+      Bit 3:  CAN_PRODUCE_ARTIFACTS -- Can build/distribute artifacts
+      Bit 4:  HAS_SAFETY_WATCHDOG -- Monitors peer heartbeats
+      Bit 5:  HAS_ULTRASONIC -- Hardware ultrasonic sensor
+      Bit 6:  HAS_TOF -- Hardware time-of-flight sensor
+      Bit 7:  HAS_IMU -- Hardware IMU sensor
+      Bit 8:  HAS_ENCODER -- Hardware wheel/motor encoder
+      Bit 9:  HAS_SERVO -- Hardware servo output
+      Bit 10: HAS_STEPPER -- Hardware stepper driver
+      Bit 11: HAS_GPS -- Hardware GPS receiver
+      Bit 12: HAS_CAMERA -- Hardware camera (Cortex only)
+      Bit 13: HAS_LIDAR -- Hardware LiDAR (Cortex only)
+      Bit 14: CAN_COMPRESS_LZ4 -- Supports LZ4 payload compression
+      Bit 15: CAN_ENCRYPT_AES -- Supports AES-128-CTR encryption
+      Bits 16-31: Reserved for application-specific capabilities.
+
+  Firmware version: 4 bytes, major.minor.patch.build
+  Uptime: 4 bytes, seconds since last boot (uint32, wraps at ~136 years)
+
+The full identity card is 118 bytes and is transmitted in the DISCOVERY
+message (0x0D) and in response to SYNC_REQUEST (0x0B).
+
+
+================================================================================
+5. AGENT DISCOVERY AND BINDING
+================================================================================
+
+5.1 Discovery Protocol
+-----------------------
+When a node boots, it performs the following sequence:
+
+  1. Wait 100-500ms (random jitter to avoid thundering herd on shared bus).
+  2. Transmit a DISCOVERY message (0x0D) to broadcast address 0xFFFFFFFF
+     with ACK_REQUEST cleared. The payload contains the full identity card.
+  3. Start a 2-second discovery window. During this window, collect
+     DISCOVERY messages from other nodes on the bus.
+  4. After the window, transmit a second DISCOVERY message (in case the
+     first was lost due to collision).
+  5. Build a local peer table from all received DISCOVERY messages.
+
+Every node that receives a DISCOVERY message from a new (previously unknown)
+SrcID responds with its own DISCOVERY message. Nodes that already know the
+source suppress the response (prevents broadcast storms).
+
+5.2 Capability Negotiation (NEGOTIATE message, 0x08)
+------------------------------------------------------
+After discovery, a Cortex node may initiate capability negotiation with
+specific peers. This is NOT mandatory for basic operation (a sensor can
+start streaming telemetry without negotiation), but it is required for:
+
+  - Artifact distribution (the receiver must declare CAN_RECEIVE_ARTIFACTS)
+  - Encrypted communication (both sides must declare CAN_ENCRYPT_AES)
+  - Compressed telemetry (receiver must declare CAN_COMPRESS_LZ4)
+
+NEGOTIATE payload format (8 bytes minimum):
+  Bytes 0-3: Requested capabilities (uint32 bitmap)
+  Bytes 4-7: Negotiation timeout in seconds (uint32, big-endian)
+             If the peer does not respond within this time, the
+             negotiation is considered failed.
+
+The receiving node responds with a NEGOTIATE message containing:
+  Bytes 0-3: Accepted capabilities (subset of requested)
+  Bytes 4-7: Session parameters (e.g., AES key index for encryption)
+
+5.3 Binding
+-----------
+A "Bind" in NEXUS terminology is an active, acknowledged relationship between
+two nodes. A bind is created when:
+  - A node sends a NEGOTIATE and receives a matching NEGOTIATE response.
+  - A node receives a TELEMETRY stream and sends an implicit ACK (via
+    RESPONSE) indicating it is consuming the data.
+
+Binds are tracked in a local bind table:
+  struct bind_entry {
+    uint32_t peer_id;        // Remote node ID
+    uint32_t capabilities;   // Negotiated capabilities
+    uint32_t last_seqno;     // Last received sequence number
+    uint32_t last_seen_ms;   // Timestamp of last received frame
+    uint8_t  state;          // BIND_ACTIVE, BIND_STALE, BIND_DEAD
+  };
+
+A bind transitions to BIND_STALE after 10 seconds without traffic and to
+BIND_DEAD after 60 seconds. Dead binds are cleaned up. A Cortex node
+escalates dead binds with control-capable peers to WARNING status.
+
+
+================================================================================
+6. TELEMETRY STREAMING
+================================================================================
+
+6.1 Why Not JSON?
+-----------------
+Real-time control loops on ESP32 nodes cannot afford JSON serialization.
+A typical telemetry frame from a motor controller contains:
+  - Wheel speed (int16, 2 bytes)
+  - Motor current (uint16, 2 bytes)
+  - Encoder position (int32, 4 bytes)
+  - PID error (float32, 4 bytes)
+  - Temperature (uint8, 1 byte)
+  - Status flags (uint8, 1 byte)
+
+Total: 14 bytes in binary. In JSON: ~120 bytes. That is 8.5x overhead on a
+115200 baud UART link that is already shared with other nodes. At 50Hz
+publish rate, binary uses 700 bytes/sec vs 6000 bytes/sec for JSON. On a
+shared bus with 5 sensor nodes, JSON would consume 30KB/sec -- exceeding the
+38KB/sec theoretical maximum of 115200 baud UART.
+
+6.2 Typed Channel Encoding
+---------------------------
+The TELEMETRY payload uses a self-describing binary format:
+
+  Byte 0:     Channel count (N)
+  Byte 1-2:   Timestamp delta from previous frame (uint16, ms)
+              First frame in a stream uses absolute timestamp (uint32,
+              but same 2-byte field -- receivers detect first frame by
+              checking if a previous timestamp exists).
+
+  For each channel (repeated N times):
+    Byte 0:   Channel ID (uint8, 0-255)
+    Byte 1:   Data type code (see below)
+    Byte 2-3: Quality flags (uint16, big-endian):
+                Bits 15-12: Quality score (0=F, 4=A)
+                Bit 11:     Stale (data is older than expected)
+                Bit 10:     Estimated (sensor not available, value is
+                            estimated from other sources)
+                Bit 9:      Saturated (sensor at min/max rail)
+                Bit 8:      Fault (sensor self-diagnostic failed)
+                Bits 7-0:   Reserved
+    Bytes 4+:  Data value, encoded according to type code:
+                0x01: bool    (1 byte: 0x00 or 0x01)
+                0x02: uint8   (1 byte)
+                0x03: int8    (1 byte)
+                0x04: uint16  (2 bytes, big-endian)
+                0x05: int16   (2 bytes, big-endian)
+                0x06: uint32  (4 bytes, big-endian)
+                0x07: int32   (4 bytes, big-endian)
+                0x08: float32 (4 bytes, IEEE 754)
+                0x09: float64 (8 bytes, IEEE 754)
+                0x0A: string  (1-byte length + N bytes UTF-8)
+                0x0B: raw     (2-byte length + N bytes)
+
+  Each channel occupies 4 bytes overhead + 1-8 bytes data.
+  A 5-channel telemetry frame at 50Hz uses approximately 40-60 bytes
+  payload, fitting easily in a single UART frame with header and CRC.
+
+6.3 Bundling and Timestamps
+----------------------------
+Multiple telemetry channels are bundled into a single TELEMETRY message to
+minimize framing overhead. All channels in a bundle share the same
+timestamp. The timestamp is encoded as a delta from the previous frame to
+save bytes (most telemetry arrives at fixed intervals, so deltas are
+constant small values like 20ms or 100ms).
+
+If the delta exceeds 65535ms (65 seconds), the sender emits a dummy frame
+with an absolute timestamp to resynchronize the receiver's clock.
+
+6.4 Telemetry Registration
+---------------------------
+Before a node begins streaming telemetry, it SHOULD transmit a STATUS message
+(0x09) declaring its telemetry channels:
+
+  STATUS payload for telemetry registration:
+    Byte 0:     Status type = 0x01 (TELEMETRY_DECLARATION)
+    Byte 1:     Channel count (N)
+    For each channel:
+      Byte 0:   Channel ID
+      Byte 1:   Data type code
+      Byte 2:   Update rate (Hz, uint8, 0=on-change only)
+      Bytes 3-10: Channel name (8 bytes, UTF-8, null-padded)
+
+This allows the Cortex to build a channel map without prior configuration.
+If no STATUS declaration is received, the Cortex infers channel types from
+the first TELEMETRY frame (self-describing format allows this).
+
+
+================================================================================
+7. ARTIFACT DISTRIBUTION PROTOCOL
+================================================================================
+
+7.1 What is an Artifact?
+-------------------------
+In NEXUS, an "Artifact" is a compiled, versioned unit of deployable behavior.
+For an ESP32 Node, an artifact is a firmware binary or a compiled Reflex
+module. For a Cortex, an artifact is a compiled behavior graph, a neural
+network model, or a configuration bundle. Artifacts are the mechanism by
+which the NEXUS framework achieves runtime evolution -- agents can improve
+each other's behavior by distributing new artifacts without human intervention.
+
+7.2 Artifact Metadata (ARTIFACT_META, 0x05)
+---------------------------------------------
+Before transferring an artifact, the sender transmits metadata:
+
+  ARTIFACT_META payload:
+    Bytes 0-31:  Artifact name (32 bytes, UTF-8, null-padded)
+    Bytes 32-35: Artifact version (4 bytes, major.minor.patch.build)
+    Bytes 36-43: Total size in bytes (uint64, big-endian)
+    Bytes 44-47: Chunk size in bytes (uint32, typically 4096 = 0x1000)
+    Bytes 48-51: Number of chunks (uint32, ceil(total_size / chunk_size))
+    Bytes 52-59: Timestamp of build (uint64, Unix epoch ms)
+    Bytes 60-63: Target node type (uint32, which node type this is for)
+    Bytes 64-67: Minimum firmware version required (4 bytes)
+    Bytes 68-71: SHA-256 of entire artifact (first 4 bytes of hash)
+                 Full 32-byte hash is sent in ARTIFACT_ACK after transfer.
+    Bytes 72-79: Provenance UUID (64-bit ID of the Cortex or human that
+                 authored this artifact -- enables full traceability)
+    Bytes 80-83: Priority (uint32, lower = higher priority)
+    Bytes 84-87: Flags (uint32):
+                   Bit 0: REQUIRES_REBOOT
+                   Bit 1: REQUIRES_SAFE_STATE
+                   Bit 2: CAN_ROLLBACK
+                   Bit 3: IS_CRITICAL_UPDATE
+    Bytes 88+:   Description string (variable, null-terminated)
+
+7.3 Chunked Transfer (ARTIFACT_CHUNK, 0x06)
+---------------------------------------------
+After ARTIFACT_META is acknowledged (via ARTIFACT_ACK with status=ACCEPTED),
+the sender begins transmitting data chunks:
+
+  ARTIFACT_CHUNK payload:
+    Bytes 0-3:   Artifact transfer ID (uint32, matches a field in the
+                 ARTIFACT_META that was acknowledged)
+    Bytes 4-7:   Chunk index (uint32, 0-based)
+    Bytes 8-11:  Chunk size (uint32, last chunk may be smaller)
+    Bytes 12-15: CRC32 of chunk data (uint32, little-endian)
+    Bytes 16+:   Raw chunk data (up to 4096 bytes)
+
+The receiver acknowledges each chunk with ARTIFACT_ACK:
+  ARTIFACT_ACK payload for chunk acknowledgment:
+    Bytes 0-3:   Transfer ID
+    Bytes 4-7:   Chunk index
+    Bytes 8:     Status (0x00=OK, 0x01=CRC_MISMATCH, 0x02=WRITE_ERROR)
+    Bytes 9-12:  Retry count (how many times this chunk has been retransmitted)
+
+7.4 Transfer Flow Control
+--------------------------
+Chunk transfer uses a sliding window protocol:
+  - Default window size: 4 chunks (configurable via NEGOTIATE)
+  - The sender may transmit up to WINDOW_SIZE chunks before waiting for
+    acknowledgments.
+  - Chunks are transmitted in order. Out-of-order ACKs are permitted
+    (the receiver may ACK chunk 3 before chunk 2 if chunk 2 had a CRC
+    error and is being retransmitted).
+  - If a chunk is not ACKed within 2 seconds, the sender retransmits.
+  - After 3 failed retransmissions, the sender aborts the transfer and
+    sends ARTIFACT_ACK with status=TRANSFER_FAILED.
+
+7.5 Verification and Atomic Swap
+---------------------------------
+After all chunks are received and acknowledged:
+
+  1. The receiver computes SHA-256 of the reassembled artifact.
+  2. The receiver sends ARTIFACT_ACK with status=VERIFYING and includes
+     the full 32-byte SHA-256 hash.
+  3. The sender compares the hash. If it matches, the sender sends
+     ARTIFACT_ACK with status=VERIFIED.
+  4. If the REQUIRES_SAFE_STATE flag is set, the receiver waits until
+     all active Reflex loops have entered safe state before proceeding.
+  5. The receiver performs an atomic swap:
+     - If CAN_ROLLBACK is set: copy current artifact to rollback slot,
+       then write new artifact to active slot.
+     - If CAN_ROLLBACK is not set: write directly (no rollback possible).
+  6. The receiver sends ARTIFACT_ACK with status=APPLIED or ROLLBACK_FAILED.
+  7. If REQUIRES_REBOOT is set, the receiver schedules a reboot after
+     all pending transmissions complete (flush UART buffers first).
+
+7.6 Rollback Procedure
+-----------------------
+If an artifact fails after deployment (detected via self-test in the next
+HEARTBEAT's health bitmap, or via a watchdog timeout), the node:
+
+  1. Enters safe state (all actuators disabled, telemetry continues).
+  2. Sends an ALARM message with alarm code ARTIFACT_FAILURE.
+  3. If CAN_ROLLBACK is set and a rollback slot exists:
+     a. Swap the rollback artifact back into the active slot.
+     b. Send ARTIFACT_ACK with status=ROLLED_BACK.
+     c. Reboot if REQUIRES_REBOOT was set on the original artifact.
+  4. If no rollback is available, the node enters Genesis mode (Section 11).
+
+7.7 Provenance Tracking
+------------------------
+Every artifact carries a 64-bit Provenance UUID identifying its creator.
+When a Cortex evolves an artifact (improves a behavior model), it creates a
+new artifact with:
+  - Incremented version number
+  - Parent artifact's UUID in a provenance chain field
+  - The Cortex's own UUID as the new creator
+  - Timestamp of evolution
+
+This creates a verifiable chain: Factory -> v1.0 (human) -> v1.1 (cortex)
+-> v1.2 (cortex) -> rollback to v1.1. The full provenance history is
+queryable via SYNC_REQUEST.
+
+
+================================================================================
+8. SAFETY HEARTBEAT AND WATCHDOG
+================================================================================
+
+8.1 Heartbeat Types
+--------------------
+NEXUSLINK defines two heartbeat tiers:
+
+  TIER 1 -- "I'm Alive" (HEARTBEAT, 1-second interval)
+    Payload: Empty (0 bytes).
+    Purpose: Confirm that the node's communication stack is functional.
+    Cost: 16 bytes/frame (header + CRC, no payload).
+    Overhead at 115200 baud: ~139 bytes/sec per node.
+
+  TIER 2 -- "I'm Healthy" (HEARTBEAT, 5-second interval)
+    Payload: 1-byte health bitmap:
+      Bit 0: Reflex loop running (real-time control loop is executing)
+      Bit 1: Sensors OK (all declared sensors are responding)
+      Bit 2: Actuators OK (all declared actuators are responsive)
+      Bit 3: Memory OK (heap fragmentation below threshold)
+      Bit 4: Temperature OK (CPU die temp below warning)
+      Bit 5: Power OK (supply voltage within range)
+      Bit 6: Artifact OK (deployed artifact passed self-test)
+      Bit 7: Link quality OK (UART error rate below threshold)
+    Purpose: Confirm that the node's application layer is functional, not
+             just its communication stack.
+
+A node sends BOTH tiers: the 1-second alive heartbeat always, and the
+5-second healthy heartbeat interleaved (every 5th heartbeat carries the
+health bitmap). This gives watchdogs two granularities of failure detection.
+
+8.2 Watchdog Escalation Model
+------------------------------
+Every node with HAS_SAFETY_WATCHDOG capability monitors the heartbeats of
+its bound peers. The escalation model is strictly defined:
+
+  State           Trigger                  Action
+  -----           -------                  ------
+  NORMAL          All heartbeats received  Continue operation.
+  WARNING         3 consecutive misses     Send ALARM (code: HB_WARNING).
+                  (3 seconds at 1Hz)       Log event. Begin degraded mode
+                                           preparation.
+  ALARM           5 consecutive misses     Send ALARM (code: HB_ALARM).
+                  (5 seconds at 1Hz)       If the missing node is a control
+                                           node, issue SAFE_STATE command to
+                                           affected actuators. Notify Cortex.
+  SAFE_STATE      10 consecutive misses    Execute local safe-state procedure.
+                  (10 seconds at 1Hz)      Mark the missing node's bind as
+                                           BIND_DEAD. If the missing node
+                                           returns, it must re-negotiate.
+  RECOVERY        Missing node returns      Node sends DISCOVERY automatically.
+                  after SAFE_STATE         Watchdog resets to WARNING (not
+                                           directly to NORMAL -- requires
+                                           3 consecutive heartbeats to
+                                           confirm stability).
+
+This escalation gives a 10-second window between first detection and full
+safe-state execution. This is intentionally longer than consumer robotics
+standards (typically 1-3 seconds) because:
+  - Serial links may have legitimate 100-500ms gaps due to bus contention.
+  - UART framing errors on noisy links can cause heartbeat drops.
+  - ESP32 WiFi reconnection can take 3-5 seconds.
+  - We prefer false alarms to be rare, even if detection is slower.
+
+8.3 COMMAND and RESPONSE Messages
+----------------------------------
+COMMAND (0x03) payload:
+  Bytes 0-3:   Command code (uint32, big-endian)
+  Bytes 4-7:   Command parameter (uint32, big-endian, meaning depends
+               on command code)
+  Bytes 8+:    Optional extended parameters (variable)
+
+Standard command codes:
+  0x00000001: SET_VELOCITY       param = velocity in mm/s (int32)
+  0x00000002: SET_HEADING        param = heading in degrees * 100
+  0x00000003: STOP               param = deceleration profile (0=hard)
+  0x00000004: SAFE_STATE         param = reason code (0=heartbeat, 1=user)
+  0x00000005: REBOOT             param = delay in seconds
+  0x00000006: ENTER_BOOTLOADER   param = unused
+  0x00000007: SET_LED            param = RGB packed (0x00RRGGBB)
+  0x00000008: REQUEST_STATUS     param = status type code
+  0x00000009: CANCEL_ARTIFACT    param = transfer ID
+  0x0000000A: ROLLBACK_ARTIFACT  param = unused
+
+RESPONSE (0x04) payload:
+  Bytes 0-3:   Original command code (echoes the COMMAND)
+  Bytes 4-5:   Original SeqNo (echoes the COMMAND's SeqNo)
+  Bytes 6:     Status code:
+                 0x00 = OK
+                 0x01 = REJECTED (command not accepted)
+                 0x02 = FAILED (command accepted but execution failed)
+                 0x03 = TIMEOUT (command execution timed out)
+                 0x04 = NOT_SUPPORTED
+                 0x05 = WRONG_STATE (node not in required state)
+                 0x06 = AUTH_REQUIRED (command requires encrypted channel)
+  Bytes 7+:    Optional response data (variable)
+
+8.4 ALARM Message (0x0A)
+-------------------------
+ALARM payload:
+  Bytes 0-3:   Alarm code (uint32, big-endian)
+  Bytes 4-7:   Alarm severity (uint32): 1=INFO, 2=WARNING, 3=CRITICAL, 4=EMERGENCY
+  Bytes 8-11:  Source subsystem (uint32): 0=communication, 1=power, 2=thermal,
+               3=mechanical, 4=software, 5=artifact
+  Bytes 12+:   Alarm description (variable, null-terminated UTF-8)
+
+Standard alarm codes:
+  0x0001: HB_WARNING      -- Peer heartbeat miss count = 3
+  0x0002: HB_ALARM        -- Peer heartbeat miss count = 5
+  0x0003: HB_SAFE_STATE   -- Peer heartbeat miss count = 10
+  0x0010: ARTIFACT_FAILURE -- Deployed artifact failed self-test
+  0x0011: ARTIFACT_CRC     -- Artifact chunk CRC mismatch during transfer
+  0x0020: POWER_LOW        -- Battery voltage below warning threshold
+  0x0021: POWER_CRITICAL   -- Battery voltage below critical threshold
+  0x0030: THERMAL_WARNING  -- Die temperature above 80C
+  0x0031: THERMAL_CRITICAL -- Die temperature above 100C
+  0x0040: SENSOR_FAULT     -- Declared sensor stopped responding
+  0x0041: SENSOR_STALE     -- Sensor data is older than expected
+  0x0050: UART_ERROR_RATE  -- UART framing error rate exceeds threshold
+  0x0051: UART_BUFFER_OVERRUN -- UART RX buffer overflow detected
+
+
+================================================================================
+9. PRIORITY AND QOS ARCHITECTURE
+================================================================================
+
+9.1 Priority Levels
+--------------------
+NEXUSLINK implements five priority levels, strictly ordered:
+
+  Level  Name       Message Types                         Preemption
+  -----  ----       -------------                         ----------
+  P0     SAFETY     ALARM, HEARTBEAT                       Always first
+  P1     CONTROL    COMMAND, RESPONSE, NEGOTIATE           Can preempt P2-P4
+  P2     TELEMETRY  TELEMETRY, STATUS, DISCOVERY           Normal
+  P3     CONFIG     ARTIFACT_META, ARTIFACT_CHUNK, ACK     Normal
+  P4     OTA        SYNC_REQUEST, SYNC_RESPONSE            Lowest
+
+When transmitting on a shared bus, a node MUST:
+  - Always transmit P0 frames immediately, even if a lower-priority frame
+    is partially transmitted (on CAN bus, this is handled by arbitration;
+    on UART, the sender finishes the current byte, then sends P0).
+  - On UART, if a P0 frame needs to be sent, the sender pads the current
+    incomplete frame to its declared Length, sends CRC, then immediately
+    sends the P0 frame. This adds at most ~8 bytes of latency.
+  - On half-duplex links (RS-485), the sender releases the bus after the
+    current frame and re-asserts for the P0 frame within 1 byte time.
+
+9.2 Congestion Management
+--------------------------
+When the outbound queue for any priority level exceeds 80% capacity:
+  - P2-P4 frames may be dropped (oldest first) to free buffer space.
+  - P0 and P1 frames are NEVER dropped. If P0+P1 queues are full, the
+    node enters congestion mode and sends an ALARM (code: LINK_CONGESTED).
+  - Telemetry streams (P2) automatically reduce their reporting rate:
+    50Hz -> 20Hz -> 10Hz -> 5Hz -> 1Hz, returning to full rate when
+    congestion clears.
+
+9.3 Bandwidth Reservation
+--------------------------
+On a shared bus, each node's Cortex assigns bandwidth budgets:
+  - Safety messages (P0+P1): Reserved 20% of link capacity.
+  - Telemetry (P2): Reserved 40% of link capacity.
+  - Config/OTA (P3+P4): Remaining 40%, available first-come-first-served.
+  - No single node may consume more than 60% of link capacity for
+    telemetry (prevents a faulty sensor from flooding the bus).
+
+
+================================================================================
+10. DISCONNECTION TOLERANCE AND STORE-AND-FORWARD
+================================================================================
+
+10.1 The Hours-Long Disconnection Problem
+------------------------------------------
+A key design requirement is that NEXUSLINK must tolerate disconnections
+lasting hours. This happens when:
+  - A robot drives out of LoRa range of its base station.
+  - A Cortex reboots (Jetson boot time: 30-60 seconds) while Nodes
+    continue operating autonomously.
+  - Serial cables are disconnected for maintenance.
+  - WiFi interference causes extended communication blackouts.
+
+10.2 Store-and-Forward Design
+-------------------------------
+Each node maintains a circular store-and-forward (S&F) buffer in persistent
+storage (SPIFFS/LittleFS on ESP32, NVMe on Cortex):
+
+  - Buffer size: 64KB on ESP32 (shared with other data), 1MB on Cortex.
+  - Frames are stored in the S&F buffer when:
+    (a) The frame has ACK_REQUEST set and no ACK was received within
+        the retransmission timeout.
+    (b) The frame is a COMMAND (always stored until ACKed).
+    (c) The frame is an ARTIFACT_META (stored until ARTIFACT_ACK received).
+  - S&F entries are ordered by insertion time.
+  - On reconnection (peer sends DISCOVERY or first HEARTBEAT after a gap),
+    the node replays all un-ACKed frames from the S&F buffer to that peer,
+    in order.
+  - S&F entries are purged after successful ACK or after 24 hours (whichever
+    comes first).
+
+10.3 SYNC_REQUEST / SYNC_RESPONSE
+----------------------------------
+When a node reconnects after a long absence, it may need more than just
+replayed frames. It may need the full current state of its peers. This is
+handled by the SYNC_REQUEST (0x0B) message.
+
+  SYNC_REQUEST payload:
+    Byte 0:     Sync scope (what to request):
+                  0x01 = Peer table only
+                  0x02 = Telemetry declarations only
+                  0x03 = Artifact registry only
+                  0x04 = Everything (full state dump)
+    Bytes 1-4:  Requester's last known timestamp (uint32, seconds).
+                The responder only sends data newer than this timestamp.
+                If zero, the responder sends everything.
+
+  SYNC_RESPONSE payload:
+    Byte 0:       Response scope (matches request)
+    Bytes 1-4:    Entry count (uint32)
+    For each entry:
+      Bytes 0-1:  Entry type (uint16): 0x01=peer, 0x02=telemetry_decl,
+                   0x03=artifact_meta, 0x04=config_param
+      Bytes 2-3:  Entry length (uint16)
+      Bytes 4+:   Entry data (format depends on entry type)
+
+SYNC_RESPONSE may be split across multiple frames using the FRAGMENT flag.
+The receiver reassembles fragments in order before processing.
+
+
+================================================================================
+11. NEXUS TERMINOLOGY REFERENCE
+================================================================================
+
+This section defines the canonical terminology used throughout the NEXUS
+framework. All protocol design documents, firmware source code, and operator
+manuals MUST use these terms consistently.
+
+  Node         An ESP32-series microcontroller running NEXUSLINK and one or
+               more Reflex loops. Nodes are typed: Control, Sensor, Actuator,
+               Power, Comm. Nodes operate in real-time with deterministic
+               timing constraints.
+
+  Cortex       A Jetson Orin Nano (or compatible) running high-level
+               reasoning, path planning, behavior evolution, and artifact
+               compilation. The Cortex is the "brain" of the NEXUS system.
+               Multiple Cortex nodes may exist in a swarm.
+
+  Artifact     A compiled, versioned, cryptographically verified unit of
+               deployable behavior. Artifacts are the mechanism for runtime
+               evolution. Examples: firmware binary, compiled Reflex module,
+               neural network weights, behavior graph, configuration bundle.
+
+  Reflex       A real-time control loop running on a Node. Reflexes are
+               the fundamental unit of autonomous behavior. A Reflex reads
+               sensor inputs, executes a control algorithm, and produces
+               actuator outputs. Reflexes run at deterministic intervals
+               (e.g., 100Hz for motor control, 10Hz for LED patterns).
+
+  Impulse      A command sent from one agent to another via NEXUSLINK.
+               Impulses are the mechanism for deliberate, high-level
+               action. The Cortex sends Impulses to Nodes to change their
+               behavior. Nodes may send Impulses to other Nodes for
+               peer-to-peer coordination.
+
+  Sense        Telemetry data published by a Node via NEXUSLINK. Senses
+               are the mechanism for environmental awareness. The Cortex
+               subscribes to Senses from all Nodes to build a world model.
+
+  Bind         An active, negotiated connection between two agents. A Bind
+               represents mutual acknowledgment of identity, capabilities,
+               and communication parameters. Binds are tracked in a local
+               table and have a defined lifecycle (ACTIVE -> STALE -> DEAD).
+
+  Domain       A logical grouping of Nodes and Cortex nodes that share a
+               common purpose. Domains are defined at configuration time.
+               Examples: "drive_train", "sensor_array", "power_system".
+               Domains limit the scope of broadcast messages and simplify
+               network management.
+
+  Manifest     A complete declarative description of a NEXUS deployment:
+               all Nodes, their types, their capabilities, their Bind
+               relationships, their Artifacts, and their Domains. The
+               Manifest is the source of truth for the system's intended
+               configuration.
+
+  Genesis      The factory-default fallback state of a Node. Genesis is
+               the artifact and configuration that was programmed at the
+               factory. If a Node has no valid artifact (corruption, failed
+               rollback, empty storage), it enters Genesis mode and runs
+               the factory-default Reflex with minimal functionality.
+               Genesis is immutable and cannot be overwritten by OTA.
+
+  Evolution    The process by which a Cortex improves the behavior of the
+               NEXUS system. Evolution produces new Artifacts by analyzing
+               Senses, evaluating performance metrics, and compiling
+               improved Reflex modules. Evolution is the key differentiator
+               of NEXUS from static robotic systems.
+
+  Provenance   The complete history of an Artifact: who created it, when,
+               from what parent Artifact, and why. Provenance enables
+               traceability, rollback, and accountability. Every Artifact
+               carries a Provenance UUID chain back to its Genesis origin.
+
+  Nexus        The overall system formed by the interconnection of Nodes,
+               Cortex nodes, Artifacts, and the NEXUSLINK protocol. The
+               Nexus is more than the sum of its parts -- it is an
+               emergent intelligent system that evolves over time.
+
+
+================================================================================
+12. PROTOCOL STATE MACHINE
+================================================================================
+
+Every node implements the following protocol state machine:
+
+  States:
+    INIT         -- Just powered on, hardware initializing.
+    DISCOVERY    -- Transmitting/receiving DISCOVERY messages.
+    NEGOTIATING  -- Exchanging NEGOTIATE messages with peers.
+    ACTIVE       -- Normal operation: heartbeat, telemetry, commands.
+    SYNCING      -- Processing SYNC_REQUEST or SYNC_RESPONSE.
+    TRANSFERRING -- In the middle of an artifact transfer.
+    SAFE_STATE   -- All actuators disabled, telemetry continues.
+    GENESIS      -- Running factory-default artifact.
+
+  Transitions:
+    INIT -> DISCOVERY        (after radio/UART initialization complete)
+    DISCOVERY -> NEGOTIATING  (after discovery window closes, if peers found)
+    DISCOVERY -> ACTIVE       (if no negotiation needed)
+    NEGOTIATING -> ACTIVE     (after all required negotiations complete)
+    ACTIVE -> SYNCING         (on receipt of SYNC_REQUEST or decision to sync)
+    SYNCING -> ACTIVE         (after sync complete)
+    ACTIVE -> TRANSFERRING    (on receipt of ARTIFACT_META)
+    TRANSFERRING -> ACTIVE    (after artifact applied or transfer failed)
+    ACTIVE -> SAFE_STATE      (on watchdog escalation to SAFE_STATE level)
+    SAFE_STATE -> GENESIS     (if artifact is corrupt and no rollback)
+    SAFE_STATE -> SYNCING     (if peer returns and needs state sync)
+    GENESIS -> DISCOVERY      (on reboot after genesis recovery)
+    ANY -> INIT               (on hardware reset or REBOOT command)
+
+  Invariants:
+    - HEARTBEAT messages are sent in all states except INIT and GENESIS.
+    - ALARM messages are sent in all states.
+    - DISCOVERY messages are sent only in DISCOVERY state.
+    - ARTIFACT transfer messages are sent only in TRANSFERRING state.
+    - The node always accepts COMMAND messages with code SAFE_STATE,
+      regardless of current state (safety override).
+
+
+================================================================================
+13. SECURITY CONSIDERATIONS
+================================================================================
+
+NEXUSLINK is designed for physically constrained environments (a single
+robot, a local network of robots on the same physical bus). It does NOT
+implement full internet-scale security. However, it does provide:
+
+  13.1 Frame Integrity
+    CRC-32 on every frame. Probability of undetected corruption < 1e-9.
+
+  13.2 Optional Encryption
+    AES-128-CTR with pre-shared keys. Negotiated via NEGOTIATE. Key
+    exchange is out-of-band (flashed at factory or configured via
+    Genesis provisioning).
+
+  13.3 Artifact Verification
+    SHA-256 hash on every artifact. Artifacts cannot be tampered with
+    in transit without detection.
+
+  13.4 Provenance Chain
+    Every artifact carries a provenance UUID chain. An artifact's
+    origin and modification history is always traceable.
+
+  13.5 Capability Gating
+    COMMAND messages are only accepted if the sender's capabilities
+    include the appropriate authorization bits. For example, only a
+    Cortex node can send SAFE_STATE commands to control nodes.
+
+  13.6 Known Limitations
+    - No replay protection beyond SeqNo deduplication (SeqNo wraps at
+      16 bits, so replay window is small).
+    - No perfect forward secrecy (pre-shared keys are static).
+    - No protection against physical bus injection (an attacker with
+      access to the UART bus can inject frames).
+    These limitations are acceptable for the target deployment environment
+    (physically secured robots on a private bus). Future protocol versions
+    may add Ed25519 signatures for stronger authentication.
+
+
+================================================================================
+14. WIRE ENCODING REFERENCE
+================================================================================
+
+14.1 Byte Order
+    All multi-byte integers are big-endian (network byte order), EXCEPT
+    CRC-32 which is little-endian (as produced by standard CRC-32/ISO-HDLC
+    implementations).
+
+14.2 String Encoding
+    All strings are UTF-8, null-terminated, null-padded to their declared
+    fixed length. Example: "left_wheel" in an 16-byte field:
+      6C 65 66 74 5F 77 68 65 65 6C 00 00 00 00 00 00
+
+14.3 Bitmap Encoding
+    Bitmaps are uint32, big-endian. Bit 0 is the LSB of the first byte.
+    Example: capabilities bitmap with bits 0, 1, and 4 set:
+      0x00 0x00 0x00 0x13
+
+14.4 Timestamp Encoding
+    Timestamps are uint64, big-endian, representing milliseconds since
+    Unix epoch (2025-01-01 00:00:00 UTC for NEXUS-relative timestamps,
+    or standard Unix epoch for interoperability).
+
+14.5 Example: Complete HEARTBEAT Frame (Tier 1)
+    4E                          -- Sync byte
+    00 0C                       -- Length = 12 (no payload)
+    01                          -- MessageType = HEARTBEAT
+    00                          -- Flags = 0
+    FF 00 00 01                 -- SrcID = Cortex #1
+    FF FF FF FF                 -- DstID = broadcast
+    00 2A                       -- SeqNo = 42
+    XX XX XX XX                 -- CRC-32 (little-endian)
+    Total: 16 bytes.
+
+14.6 Example: Complete TELEMETRY Frame (2 channels)
+    4E                          -- Sync byte
+    00 24                       -- Length = 36 (16 header + 20 payload)
+    02                          -- MessageType = TELEMETRY
+    00                          -- Flags = 0
+    01 00 00 17                 -- SrcID = Control Node #23
+    FF 00 00 01                 -- DstID = Cortex #1
+    00 7B                       -- SeqNo = 123
+    -- Payload begins --
+    02                          -- Channel count = 2
+    00 14                       -- Timestamp delta = 20ms
+    -- Channel 0: wheel_speed --
+    01                          -- Channel ID = 1
+    05                          -- Type = int16
+    F0 00                       -- Quality = excellent, no flags
+    01 F4                       -- Value = 500 (mm/s)
+    -- Channel 1: motor_temp --
+    02                          -- Channel ID = 2
+    02                          -- Type = uint8
+    F0 00                       -- Quality = excellent
+    3C                          -- Value = 60 (Celsius)
+    -- CRC --
+    XX XX XX XX                 -- CRC-32
+    Total: 40 bytes.
+
+14.7 Example: Complete DISCOVERY Frame
+    4E                          -- Sync byte
+    00 96                       -- Length = 150 (header + 118-byte identity)
+    0D                          -- MessageType = DISCOVERY
+    00                          -- Flags = 0
+    01 00 00 17                 -- SrcID = Control Node #23
+    FF FF FF FF                 -- DstID = broadcast
+    00 01                       -- SeqNo = 1
+    -- Payload: Identity Card (118 bytes) --
+    [UUID: 8 bytes]
+    [Name: 32 bytes]
+    [Role: 16 bytes]
+    [Capabilities: 4 bytes]
+    [FW version: 4 bytes]
+    [Uptime: 4 bytes]
+    -- CRC --
+    XX XX XX XX                 -- CRC-32
+    Total: 166 bytes.
+
+
+================================================================================
+APPENDIX A -- MESSAGE TYPE QUICK REFERENCE
+================================================================================
+
+  Code  Name            Dir          Priority   Payload
+  ----  ----            ---          --------   -------
+  0x01  HEARTBEAT       Any->Any     P0 (Safety) Empty or 1B
+  0x02  TELEMETRY       Node->Cortex P2 (Telem)   Variable
+  0x03  COMMAND         Cortex->Node P1 (Control) 8+ bytes
+  0x04  RESPONSE        Any->Any     P1 (Control) 7+ bytes
+  0x05  ARTIFACT_META   Cortex->Node P3 (Config)   88+ bytes
+  0x06  ARTIFACT_CHUNK  Cortex->Node P3 (Config)   16+ bytes
+  0x07  ARTIFACT_ACK    Any->Any     P3 (Config)   9-36 bytes
+  0x08  NEGOTIATE       Any->Any     P1 (Control) 8 bytes
+  0x09  STATUS          Any->Any     P2 (Telem)   Variable
+  0x0A  ALARM           Any->Any     P0 (Safety) 12+ bytes
+  0x0B  SYNC_REQUEST    Any->Any     P4 (OTA)     5 bytes
+  0x0C  SYNC_RESPONSE   Any->Any     P4 (OTA)     Variable
+  0x0D  DISCOVERY       Any->Any     P2 (Telem)   118 bytes
+
+  Codes 0x0E-0xFF: Reserved for future use.
+
+
+================================================================================
+APPENDIX B -- CRC-32 IMPLEMENTATION NOTES
+================================================================================
+
+NEXUSLINK uses CRC-32/ISO-HDLC (also known as CRC-32b, CRC-32/CCITT).
+Polynomial: 0xEDB88320 (reversed representation).
+Initial value: 0xFFFFFFFF.
+Final XOR: 0xFFFFFFFF.
+The CRC is computed over bytes [1] through [14 + payload_length], i.e.,
+starting from the Length field and ending at the last byte of Payload.
+The CRC value is stored in little-endian byte order in the frame.
+
+This is the same CRC-32 used by zlib, gzip, PNG, and most networking
+protocols. Every platform has an efficient implementation available.
+On ESP32, the ROM contains a hardware-accelerated CRC-32 calculator.
+
+Verification pseudocode:
+  uint32_t crc = 0xFFFFFFFF;
+  for (int i = 1; i <= frame_len - 4; i++) {
+    crc ^= frame[i];
+    for (int j = 0; j < 8; j++) {
+      crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
+    }
+  }
+  crc ^= 0xFFFFFFFF;
+  // Compare crc with little-endian value in frame[frame_len - 4 .. frame_len - 1]
+
+
+================================================================================
+APPENDIX C -- CAPABILITY BITMAP REGISTRY
+================================================================================
+
+  Bit   Name                    Description
+  ---   ----                    -----------
+  0     CAN_CONTROL             Can receive motor/actuator commands
+  1     CAN_STREAM_TELEMETRY    Can publish typed telemetry channels
+  2     CAN_RECEIVE_ARTIFACTS   Can accept and apply artifact updates
+  3     CAN_PRODUCE_ARTIFACTS   Can compile and distribute artifacts
+  4     HAS_SAFETY_WATCHDOG     Monitors peer heartbeats, escalates alarms
+  5     HAS_ULTRASONIC          Hardware: ultrasonic distance sensor
+  6     HAS_TOF                 Hardware: time-of-flight distance sensor
+  7     HAS_IMU                 Hardware: inertial measurement unit
+  8     HAS_ENCODER             Hardware: rotary encoder (wheel/motor)
+  9     HAS_SERVO               Hardware: servo motor output (PWM)
+  10    HAS_STEPPER             Hardware: stepper motor driver
+  11    HAS_GPS                 Hardware: GPS receiver
+  12    HAS_CAMERA              Hardware: camera module (Cortex only)
+  13    HAS_LIDAR               Hardware: LiDAR sensor (Cortex only)
+  14    CAN_COMPRESS_LZ4        Supports LZ4 payload compression
+  15    CAN_ENCRYPT_AES         Supports AES-128-CTR encryption
+  16    IS_MOBILE               Node is on a mobile platform (robot)
+  17    IS_STATIONARY           Node is fixed (base station, charger)
+  18    HAS_OLED                Hardware: OLED display
+  19    HAS_BUZZER              Hardware: piezo buzzer
+  20    HAS_RGB_LED             Hardware: addressable RGB LED strip
+  21    CAN_BRIDGE_WIFI         Can bridge NEXUSLINK over WiFi/TCP
+  22    CAN_BRIDGE_LORA         Can bridge NEXUSLINK over LoRa radio
+  23    HAS_BATTERY_MONITOR     Hardware: battery voltage/current sensor
+  24    HAS_CHARGER             Hardware: battery charging controller
+  25    IS_CORTEX               Is a high-level compute node (Jetson)
+  26    CAN_EVOLVE              Can run Evolution process (Cortex)
+  27    HAS_THERMAL_CAMERA      Hardware: thermal imaging sensor
+  28    HAS_MICROPHONE          Hardware: microphone / audio input
+  29    HAS_SPEAKER             Hardware: speaker / audio output
+  30-31 Reserved               Must be zero
+
+
+================================================================================
+END OF NEXUSLINK PROTOCOL SPECIFICATION v1.0
+================================================================================
+  This document is part of the NEXUS Autonomous Robotics Framework.
+  Companion documents:
+    NXFW-001  -- NEXUS Framework Overview and Architecture
+    NXLP-002  -- NEXUSLINK Protocol Specification (this document)
+    NXRT-003  -- NEXUS Reflex Runtime Reference
+    NXEV-004  -- NEXUS Evolution Engine Design
+================================================================================

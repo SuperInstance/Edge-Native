@@ -1,0 +1,306 @@
+{
+  "_comment": "ESP32-S3 Complete Pin Assignment \u2014 Marine Autopilot Controller",
+  "_version": "1.1.0",
+  "_chip": "ESP32-S3-WROOM-1-N8R8",
+  "_package": "48-pin QFN",
+  "uart": {
+    "uart0": {
+      "description": "Debug and Programming (USB-serial bridge)",
+      "rx": {
+        "gpio": 43,
+        "pin": "IO43",
+        "mode": "input",
+        "function": "UART0_RXD",
+        "notes": "Connected to USB-serial chip"
+      },
+      "tx": {
+        "gpio": 44,
+        "pin": "IO44",
+        "mode": "output",
+        "function": "UART0_TXD",
+        "notes": "Connected to USB-serial chip"
+      }
+    },
+    "uart1": {
+      "description": "NMEA 0183 Input (compass, GPS, APB from chart plotter)",
+      "baud_rate": 4800,
+      "data_bits": 8,
+      "parity": "none",
+      "stop_bits": 1,
+      "rx": {
+        "gpio": 9,
+        "pin": "IO9",
+        "mode": "input",
+        "function": "UART1_RXD",
+        "notes": "From SN75176 RO output (NMEA bus)"
+      },
+      "tx": {
+        "gpio": 10,
+        "pin": "IO10",
+        "mode": "output",
+        "function": "UART1_TXD",
+        "notes": "To SN75176 DI (NMEA output, optional)",
+        "active_level": "low"
+      },
+      "rs422_transceiver": "SN75176BP",
+      "termination": "120_ohm"
+    },
+    "uart2": {
+      "description": "Jetson Communication (command/telemetry link)",
+      "baud_rate": 115200,
+      "data_bits": 8,
+      "parity": "none",
+      "stop_bits": 1,
+      "rx": {
+        "gpio": 17,
+        "pin": "IO17",
+        "mode": "input",
+        "function": "UART2_RXD",
+        "notes": "From Jetson via ADuM1201 optoisolator VI1"
+      },
+      "tx": {
+        "gpio": 18,
+        "pin": "IO18",
+        "mode": "output",
+        "function": "UART2_TXD",
+        "notes": "To Jetson via ADuM1201 optoisolator VO1"
+      },
+      "isolation": "ADuM1201 dual optoisolator"
+    }
+  },
+  "i2c": {
+    "i2c0": {
+      "description": "Shared I2C bus for compass, rudder encoder, OLED display. Protected by i2c0_mutex.",
+      "speed_hz": 400000,
+      "sda": {
+        "gpio": 8,
+        "pin": "IO8",
+        "mode": "output_open_drain",
+        "pullup": 4700,
+        "notes": "With 4.7K\u03a9 pull-up to 3.3V"
+      },
+      "scl": {
+        "gpio": 7,
+        "pin": "IO7",
+        "mode": "output_open_drain",
+        "pullup": 4700,
+        "notes": "With 4.7K\u03a9 pull-up to 3.3V"
+      },
+      "devices": [
+        {
+          "name": "bno085_compass",
+          "address": "0x28",
+          "description": "9-DOF IMU compass (Hillcrest SH-2 fusion)"
+        },
+        {
+          "name": "as5048a_rudder",
+          "address": "0x40",
+          "description": "14-bit magnetic rotary encoder (rudder feedback)"
+        },
+        {
+          "name": "ssd1306_display",
+          "address": "0x3C",
+          "description": "128x64 OLED display"
+        }
+      ]
+    }
+  },
+  "adc": {
+    "adc1_ch5": {
+      "gpio": 6,
+      "pin": "IO6",
+      "mode": "input",
+      "function": "ADC1_CH5",
+      "atten": "11db",
+      "width_bits": 12,
+      "description": "Rudder potentiometer wiper (fallback if AS5048A not installed)",
+      "voltage_range": "0-3.3V",
+      "notes": "Use with 10K\u03a9+20K\u03a9 voltage divider from 5V pot. RC filter: 1K\u03a9+100nF."
+    }
+  },
+  "gpio_solenoid_outputs": {
+    "description": "MOSFET gate drive outputs for hydraulic solenoid valves. Each drives IRLZ44N N-channel MOSFET via 100\u03a9 series resistor with 10K\u03a9 gate pull-down.",
+    "active_state": "high",
+    "default_state": "low",
+    "drive": {
+      "series_resistor_ohm": 100,
+      "pull_down_resistor_ohm": 10000,
+      "mosfet_part": "IRLZ44N",
+      "gate_driver": {
+        "ic_part": "TC4420",
+        "description": "9A peak output gate driver. 3.3V logic input compatible. Powered from LM2596 5V rail. Drives MOSFET gate to full 5V for rated Rds(on).",
+        "input_logic_high_v_min": 2.4,
+        "output_drive_v": 5.0,
+        "supply_pin": "LM2596_5V_rail",
+        "output_pin": "MOSFET_gate",
+        "bypass_cap_nf": 100,
+        "required": true,
+        "notes": "Three TC4420 devices required (PORT, STBD, CLUTCH). Place close to MOSFET gates with short PCB traces."
+      },
+      "_comment_alternative": "Alternative: Replace IRLZ44N with AO3400 logic-level MOSFET (Vgs(th)=1.05V, Rds(on)=42m\u03a9@Vgs=2.5V, Id=5.7A). Eliminates gate driver but has higher Rds(on)."
+    },
+    "port": {
+      "gpio": 13,
+      "pin": "IO13",
+      "mode": "output",
+      "function": "SOLENOID_PORT",
+      "description": "Port solenoid \u2014 rudder moves to port (left)",
+      "notes": "MOVED from GPIO4 to GPIO13 (GPIO4 reassigned to buzzer per Fix C-09). NEVER active simultaneously with starboard. UF4007 flyback diode required."
+    },
+    "starboard": {
+      "gpio": 5,
+      "pin": "IO5",
+      "mode": "output",
+      "function": "SOLENOID_STBD",
+      "description": "Starboard solenoid \u2014 rudder moves to starboard (right)",
+      "notes": "NEVER active simultaneously with port. UF4007 flyback diode required."
+    },
+    "clutch": {
+      "gpio": 3,
+      "pin": "IO3",
+      "mode": "output",
+      "function": "SOLENOID_CLUTCH",
+      "description": "Clutch solenoid \u2014 engages autopilot hydraulic drive",
+      "notes": "Must energize BEFORE driving port/stbd. Current monitored by ACS712."
+    },
+    "_comment_gate_drive": "Fix C-01: MOSFET gate drive voltage mismatch. ESP32 GPIO=3.3V, IRLZ44N needs Vgs=5V for rated Rds(on). Gate driver TC4420 required between ESP32 GPIO and MOSFET gate. TC4420 input=3.3V logic compatible, output=high-current 5V gate drive from LM2596 5V rail."
+  },
+  "gpio_watchdog": {
+    "wdg_kick": {
+      "gpio": 1,
+      "pin": "IO1",
+      "mode": "output",
+      "function": "WATCHDOG_KICK",
+      "description": "Periodic pulse to MAX6818 external watchdog. Toggled every 100ms.",
+      "watchdog_ic": "MAX6818",
+      "timeout_ms": 1600,
+      "notes": "WDO output connects to ESP32 EN pin for hardware reset."
+    }
+  },
+  "gpio_buttons": {
+    "description": "Physical control head button inputs. Active LOW with external 10K\u03a9 pull-ups. Hardware debounce caps (100nF) + software 50ms debounce.",
+    "active_state": "low",
+    "pullup_ohm": 10000,
+    "debounce_cap_nf": 100,
+    "debounce_ms": 50,
+    "auto_stby": {
+      "gpio": 35,
+      "pin": "IO35",
+      "mode": "input",
+      "label": "AUTO/STBY",
+      "short_press": "toggle_engage",
+      "notes": "Input-only pin, external pull-up required"
+    },
+    "port_1": {
+      "gpio": 36,
+      "pin": "IO36",
+      "mode": "input",
+      "label": "PORT -1\u00b0",
+      "short_press": "heading_minus_1",
+      "notes": "Input-only pin"
+    },
+    "port_10": {
+      "gpio": 37,
+      "pin": "IO37",
+      "mode": "input",
+      "label": "PORT -10\u00b0",
+      "short_press": "heading_minus_10",
+      "notes": "Input-only pin"
+    },
+    "stbd_1": {
+      "gpio": 38,
+      "pin": "IO38",
+      "mode": "input",
+      "label": "STBD +1\u00b0",
+      "short_press": "heading_plus_1",
+      "notes": "Input-only pin"
+    },
+    "stbd_10": {
+      "gpio": 39,
+      "pin": "IO39",
+      "mode": "input",
+      "label": "STBD +10\u00b0",
+      "short_press": "heading_plus_10",
+      "notes": "Input-only pin"
+    },
+    "mode": {
+      "gpio": 40,
+      "pin": "IO40",
+      "mode": "input",
+      "label": "MODE",
+      "short_press": "cycle_mode",
+      "long_press": "menu",
+      "notes": "Internal pull-up available; external recommended. Long press >1000ms."
+    }
+  },
+  "gpio_leds": {
+    "description": "Status indicator LEDs. Active LOW. Current-limited with 330\u03a9 series resistors.",
+    "active_state": "low",
+    "series_resistor_ohm": 330,
+    "green": {
+      "gpio": 45,
+      "pin": "IO45",
+      "mode": "output",
+      "description": "System OK / Autopilot engaged"
+    },
+    "amber": {
+      "gpio": 46,
+      "pin": "IO46",
+      "mode": "output",
+      "description": "Warning (link lost, stale data, low voltage)"
+    },
+    "red": {
+      "gpio": 47,
+      "pin": "IO47",
+      "mode": "output",
+      "description": "Critical alarm"
+    },
+    "blue": {
+      "gpio": 48,
+      "pin": "IO48",
+      "mode": "output",
+      "description": "Jetson link active (heartbeat)"
+    }
+  },
+  "gpio_buzzer": {
+    "buzzer": {
+      "gpio": 4,
+      "pin": "IO4",
+      "mode": "output",
+      "function": "BUZZER",
+      "active_state": "high",
+      "description": "Alarm buzzer via 2N2222 NPN transistor driver (500\u03a9 base resistor)",
+      "notes": "PWM capable for different beep patterns. DO NOT drive directly from GPIO.",
+      "_comment_fix_c09": "MOVED from GPIO2 to GPIO4 \u2014 GPIO2 is strapping pin on ESP32-S3, must be HIGH at boot for flash boot. External buzzer circuit risk of pulling GPIO2 low causes boot failure in marine environment."
+    }
+  },
+  "gpio_pwm_reserved": {
+    "description": "Reserved for future proportional hydraulic valve control. NOT USED in standard ON/OFF solenoid mode.",
+    "pwm_out": {
+      "gpio": 15,
+      "pin": "IO15",
+      "mode": "output",
+      "function": "MCPWM_CH0",
+      "description": "Proportional valve PWM output (200-300 Hz). Connect to gate driver if proportional valve installed.",
+      "default_duty": 0,
+      "notes": "UNUSED by default. WARNING: Do NOT apply PWM to standard solenoid valves."
+    }
+  },
+  "gpio_power": {
+    "3v3": {
+      "pin": "3V3",
+      "type": "power",
+      "description": "3.3V output from onboard LDO \u2014 supply sensors and pull-ups"
+    },
+    "gnd": {
+      "pin": "GND",
+      "type": "ground",
+      "description": "Common ground with boat 12V system"
+    },
+    "en": {
+      "pin": "EN",
+      "type": "input",
+      "description": "Chip enable \u2014 10K\u03a9 pull-up to 3.3V. WDO from MAX6818 can pull this LOW to reset."
+    }
+  }
+}

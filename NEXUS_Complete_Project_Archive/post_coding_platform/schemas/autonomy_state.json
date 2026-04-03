@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus-platform.org/schemas/autonomy_state.json",
+  "title": "NEXUS Platform - Subsystem Autonomy State",
+  "description": "Per-subsystem autonomy state tracking for the INCREMENTS framework.",
+  "type": "object",
+  "required": ["subsystem_id", "current_level", "max_allowed_level", "trust_score"],
+  "properties": {
+    "subsystem_id": { "type": "string" },
+    "subsystem_name": { "type": "string" },
+    "current_level": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "What the system is actually doing (earned through reliability)."
+    },
+    "max_allowed_level": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "Ceiling set by human. System can never exceed this."
+    },
+    "trust_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Continuous trust value [0, 1] computed by the asymmetric EMA."
+    },
+    "trust_params": {
+      "type": "object",
+      "properties": {
+        "alpha_gain": { "type": "number", "default": 0.002 },
+        "alpha_loss": { "type": "number", "default": 0.05 },
+        "alpha_decay": { "type": "number", "default": 0.0001 },
+        "t_floor": { "type": "number", "default": 0.2 }
+      }
+    },
+    "days_at_current_level": { "type": "integer" },
+    "last_incident": { "type": ["string", "null"], "format": "date-time" },
+    "override_count_24h": { "type": "integer" },
+    "advancement_progress": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "How close to next level based on metrics."
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "sensor_uptime_pct": { "type": "number" },
+        "false_alarm_rate": { "type": "number" },
+        "false_action_rate": { "type": "number" },
+        "response_latency_p99_ms": { "type": "number" },
+        "human_override_rate": { "type": "number" },
+        "consecutive_days_no_incident": { "type": "integer" }
+      }
+    },
+    "advancement_criteria": {
+      "type": "object",
+      "properties": {
+        "min_uptime_pct": { "type": "number" },
+        "max_false_alarm_rate": { "type": "number" },
+        "max_override_rate": { "type": "number" },
+        "min_hours_observatiON": { "type": "integer" },
+        "min_consecutive_days": { "type": "integer" },
+        "min_trust_threshold": { "type": "number" },
+        "human_comfort_required": { "type": "boolean" },
+        "ab_test_required": { "type": "boolean" }
+      }
+    },
+    "revocation_triggers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "trigger": { "type": "string" },
+          "action": { "type": "string" },
+          "severity": { "type": "string", "enum": ["critical", "major", "minor"] }
+        }
+      }
+    }
+  }
+}

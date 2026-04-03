@@ -1,0 +1,1680 @@
+================================================================================
+        MARINE AUTOPILOT PID ENGINEERING REFERENCE
+        Formal Technical Brief for Hydraulic Steering Systems
+        Vessel Class: 30-60ft Sail and Power
+        Document Rev: 1.0
+        Author: Senior Marine Autopilot Systems Engineering
+        Classification: Engineering Reference — Build-Critical
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+  1. Boat Steering Dynamics Model
+  2. PID Loop Design for Heading Hold
+  3. Advanced Steering Modes
+  4. NMEA 0183 Autopilot Sentences
+  5. Safety-Critical Design
+  6. PID Gain Ranges for Different Vessel Types
+  APPENDIX A: Transfer Function Derivation
+  APPENDIX B: NMEA Sentence Wire Protocol Reference
+  APPENDIX C: Anti-Windup Algorithm Pseudocode
+  APPENDIX D: Solenoid Driver Circuit Notes
+
+================================================================================
+SECTION 1: BOAT STEERING DYNAMICS MODEL
+================================================================================
+
+1.1 OVERVIEW
+------------
+The marine autopilot control problem involves commanding rudder angle to
+achieve and maintain a desired vessel heading. This is fundamentally a
+course-keeping (regulator) problem with disturbance rejection requirements.
+
+The plant (vessel + steering gear) is a SISO (Single-Input Single-Output)
+system:
+  - INPUT:  Commanded rudder angle delta_c  [degrees]
+  - OUTPUT: Vessel heading psi             [degrees]
+  - DISTURBANCES: Wind force, current, waves, propeller wash
+
+The steering actuator (hydraulic cylinder driving a rudder stock) introduces
+its own dynamics: deadband, rate limiting, and delay.
+
+1.2 TRANSFER FUNCTION — 35FT SAILBOAT (TYPICAL)
+
+The rudder-to-heading dynamics of a 35ft sailboat with hydraulic steering can
+be modeled as a second-order system with a gain, two poles, and an effective
+time delay:
+
+         K_boat * omega_n^2
+  G(s) = -------------------  * e^(-s*T_delay)
+         s^2 + 2*zeta*omega_n*s + omega_n^2
+
+Where:
+  K_boat   = Open-loop heading rate gain [deg heading / deg rudder / sec]
+  omega_n  = Natural frequency [rad/sec]
+  zeta     = Damping ratio [dimensionless]
+  T_delay  = Total loop delay [sec] (hydraulic + computation + sensor)
+
+TYPICAL VALUES for a 35ft sloop, hydraulic steering, moderate displacement
+(~10,000 lbs / 4,500 kg):
+
+  Parameter          Value           Notes
+  ----------         -----           -----
+  K_boat             0.8 - 1.5      deg/s per deg rudder at 5 kts
+  omega_n            0.05 - 0.12    rad/s (period ~ 50-125 sec)
+  zeta               0.15 - 0.35    Underdamped (sailboats yaw naturally)
+  T_delay            0.3 - 0.8      sec (hydraulic valve + fluid transit)
+
+At higher speeds (8 kts), K_boat increases to 1.8 - 3.0 deg/s/deg due to
+greater water flow over the rudder. The natural frequency omega_n also
+increases proportionally with speed.
+
+DERIVED QUANTITIES:
+
+  Rise time (10-90%)  approx  = 1.8 / omega_n = 15 - 36 seconds
+  Settling time (2%)  approx  = 4.0 / (zeta * omega_n) = 95 - 533 seconds
+  Peak overshoot      approx  = e^(-pi*zeta/sqrt(1-zeta^2)) = 30% - 60%
+
+These numbers explain why marine autopilot tuning feels sluggish compared to
+industrial PID: the plant itself is slow and underdamped.
+
+1.3 FIRST-ORDER APPROXIMATION
+
+For control design purposes, the heading response can be simplified to a
+first-order model with delay when the vessel is well-trimmed and seas are
+moderate:
+
+         K_boat
+  G(s) = ------- * e^(-s*T_delay)
+         T_s * s + 1
+
+Where T_s is the dominant time constant (20 - 60 seconds for a 35ft boat).
+
+This first-order model is useful for initial PID tuning and stability analysis.
+The second-order model must be used for detailed performance prediction and
+gain margin analysis.
+
+1.4 SPEED DEPENDENCE OF RUDDER AUTHORITY
+-----------------------------------------
+
+Rudder lift force is proportional to V^2 (boat speed squared). This means:
+
+  Effective_gain = K_base * (V / V_ref)^2
+
+Where:
+  V_ref  = reference speed (typically 5 kts)
+  V      = actual speed through water
+  K_base = measured gain at V_ref
+
+PRACTICAL TABLE — Rudder Authority vs. Speed (35ft vessel):
+
+  Boat Speed    Relative Gain     Notes
+  ---------     -------------     -----
+  2 kts         0.16              Almost no authority; AP will struggle
+  3 kts         0.36              Minimal; large heading errors expected
+  5 kts         1.00              Baseline; nominal tuning point
+  7 kts         1.96              Good authority; can reduce gains slightly
+  10 kts        4.00              Excellent; reduce gains to prevent oscillation
+
+DESIGN IMPLICATION:
+  The autopilot MUST apply gain scheduling based on water speed (STW from
+  $VHW or log instrument). A controller tuned for 6 kts will oscillate
+  dangerously at 10 kts and will be sluggish/inadequate at 3 kts.
+
+  Gain scheduling factor:  f(V) = (V / V_tune)^2
+
+  Apply to Kp:  Kp_effective = Kp_nominal * f(V)
+  Apply to Ki:  Ki_effective = Ki_nominal * f(V)
+  Apply to Kd:  Kd_effective = Kd_nominal * f(V)  (optional; some systems
+              keep Kd constant for damping consistency)
+
+1.5 WIND AND CURRENT DISTURBANCE MODEL
+---------------------------------------
+
+Wind and current act as nearly-constant disturbance forces on the vessel.
+These are modeled as additive inputs to the heading dynamics:
+
+  heading_dynamics:  psi_dot = f(delta, V) + d_wind + d_current
+
+WIND DISTURBANCE:
+  d_wind  [deg/s] = (K_wind * V_wind^2 * cos(alpha)) / (displacement * V_boat)
+
+  Where:
+    K_wind   = aerodynamic coupling coefficient (~0.005 - 0.02 for typical
+                sailboat above-water profile)
+    V_wind   = apparent wind speed [kts]
+    alpha    = angle between apparent wind and vessel heading [deg]
+    displacement = vessel displacement [kg]
+
+  A 35ft sailboat in 25 kts of beam wind at 5 kts boat speed experiences
+  approximately 0.5 - 2.0 deg/s of steady heading disturbance. This requires
+  constant rudder deflection to counteract — this is the PRIMARY justification
+  for the integral term in the PID controller.
+
+CURRENT DISTURBANCE:
+  Current does NOT cause heading error directly (the boat rotates with the
+  water). However, current creates cross-track error (XTE) when following a
+  GPS course. This is handled at the navigation layer, not the heading loop.
+
+  The heading loop will command a heading offset to compensate for current:
+    heading_command = course_over_ground + current_correction_angle
+
+  current_correction_angle = arcsin( V_current * sin(current_angle) / V_boat )
+
+WAVE DISTURBANCE:
+  Waves are periodic disturbances modeled as:
+    d_wave(t) = A_wave * sin(2*pi*f_wave*t + phi)
+
+  Typical sea state frequencies: 0.08 - 0.2 Hz (period 5-12 seconds)
+  Typical heading excitation:   2 - 8 degrees peak-to-peak in Sea State 4
+
+  The PID controller must NOT try to follow wave-induced heading oscillations.
+  The derivative term and a low-pass filter on the heading error are used to
+  reject these high-frequency disturbances.
+
+1.6 SECOND-ORDER VS FIRST-ORDER RESPONSE
+-----------------------------------------
+
+FIRST-ORDER RESPONSE (overdamped/heavy vessel, powerboat):
+  - No overshoot
+  - Slower convergence
+  - Easier to control
+  - Typical zeta > 0.7, omega_n = 0.03 - 0.06 rad/s
+  - 40-60ft displacement powerboats often exhibit this behavior
+
+SECOND-ORDER RESPONSE (underdamped, sailboat):
+  - Overshoot present (30-60% without derivative control)
+  - Faster initial response but oscillatory
+  - Requires derivative gain for damping
+  - Typical zeta = 0.1 - 0.4, omega_n = 0.06 - 0.15 rad/s
+  - Most sailboats 25-50ft exhibit this behavior
+
+DESIGN RULE:
+  - If zeta > 0.5:  Use PI control (derivative not needed, may cause noise)
+  - If zeta < 0.5:  Use PID control (derivative essential for stability)
+  - If unknown:     Start with PID, Kd can always be set to zero
+
+  A safe approach for an unknown vessel: begin with Kd = 0 and PI control,
+  then enable Kd only if heading overshoot exceeds 10 degrees or oscillations
+  persist for more than 3 cycles.
+
+1.7 COMPLETE PLANT MODEL WITH ACTUATOR DYNAMICS
+
+The full system includes actuator dynamics:
+
+                              K_actuator
+  Actuator:  G_act(s) = -----------------------
+                        (T_act * s + 1)
+
+  K_actuator = 1.0 (normalized: commanded angle = achieved angle, within limits)
+  T_act      = 0.1 - 0.3 sec (hydraulic valve response time)
+
+  Rudder rate limit:  |d(delta)/dt| <= delta_dot_max
+    Typical values:   3 - 8 deg/sec for hydraulic systems
+    This is set by pump flow rate and cylinder volume.
+
+  Rudder travel limit: |delta| <= delta_max
+    Typical values:    +/- 35 degrees (mechanical stops on rudder stock)
+
+FULL OPEN-LOOP TRANSFER FUNCTION:
+
+         K_boat * omega_n^2 * K_actuator
+  G(s) = ---------------------------------- * e^(-s*T_delay)
+         (T_act*s + 1)(s^2 + 2*zeta*omega_n*s + omega_n^2)
+
+================================================================================
+SECTION 2: PID LOOP DESIGN FOR HEADING HOLD
+================================================================================
+
+2.1 PID CONTROLLER FORMULATION
+-------------------------------
+
+The heading-hold PID controller operates on heading error:
+
+  e(t) = psi_command - psi_actual    [degrees]
+
+Heading error is normalized to the range [-180, +180] degrees:
+
+  e_norm = ((e + 180) % 360) - 180
+
+  Where % denotes the modulo (remainder) operation.
+  Example: e = -200 deg  =>  e_norm = ((-200+180)%360)-180 = (-20%360)-180
+           Python: e_norm = (e + 180) % 360 - 180
+
+STANDARD POSITIONAL PID:
+
+              1              de
+  u(t) = Kp*e + Ki * INT e dt + Kd * --
+                            dt
+
+Where:
+  u(t) = commanded rudder angle [degrees]
+  e    = heading error [degrees], normalized [-180, +180]
+  Kp   = Proportional gain [deg rudder / deg heading error]
+  Ki   = Integral gain [deg rudder / (deg heading error * sec)]
+  Kd   = Derivative gain [deg rudder / (deg heading rate)]
+
+2.2 WHY THE INTEGRAL TERM IS ESSENTIAL
+---------------------------------------
+
+THE PROBLEM:
+  Without the integral term, a constant disturbance (wind, current, asymmetric
+  hull) produces a STEADY-STATE HEADING ERROR (offset).
+
+  Steady-state error for PI controller:
+    e_ss = d_disturbance / Kp
+
+  With Kp = 2.0 and a wind disturbance requiring 5 deg rudder to counteract:
+    e_ss = 5 / 2.0 = 2.5 degrees of permanent heading offset
+
+  For a boat sailing 100 nautical miles, 2.5 degrees of heading error produces:
+    XTE = 100 * sin(2.5 deg) = 4.36 nautical miles of cross-track error!
+
+THE SOLUTION:
+  The integral term accumulates error over time and produces a steady rudder
+  command that exactly counteracts the disturbance:
+
+    Ki * INT(e) dt = d_disturbance / 1  (at steady state)
+    => steady-state error = 0
+
+THE DANGER:
+  If the boat makes a large course change (e.g., skipper turns 90 degrees) or
+  if the compass glitches, the integral term can WIND UP to an enormous value
+  during the transient. When the heading error finally reverses, the integral
+  term drives the rudder hard over, potentially causing a broach or grounding.
+
+  ANTI-WINDUP IS NOT OPTIONAL — IT IS A SAFETY REQUIREMENT.
+
+2.3 WHY THE DERIVATIVE TERM IS ESSENTIAL
+----------------------------------------
+
+THE PROBLEM:
+  An underdamped vessel (most sailboats) has natural yaw oscillations.
+  Without derivative damping, the proportional term alone causes:
+  - Overshoot of 30-60% on heading changes
+  - Oscillation that decays very slowly (may persist for 5+ minutes)
+  - "Hunting" behavior where the boat weaves back and forth
+
+THE SOLUTION:
+  The derivative term acts as a rate damper:
+  - When heading error is increasing rapidly (boat turning away from target),
+    the derivative term ADDS rudder in the corrective direction
+  - When heading error is decreasing (boat turning toward target), the
+    derivative term REDUCES rudder to prevent overshoot
+
+  The derivative term is equivalent to adding viscous damping to the system.
+  It increases the effective damping ratio zeta.
+
+  Effective damping with derivative control:
+    zeta_eff = zeta + Kd * omega_n / (2 * K_boat)
+
+  For a 35ft sailboat with zeta = 0.2, omega_n = 0.08, K_boat = 1.0:
+    With Kd = 10:  zeta_eff = 0.2 + 10*0.08/(2*1.0) = 0.6  (well damped!)
+
+THE DANGER:
+  The derivative term amplifies NOISE. Compass heading data from a fluxgate
+  sensor typically has 1-3 degrees of noise at the sampling rate. Taking the
+  derivative of noisy data produces large rudder commands that shake the
+  steering.
+
+  SOLUTION: Apply a first-order low-pass filter to the derivative path:
+    de_filtered = alpha * de_new + (1 - alpha) * de_filtered_prev
+    alpha = T_sample / (T_filter + T_sample)
+
+    T_filter = 0.5 - 2.0 seconds is typical (cutoff freq = 0.08 - 0.3 Hz)
+
+  Alternatively, compute the derivative on the HEADING signal (not the error)
+  to avoid derivative kick on setpoint changes:
+    u_d = -Kd * d(psi_actual)/dt
+
+  This is called "derivative on measurement" and is STRONGLY RECOMMENDED for
+  heading control, since setpoint changes (course changes commanded by the
+  navigator) should not produce a derivative spike.
+
+2.4 ANTI-WINDUP STRATEGIES
+--------------------------
+
+Multiple layers of protection are required:
+
+STRATEGY 1: INTEGRAL CLAMP (Simplest, Required)
+
+  Limit the integral accumulator to a maximum value:
+    INT_e = clamp(INT_e, -INT_max, +INT_max)
+
+  Where INT_max is set such that the integral term alone cannot drive the
+  rudder beyond its limits:
+    INT_max = delta_max / Ki
+
+  Example: delta_max = 35 deg, Ki = 0.05:
+    INT_max = 35 / 0.05 = 700 deg-sec
+
+  This prevents the integral term from commanding more rudder than is
+  physically possible, but it's not sufficient by itself.
+
+STRATEGY 2: CONDITIONAL INTEGRATION (Recommended)
+
+  Only accumulate integral when ALL of these conditions are met:
+    1. |e| < e_integral_threshold   (e.g., 15 degrees)
+    2. Rudder is NOT at its travel limit
+    3. Autopilot has been engaged for > T_int_lockout seconds (e.g., 5 sec)
+
+  During course changes or large transients, the integral is frozen. It only
+  operates during steady-state course-keeping, which is exactly when wind and
+  current compensation is needed.
+
+STRATEGY 3: BACK-CALCULATION ANTI-WINDUP (Advanced, Optional)
+
+  When the rudder command saturates, reduce the integral accumulator:
+    If |u| > delta_max:
+      INT_e -= (|u| - delta_max) / Ki * K_back
+
+  Where K_back = 1.0 / T_reset (T_reset = anti-windup time constant, 2-5 sec)
+
+STRATEGY 4: INTEGRAL RESET ON MODE CHANGE (Required)
+
+  When the autopilot mode changes (heading hold -> course hold, or any new
+  heading command), RESET the integral accumulator to zero:
+    INT_e = 0
+
+  This prevents accumulated offset from a previous condition from causing
+  a transient when conditions change.
+
+STRATEGY 5: INTEGRAL DECAY (Recommended)
+
+  Apply a slow decay to the integral term to prevent indefinite accumulation:
+    INT_e = INT_e * (1 - Ki_decay * T_sample)
+
+  Where Ki_decay = 0.0001 - 0.001 (decay time constant = 1000 - 10000 sec)
+
+  This ensures very old integral contributions eventually fade, adapting to
+  slowly changing conditions (wind shifts, current changes).
+
+RECOMMENDED IMPLEMENTATION:
+  Use Strategy 1 + 2 + 4 together. Strategy 3 if precision requirements
+  demand it. Strategy 5 for long passages (>6 hours).
+
+2.5 HEADING ERROR NORMALIZATION
+-------------------------------
+
+CRITICAL: Heading wraps around at +/-180 degrees. Naive subtraction will
+produce incorrect errors for headings near the wrap point.
+
+WRONG:
+  e = psi_command - psi_actual      // Fails when signs differ
+
+CORRECT:
+  e_raw = psi_command - psi_actual
+  e_norm = ((e_raw + 180 + 360*1000) % 360) - 180
+  // The +360*1000 handles negative e_raw correctly in integer math
+
+VERIFICATION:
+  psi_cmd = 355, psi_act = 005:
+    e_raw = 350, e_norm = ((350+180)%360)-180 = (170)-180 = -10  CORRECT
+  psi_cmd = 005, psi_act = 355:
+    e_raw = -350, e_norm = ((-350+180)%360)-180 = (-170%360)-180 = 190-180 = +10  CORRECT
+  psi_cmd = 180, psi_act = 179:
+    e_raw = 1, e_norm = 1  CORRECT
+  psi_cmd = 000, psi_act = 179:
+    e_raw = -179, e_norm = -179  CORRECT
+  psi_cmd = 000, psi_act = 181:
+    e_raw = -181, e_norm = ((-181+180)%360)-180 = (-1%360)-180 = 359-180 = +179  CORRECT
+
+ADDITIONAL CHECK: Also normalize the commanded heading to [0, 360):
+  psi_command = ((psi_command % 360) + 360) % 360
+
+2.6 SAMPLE RATE SELECTION
+--------------------------
+
+RECOMMENDED SAMPLE RATE: 10 Hz (100 ms period)
+
+RATIONALE:
+
+  | Rate  | Advantages                          | Disadvantages              |
+  |-------|-------------------------------------|----------------------------|
+  | 1 Hz  | Minimal CPU load                    | Excessive phase lag (>30 deg|
+  |       |                                     | at vessel natural freq)     |
+  |       |                                     | Poor derivative calculation |
+  |       |                                     | Poor disturbance rejection  |
+  |-------|-------------------------------------|----------------------------|
+  | 5 Hz  | Adequate for large vessels (>50ft)  | Marginal phase margin for   |
+  |       |                                     | smaller, faster-responding  |
+  |       |                                     | vessels                    |
+  |-------|-------------------------------------|----------------------------|
+  | 10 Hz | Sufficient for all vessels 30-60ft  | Slight excess for 60ft     |
+  |       | Good derivative accuracy            | displacement hulls         |
+  |       | Low phase lag (<10 deg)             |                            |
+  |       | Matches NMEA update rate            |                            |
+  |-------|-------------------------------------|----------------------------|
+  | 20 Hz | Better derivative accuracy          | Diminishing returns        |
+  |       |                                     | NMEA data doesn't update    |
+  |       |                                     | this fast anyway            |
+  |-------|-------------------------------------|----------------------------|
+  | 100Hz | Excellent theoretical performance   | Wasteful                    |
+  |       |                                     | No new sensor data          |
+  |       |                                     | Hydraulic system can't     |
+  |       |                                     | respond this fast           |
+  |       |                                     | May excite solenoid chatter |
+
+PHASE MARGIN ANALYSIS:
+
+  Additional phase lag from sampling = omega * T_sample / 2
+
+  At the vessel's natural frequency (omega_n = 0.1 rad/s):
+    1 Hz:   phase_lag = 0.1 * 0.5 / 2 = 2.9 deg    (acceptable)
+    10 Hz:  phase_lag = 0.1 * 0.1 / 2 = 0.29 deg   (negligible)
+
+  At higher frequencies where stability matters (omega_c = 0.3 rad/s,
+  crossover frequency):
+    1 Hz:   phase_lag = 0.3 * 0.5 / 2 = 8.6 deg    (significant!)
+    10 Hz:  phase_lag = 0.3 * 0.1 / 2 = 1.5 deg    (negligible)
+
+CONCLUSION: 10 Hz provides excellent performance for all vessels in the
+30-60ft class. Going below 5 Hz is not recommended for safety reasons.
+Going above 20 Hz provides no benefit.
+
+IMPORTANT: The NMEA heading data ($HDM/$HDT) typically updates at 5-10 Hz
+from modern compasses (Raymarine, Garmin, B&G). The PID loop should run at
+10 Hz and use the MOST RECENT heading data, interpolating or holding the
+last value if no new data has arrived.
+
+2.7 DEADBAND IMPLEMENTATION
+---------------------------
+
+PURPOSE:
+  - Prevent continuous solenoid cycling for tiny heading errors (noise, waves)
+  - Reduce hydraulic pump wear and power consumption
+  - Reduce annoying "hunting" when the boat is essentially on course
+
+IMPLEMENTATION:
+
+  deadband_half = 1.0 to 2.0 degrees (typical, user-adjustable)
+
+  if |e_norm| < deadband_half:
+      u_pid = 0.0    // No rudder command
+  else:
+      e_effective = e_norm - sign(e_norm) * deadband_half
+      u_pid = PID(e_effective)
+
+  Where e_effective is the error AFTER removing the deadband.
+
+NOTE: The integral term should still accumulate (slowly) even within the
+deadband, so that it can build up wind/current compensation. However, the
+integral gain within the deadband should be reduced (e.g., Ki_deadband = Ki/4)
+to prevent slow drift.
+
+ALTERNATIVE (LINEAR DEADBAND — preferred for smoothness):
+  Instead of a hard deadband, use a linear ramp:
+    gain_factor = 0.0  if |e| < db_inner
+    gain_factor = (|e| - db_inner) / (db_outer - db_inner)  if db_inner <= |e| < db_outer
+    gain_factor = 1.0  if |e| >= db_outer
+
+    u = gain_factor * PID(e)
+
+  Typical values:  db_inner = 0.5 deg, db_outer = 2.0 deg
+
+HYDRAULIC SOLenoid CONSIDERATIONS:
+  Many autopilots drive solenoid valves (on/off), not proportional valves.
+  Solenoids should NOT be cycled faster than every 200-500 ms to prevent
+  overheating and mechanical wear.
+
+  Minimum solenoid pulse width:  100 ms
+  Minimum solenoid off time:    200 ms
+  Maximum continuous on time:   10-15 sec (see Section 5.2)
+
+2.8 COMPLETE PID ALGORITHM (PSEUDOCODE)
+
+```
+CONSTANTS:
+  T_sample     = 0.1        // 10 Hz sample rate
+  Kp, Ki, Kd                // Tuned gains (gain-scheduled)
+  delta_max    = 35.0       // Maximum rudder angle [deg]
+  db_inner     = 0.5        // Inner deadband [deg]
+  db_outer     = 2.0        // Outer deadband [deg]
+  INT_max      = delta_max / Ki
+  e_int_thresh = 15.0       // Integral enable threshold [deg]
+  T_filter     = 1.0        // Derivative filter time constant [sec]
+  T_int_lockout = 5.0       // Seconds after engage before integral active
+
+STATE VARIABLES (persistent across calls):
+  int_accum    = 0.0        // Integral accumulator
+  psi_prev     = 0.0        // Previous heading (for derivative)
+  der_filtered = 0.0        // Filtered derivative
+  t_engaged    = 0.0        // Time since autopilot engaged
+  u_prev       = 0.0        // Previous output (for rate limiting)
+
+FUNCTION pid_heading_hold(psi_command, psi_actual, dt):
+  // 1. Normalize heading error
+  e_raw = psi_command - psi_actual
+  e_norm = ((e_raw + 180 + 360000) % 360) - 180
+
+  // 2. Update engaged time
+  t_engaged += dt
+
+  // 3. Compute derivative (on measurement, not error — avoids setpoint kick)
+  de_dt = -(psi_actual - psi_prev) / dt    // Negative because error = cmd - actual
+  // Low-pass filter
+  alpha_f = dt / (T_filter + dt)
+  der_filtered = alpha_f * de_dt + (1 - alpha_f) * der_filtered
+  psi_prev = psi_actual
+
+  // 4. Compute proportional and derivative terms
+  u_p = Kp * e_norm
+  u_d = Kd * der_filtered
+
+  // 5. Compute integral term with conditional integration
+  if |e_norm| < e_int_thresh AND t_engaged > T_int_lockout:
+      int_accum += e_norm * dt
+  int_accum = clamp(int_accum, -INT_max, +INT_max)
+  u_i = Ki * int_accum
+
+  // 6. Sum PID terms
+  u_raw = u_p + u_i + u_d
+
+  // 7. Apply linear deadband
+  gain_factor = deadband_factor(e_norm, db_inner, db_outer)
+  u_pid = gain_factor * u_raw
+
+  // 8. Clamp to rudder limits
+  u_out = clamp(u_pid, -delta_max, +delta_max)
+
+  // 9. Rate limit rudder command (protect hydraulics)
+  delta_dot_max = 8.0  // deg/sec
+  u_out = clamp(u_out, u_prev - delta_dot_max*dt, u_prev + delta_dot_max*dt)
+  u_prev = u_out
+
+  return u_out
+```
+
+================================================================================
+SECTION 3: ADVANCED STEERING MODES
+================================================================================
+
+3.1 HEADING HOLD MODE
+---------------------
+The simplest autopilot mode. The skipper sets a desired magnetic heading,
+and the autopilot maintains it.
+
+  INPUT:  Target heading from keypad, rotary encoder, or NMEA sentence
+  SENSOR: Compass heading ($HDM for magnetic, $HDT for true)
+  CONTROL: Single PID loop as described in Section 2
+  NMEA IN:  $APHDG,<heading>,<off-course-err>*hh  (Raymarine)
+            $HDM,<heading>,<M>*hh               (compass)
+  NMEA OUT: $APB,... (if connected to chart plotter)
+
+  Typical heading hold accuracy: +/- 2-5 degrees in calm conditions
+  Acceptable accuracy:           +/- 5 degrees in Sea State 3
+  Poor but expected:             +/- 10-15 degrees in Sea State 5+
+
+3.2 COURSE HOLD / TRACK CONTROL MODE
+-------------------------------------
+Follow a great-circle or rhumb-line course between two waypoints. This mode
+adds an outer navigation loop around the heading hold loop.
+
+ARCHITECTURE:
+                                              +-----------+
+  GPS Course --->| Course  |  Heading  -->    | Heading    |--> Rudder
+  (COG)          | Error   |  Command   -->   | Hold PID   |
+  Waypoint  --->| Calc    |                   +-----------+
+  (Bearing)      +-----------+
+                       ^
+                       |
+                  Compass Heading
+
+COURSE ERROR COMPUTATION:
+
+  course_error = bearing_to_waypoint - COG
+
+  Normalize to [-180, +180] degrees.
+
+  heading_command = bearing_to_waypoint + course_correction
+
+  Where course_correction is computed by a SECOND PI controller operating
+  on cross-track error (see Section 3.3).
+
+KEY DIFFERENCE FROM HEADING HOLD:
+  - The commanded heading is continuously updated based on GPS position
+  - Cross-track error is minimized, not just heading error
+  - The boat may sail a different heading than the waypoint bearing to
+    compensate for current and leeway
+
+3.3 CROSS-TRACK ERROR (XTE) MINIMIZATION
+-----------------------------------------
+
+XTE is the perpendicular distance from the vessel's current position to the
+desired track line between two waypoints.
+
+  XTE [nm] = distance from vessel to nearest point on track line
+
+  Sign convention:
+    XTE > 0: Vessel is to STARBOARD of track
+    XTE < 0: Vessel is to PORT of track
+
+XTE CORRECTION ALGORITHM:
+
+  The XTE controller modifies the heading command to steer back toward the
+  track line. This is a SECOND LOOP (outer loop) with much slower dynamics:
+
+    heading_correction [deg] = Kp_xte * XTE + Ki_xte * INT(XTE) dt
+
+  Typical gain values:
+    Kp_xte = 5.0 - 20.0  deg heading per nm of XTE
+    Ki_xte = 0.01 - 0.05 deg heading per (nm * sec)
+
+  RATIONALE: At 1 nm XTE, the heading correction should be approximately:
+    Kp_xte = 10 deg/nm => 10 degree heading correction
+
+    For a boat making 6 kts, this produces a cross-track correction rate of:
+      V_cross = 6 * sin(10 deg) = 1.04 kts = 1.04 nm/hr
+
+    Time to correct 1 nm XTE: ~58 minutes (this is correct — you do NOT want
+    to turn sharply to correct XTE; gentle correction prevents over-correction)
+
+  XTE CORRECTION LIMIT: Clamp heading_correction to +/- 30 degrees to prevent
+  the autopilot from commanding an absurd heading to correct large XTE.
+
+  XTE ALARM: Trigger alarm if |XTE| > XTE_alarm:
+    Coastal:   XTE_alarm = 0.1 nm (200 yards)
+    Offshore:  XTE_alarm = 0.5 nm
+    Ocean:     XTE_alarm = 1.0 nm
+
+3.4 $APB SENTENCE (AUTOPILLOT SENTENCE B) — DETAILED SPECIFICATION
+
+This is the PRIMARY NMEA sentence used to communicate autopilot commands from
+a chart plotter or navigation computer to the autopilot:
+
+  $--APB,A,A,x.x,a,N,A,A,x.x,a,c--c,x.x,a,x.x,a,a*hh<CR><LF>
+
+  FIELD  | NAME                  | DESCRIPTION
+  -------|-----------------------|------------------------------------------
+    1    | Status (Bearing)      | V = warning/data invalid
+         |                       | A = data valid (bearing OK)
+    2    | Status (Heading)      | V = warning/data invalid
+         |                       | A = data valid (heading OK)
+    3    | Bearing origin->WP    | Bearing from vessel to dest WP [degrees]
+         |                       | (true)
+    4    | Bearing reference     | T = true, M = magnetic
+    5    | Bearing dest->WP      | Not used, always N
+    6    | Bearing dest->origin  | Not used, always A
+    7    | Bearing to dest       | Bearing to destination waypoint [degrees]
+    8    | Bearing reference     | T = true, M = magnetic
+    9    | Dest waypoint ID      | Waypoint identifier (e.g., "WPT003")
+    10   | Bearing origin->WP    | Bearing from vessel to dest WP [degrees]
+         |                       | (magnetic, if applicable)
+    11   | Bearing reference     | M = magnetic (or blank)
+    12   | Heading to steer      | CALCULATED HEADING TO STEER [degrees]
+         |                       | (magnetic) — THIS IS THE KEY FIELD
+    13   | Heading reference     | M = magnetic
+    14   | Checksum              | *hh (hex checksum)
+
+  EXAMPLE (OpenCPN output):
+    $GPAPB,A,A,045.2,T,M,0.20,N,,WPT005,A,044.0,M,045.0,M*3D
+
+    Interpretation:
+    - Bearing to waypoint: 045.2 deg True
+    - Heading to steer: 045.0 deg Magnetic (corrected for current/set)
+    - Dest waypoint: WPT005
+
+  NOTE: Field 12 (Heading to Steer) is the field the autopilot uses as its
+  heading command in course/tracking mode. This value already includes XTE
+  correction calculated by the navigation software.
+
+3.5 WIND MODE (APPARENT WIND ANGLE HOLD)
+-----------------------------------------
+
+Wind mode holds a constant apparent wind angle (AWA) rather than a heading.
+This is used primarily by sailboats to maintain optimal sail trim.
+
+  INPUT:  Target AWA from wind instrument
+  SENSOR: Current AWA from wind sensor ($MWV sentence)
+  CONTROL: PID loop on AWA error (not heading error)
+
+  e_awa = AWA_target - AWA_actual
+
+  Wind mode is fundamentally different from heading hold because:
+    1. Wind gusts cause TRUE heading changes that are DESIRED (the boat
+       should head up in a gust to maintain constant AWA)
+    2. The heading will wander as the wind shifts — this is correct behavior
+    3. There is NO integral term for heading error (we don't want to return
+       to a fixed heading)
+    4. There IS an integral term for AWA error (to maintain consistent sail trim)
+
+  WIND MODE PID:
+    u(t) = Kp_awa * e_awa + Ki_awa * INT(e_awa dt) + Kd_awa * d(e_awa)/dt
+
+  Typical wind mode gains (35ft sailboat):
+    Kp_awa = 0.5 - 2.0  deg rudder / deg AWA error
+    Ki_awa = 0.01 - 0.05
+    Kd_awa = 2.0 - 8.0  (critical for gust damping)
+
+  WIND SENSOR REQUIREMENTS:
+    - Update rate: >= 5 Hz (gusts are fast)
+    - Accuracy: +/- 3 degrees AWA
+    - Must be calibrated for upwash and apparent wind calculation
+    - Raw wind angle must be corrected for heel angle
+
+  NMEA SENTENCES FOR WIND MODE:
+    $MWV,<wind_angle>,<R|T>,<wind_speed>,<K|M|N>,A*hh
+    $VWR,<wind_angle_L>,<R>,<wind_speed_L>,<N>,...
+    $VWT,<wind_angle_T>,<T>,<wind_speed_T>,<N>,...
+
+3.6 RATE OF TURN LIMITING
+--------------------------
+
+PURPOSE:
+  Prevent the autopilot from commanding a turn rate that could:
+  - Cause crew to lose balance or be thrown (safety)
+  - Cause excessive heel on a sailboat (knockdown risk)
+  - Cause passenger discomfort on a powerboat
+  - Exceed the vessel's rudder authority at current speed
+
+IMPLEMENTATION:
+
+  Rate limit the heading command, not the rudder command:
+
+    d(psi_cmd)/dt_max = ROT_max [deg/sec]
+
+    Typical values:
+      Powerboat (passenger comfort):  3.0 deg/sec
+      Sailboat (moderate):            5.0 deg/sec
+      Sailboat (aggressive):          8.0 deg/sec
+      Commercial vessel:              2.0 - 3.0 deg/sec
+
+  Also rate-limit the actual rudder command:
+    d(delta)/dt_max = 5.0 - 8.0 deg/sec (see Section 1.7)
+
+  IMPLEMENTATION:
+    psi_cmd_limited = psi_cmd_prev + clamp(psi_cmd - psi_cmd_prev,
+                                            -ROT_max*dt, +ROT_max*dt)
+
+    When the autopilot receives a new heading command (e.g., 90-degree turn),
+    it RAMPs to that heading at the maximum allowed rate:
+      Time to turn 90 deg at 5 deg/sec = 18 seconds
+      Time to turn 90 deg at 3 deg/sec = 30 seconds
+
+3.7 MODE SUMMARY TABLE
+
+  | Mode        | Setpoint     | Primary Sensor    | NMEA Command |
+  |-------------|--------------|-------------------|--------------|
+  | Heading Hold| Heading [deg]| Compass ($HDM)    | $APHDG or UI |
+  | Course Hold | Track (WP)   | GPS + Compass     | $APB         |
+  | Wind Mode   | AWA [deg]    | Wind ($MWV)       | UI + $MWV    |
+  | Nav to WP   | Track (WP)   | GPS + Compass     | $APB         |
+  | No-Drift    | Heading [deg]| GPS COG + Compass | $APB         |
+
+================================================================================
+SECTION 4: NMEA 0183 AUTOPILOT SENTENCES
+================================================================================
+
+4.1 NMEA 0183 BASICS
+---------------------
+
+  ELECTRICAL SPECIFICATION:
+    Standard:  EIA-422 (RS-422) differential signaling
+    Voltage:   +5V differential (TX+ to TX-)
+    Baud Rate: 4,800 bps (default, most common)
+               38,400 bps (high-speed, some modern instruments)
+    Data Bits: 8
+    Parity:    None
+    Stop Bits: 1
+    Connector: Typically Raymarine SeaTalk NG, Garmin NMEA 2000 gateway,
+               or bare RS-422 (DB-9 or terminal block)
+
+  WIRING (RS-422):
+    TX+ (A) : Transmit positive
+    TX- (B) : Transmit negative (complement of A)
+    RX+ (A) : Receive positive
+    RX- (B) : Receive negative
+    GND     : Signal ground (MUST be connected between devices)
+
+  NOTE: Many consumer chart plotters use TTL-level NMEA (0-5V single-ended)
+  rather than true RS-422. Check specifications. TTL NMEA can only drive
+  1-2 listeners. RS-422 can drive up to 10 listeners.
+
+  TALKER IDS (relevant to autopilot systems):
+    GP  = GPS receiver
+    EC  = Echo sounder (depth)
+    HD  = Heading/direction sensor (compass)
+    HN  = Heading north-seeking (gyrocompass)
+    II  = Integrated instrumentation (B&G, etc.)
+    SD  = Sounder, depth (Simrad)
+    VD  = Speed/distance (speed log)
+    WR  = Weather station (wind)
+    AG  = Autopilot general (Raymarine, Garmin)
+
+  LISTENER CAPABILITY:
+    An NMEA 0183 device can have:
+    - 1 talker port (transmits on one pair)
+    - Up to 4 listener ports (receives on separate pairs)
+    - A "combined" port can be switched between talk and listen
+
+4.2 $HDM — HEADING MAGNETIC
+----------------------------
+
+  $--HDM,x.x,M*hh<CR><LF>
+
+  FIELD  | NAME             | DESCRIPTION
+  -------|------------------|------------------------------------------
+    1    | Heading          | Vessel heading in degrees (0-359.9)
+    2    | Reference        | M = magnetic (always M for HDM)
+    3    | Checksum         | *hh
+
+  EXAMPLE:  $HDHDM,045.5,M*2A
+
+  UPDATE RATE: 10 Hz (modern compasses), 5 Hz (older)
+  ACCURACY:    +/- 1 deg (gyro-stabilized), +/- 3 deg (fluxgate only)
+  USE:         Primary heading source for autopilot heading hold
+
+4.3 $HDT — HEADING TRUE
+------------------------
+
+  $--HDT,x.x,T*hh<CR><LF>
+
+  FIELD  | NAME             | DESCRIPTION
+  -------|------------------|------------------------------------------
+    1    | Heading          | Vessel heading in degrees true (0-359.9)
+    2    | Reference        | T = true (always T for HDT)
+    3    | Checksum         | *hh
+
+  EXAMPLE:  $HDHDT,047.2,T*27
+
+  USE: Heading true. The autopilot must apply magnetic variation to convert
+  between true and magnetic as needed.
+
+  Variation correction:
+    heading_magnetic = heading_true - variation
+    (variation is positive for west, negative for east — by convention)
+
+4.4 $RMB — RECOMMENDED MINIMUM NAVIGATION TO WAYPOINT
+------------------------------------------------------
+
+  $--RMB,A,x.x,a,c--c,c--c,llll.ll,a,yyyyy.yy,a,x.x,x.x,x.x,A,a*hh
+
+  FIELD  | NAME                    | DESCRIPTION
+  -------|-------------------------|------------------------------------------
+    1    | Data status             | A = Active, V = Void (invalid)
+    2    | XTE                     | Cross-track error [nm]
+    3    | Direction to steer      | L = steer Left, R = steer Right
+    4    | Origin waypoint ID      | From waypoint identifier
+    5    | Destination waypoint ID | To waypoint identifier
+    6    | Destination latitude    | DDmm.mm format
+    7    | N/S                     | N or S
+    8    | Destination longitude   | DDDmm.mm format
+    9    | E/W                     | E or W
+   10    | Range to dest           | Distance to destination [nm]
+   11    | Bearing to dest         | True bearing to dest [deg]
+   12    | Dest closing velocity   | Speed toward dest [kts]
+   13    | Arrival status          | A = Arrival circle entered
+         |                         | V = Not in arrival circle
+   14    | Mode indicator          | A = Autonomous, D = Differential,
+         |                         | E = Estimated, N = Not valid
+   15    | Checksum                | *hh
+
+  EXAMPLE:
+    $GPRMB,A,0.23,L,WPT001,WPT002,3723.45,N,12207.60,W,12.4,045.2,5.3,V,A*3B
+
+  USE: The $RMB sentence provides XTE and bearing to waypoint information.
+  Some older autopilots use $RMB directly. Modern systems prefer $APB.
+
+  XTE INTERPRETATION:
+    Field 2 (XTE) is always positive.
+    Field 3 (L/R) indicates which side of the track the vessel is on.
+    L = vessel is LEFT (port) of track -> steer RIGHT to correct
+    R = vessel is RIGHT (starboard) of track -> steer LEFT to correct
+
+4.5 $VHW — WATER SPEED AND HEADING
+-----------------------------------
+
+  $--VHW,x.x,T,x.x,M,x.x,N,x.x,K*hh<CR><LF>
+
+  FIELD  | NAME          | DESCRIPTION
+  -------|---------------|------------------------------------------
+    1    | Water speed   | Speed through water [kts]
+    2    | Heading true  | (often blank)
+    3    | Reference     | T = true (often blank)
+    4    | Heading mag   | (often blank)
+    5    | Reference     | M = magnetic (often blank)
+    6    | Water speed   | Speed through water [kts] (repeat of field 1)
+    7    | Speed units   | N = knots
+    8    | Water speed   | Speed through water [km/h]
+    9    | Speed units   | K = km/h
+   10    | Checksum      | *hh
+
+  EXAMPLE:  $VDVHW,,T,,M,5.2,N,9.6,K*5D
+
+  USE: Provides speed through water (STW) for gain scheduling.
+  CRITICAL: The autopilot MUST have water speed, not GPS speed (SOG), because:
+    - GPS speed includes current effect (wrong for rudder authority)
+    - Water speed determines rudder lift force (correct)
+    - A boat motoring at 5 kts SOG into a 2 kt current has only 3 kts
+      water speed and correspondingly less rudder authority
+
+4.6 HOW OpenCPN GENERATES AUTOPILOT SENTENCES
+----------------------------------------------
+
+OpenCPN (Open Chart Plotter Navigator) is a widely-used open-source navigation
+software that can output autopilot commands. Configuration:
+
+  SETTINGS -> Connections -> NMEA -> Output:
+
+  1. Enable "Output $APB sentences" ( checkbox)
+  2. Enable "Output $RMB sentences" (checkbox, for older APs)
+  3. Select the output port (serial or TCP)
+  4. Set baud rate to 4800 (or match AP input)
+
+  OpenCPN generates $APB when:
+    - A route is active (navigating between waypoints)
+    - The autopilot "follow" mode is enabled
+
+  OpenCPN heading-to-steer calculation:
+    1. Compute bearing to active waypoint (great circle or rhumb line)
+    2. Compute current COG from GPS
+    3. Calculate XTE from cross-product of track vector and position vector
+    4. Apply XTE correction:  heading_correction = arcsin(XTE / distance_to_WP)
+       (simplified; actual algorithm uses proportional control)
+    5. Apply magnetic variation to convert true bearing to magnetic
+    6. Output in $APB field 12
+
+  OpenCPN does NOT generate $HDM or $VHW — it receives these from instruments.
+  OpenCPN DOES generate $GPBOD (bearing origin to destination) and $GPBWC
+  (bearing and distance to waypoint) which some autopilots accept.
+
+4.7 HOW TIMEZERO OUTPUTS AUTOPILOT COMMANDS
+-------------------------------------------
+
+Nobeltec TimeZero (now MaxSea TimeZero) outputs autopilot commands via:
+
+  OUTPUT FORMAT: NMEA 0183 (4800 baud) or NMEA 2000 (depending on version)
+  PRIMARY SENTENCE: $APB (Autopilot Sentence B)
+  SECONDARY: $RMB (for legacy autopilot compatibility)
+
+  TimeZero configuration:
+    1. Tools -> Options -> Connections -> NMEA Out
+    2. Enable "APB" and/or "RMB" output
+    3. Configure serial port (COM port on Windows, /dev/tty on Linux)
+    4. Set baud rate: 4800 (standard NMEA)
+
+  TimeZero computes heading-to-steer using:
+    - Course over ground (COG) from GPS
+    - Bearing to waypoint
+    - Cross-track error with proportional correction
+    - Magnetic variation from WMM model (built-in, updated annually)
+    - User-configurable XTE gain and alarm limits
+
+  TimeZero also outputs:
+    - $GPXTE: Standalone XTE sentence (for APs that use it)
+    - $GPBWC: Bearing and distance to waypoint
+    - $GPBOD: Bearing origin to destination
+
+4.8 COMPLETE NMEA SENTENCE REFERENCE TABLE
+
+  | Sentence | Source       | Destination  | Purpose                      |
+  |----------|-------------|--------------|------------------------------|
+  | $HDM     | Compass     | Autopilot    | Magnetic heading             |
+  | $HDT     | Compass/GPS | Autopilot    | True heading                 |
+  | $VHW     | Speed log   | Autopilot    | Water speed (for gain sched) |
+  | $MWV     | Wind instr  | Autopilot    | Wind angle/speed (wind mode) |
+  | $APB     | Chart plot  | Autopilot    | Heading to steer (track)     |
+  | $RMB     | Chart plot  | Autopilot    | Navigation to waypoint       |
+  | $GPBWC   | GPS         | Chart plot   | Waypoint bearing/distance    |
+  | $GPXTE   | GPS         | Autopilot    | Cross-track error            |
+  | $ROT     | Gyro/THS    | Autopilot    | Rate of turn                 |
+  | $APHDG   | Autopilot   | Chart plot   | Current heading commanded    |
+
+  TYPICAL WIRING DIAGRAM (SIMPLIFIED):
+
+    [Fluxgate Compass] --$HDM--> [Autopilot Computer]
+    [Speed Log/Transducer] --$VHW--> [Autopilot Computer]
+    [Wind Instrument] --$MWV--> [Autopilot Computer]
+    [GPS Receiver] --$GPRMB/$GPBWC--> [Chart Plotter]
+    [Chart Plotter] --$APB--> [Autopilot Computer]
+    [Autopilot Computer] --(solenoid drive)--> [Hydraulic Valve Block]
+    [Chart Plotter] --$APHDG<-- [Autopilot Computer]  (optional feedback)
+
+  NOTE: NMEA 0183 is one-directional per talker. The autopilot computer
+  typically has ONE talker output (to chart plotter) and MULTIPLE listener
+  inputs (from compass, GPS, wind, speed).
+
+================================================================================
+SECTION 5: SAFETY-CRITICAL DESIGN
+================================================================================
+
+5.1 WATCHDOG TIMER REQUIREMENTS
+--------------------------------
+
+PURPOSE: Detect if the PID loop or processor has frozen. A frozen autopilot
+with rudder hard-over is an immediate life-safety hazard.
+
+REQUIREMENTS:
+
+  1. HARDWARE WATCHDOG (Required):
+     - Independent hardware timer (NOT software-only)
+     - Must NOT be clearable by the main processor in a stuck state
+     - Timeout: 200 - 500 ms (2-5 PID cycles at 10 Hz)
+     - On timeout: DE-ENERGIZE all solenoid outputs (fail to center/neutral)
+     - Must trigger a visible and audible alarm
+
+  2. SOFTWARE WATCHDOG (Additional layer):
+     - Main loop must reset a software counter every PID cycle
+     - A separate low-priority task monitors this counter
+     - If counter not reset within 500 ms, trigger safe shutdown
+
+  3. SENSOR WATCHDOG (Required):
+     - Monitor heading data ($HDM) arrival rate
+     - If no heading data for > 1.0 seconds:
+       a. Flash warning on display
+       b. DO NOT disengage (boat is still controllable, just no update)
+       c. After 3.0 seconds with no heading data: DISENGAGE autopilot
+       d. Log error: "COMPASS TIMEOUT"
+
+  4. GPS WATCHDOG (for track mode):
+     - If no GPS data for > 5.0 seconds in track mode:
+       a. Flash warning: "GPS LOST"
+       b. Automatically switch to HEADING HOLD mode (hold last heading)
+       c. DO NOT disengage (heading hold still works without GPS)
+
+  5. HEARTBEAT OUTPUT (Recommended):
+     - Autopilot outputs a periodic heartbeat signal (e.g., toggling a GPIO
+       pin at 1 Hz)
+     - External monitor (or secondary processor) watches this heartbeat
+     - Missing 3 heartbeats -> external solenoid cutoff relay opens
+
+5.2 SOLENOID ENGAGEMENT TIMEOUT
+--------------------------------
+
+PURPOSE: Prevent the rudder from being driven continuously in one direction.
+If the autopilot commands "hard to starboard" for 60 seconds, the boat will
+enter a continuous turn, potentially gybing (sailboat) or circling.
+
+REQUIREMENTS:
+
+  Maximum continuous solenoid engagement (single direction):
+    DEFAULT:     10 seconds
+    USER RANGE:  5 - 30 seconds (adjustable)
+    ABSOLUTE MAX: 30 seconds (not user-adjustable, hardware enforced)
+
+  After timeout:
+    1. De-energize the active solenoid (rudder returns to center, or holds
+       position if hydraulically locked)
+    2. Wait for center_deadband_time (1-3 seconds)
+    3. Re-evaluate heading error
+    4. If still needs correction, re-engage for another period
+
+  This creates a "pulse and coast" behavior for large corrections:
+    - Large heading error: 10 sec drive -> 2 sec coast -> 10 sec drive -> ...
+    - Small heading error: Short pulses (<2 sec) with coast between
+
+  IMPLEMENTATION:
+
+    solenoid_active_time = 0
+    SOLENOID_TIMEOUT = 10.0  // seconds
+
+    in PID loop:
+      if solenoid_active:
+          solenoid_active_time += dt
+          if solenoid_active_time > SOLENOID_TIMEOUT:
+              de-energize_solenoid()
+              solenoid_active = false
+              solenoid_active_time = 0
+              coast_timer = 2.0  // seconds to wait
+      else:
+          if coast_timer > 0:
+              coast_timer -= dt
+          elif |e_norm| > deadband:
+              energize_solenoid(direction)
+              solenoid_active = true
+              solenoid_active_time = 0
+
+5.3 RUDDER LIMIT DETECTION
+---------------------------
+
+PURPOSE: Detect when the rudder has reached its mechanical travel limit to
+prevent hydraulic pump damage and detect mechanical faults.
+
+METHODS (use at least two):
+
+  METHOD 1: Rudder feedback sensor (preferred)
+    - Linear potentiometer or Hall-effect sensor on rudder stock
+    - Reports actual rudder angle (0-359 degrees or +/- 45 degrees)
+    - If |rudder_angle_actual| > delta_max: de-energize drive solenoid
+    - If rudder_angle_actual != rudder_angle_commanded for > 3 seconds:
+      alarm "RUDDER FAULT"
+
+  METHOD 2: Hydraulic pressure sensor
+    - Pressure transducer on hydraulic supply line
+    - When rudder hits mechanical stop, pressure spikes (2-3x normal)
+    - Threshold: 500 - 1500 psi (system dependent)
+    - On pressure spike: de-energize drive solenoid immediately
+
+  METHOD 3: Pump current monitoring
+    - Monitor current to hydraulic pump motor
+    - Stall current (rudder at stop) is 2-4x running current
+    - On overcurrent: de-energize after 0.5 sec delay (avoid false trips
+      from normal pressure)
+
+  METHOD 4: Software angle tracking (basic, insufficient alone)
+    - Track commanded rudder angle over time
+    - If command is at limit for > T_max_drive: assume limit reached
+    - This is the LEAST reliable method (no feedback)
+
+  REQUIRED IMPLEMENTATION:
+    - Rudder feedback sensor + at least one other method
+    - Alarm if any two methods disagree
+
+5.4 OFF-COURSE ALARM THRESHOLDS
+--------------------------------
+
+PURPOSE: Alert the crew if the autopilot is failing to maintain course.
+
+ALARM LEVELS:
+
+  LEVEL 1 — CAUTION (audible beep, yellow indicator):
+    Condition: |heading_error| > HEADING_WARN_DEGREES for > T_WARN seconds
+    Typical:   10 degrees for > 15 seconds
+    Action:     Display heading error, suggest manual check
+
+  LEVEL 2 — WARNING (continuous beep, red indicator):
+    Condition: |heading_error| > HEADING_ALARM_DEGREES for > T_ALARM seconds
+    Typical:   20 degrees for > 30 seconds
+    Action:     Display "OFF COURSE" alarm, suggest disengaging AP
+
+  LEVEL 3 — CRITICAL (siren, flashing red, auto-disengage):
+    Condition: |heading_error| > HEADING_CRITICAL_DEGREES for > T_CRIT seconds
+    Typical:   45 degrees for > 10 seconds
+    Action:    AUTO-DISENGAGE autopilot, alarm "AUTOPILOT DISENGAGED — OFF COURSE"
+
+  XTE ALARM (track mode only):
+    Condition: |XTE| > XTE_ALARM_NM
+    Coastal:   0.1 nm (185 m) — immediate alarm
+    Offshore:  0.5 nm (926 m) — alarm after 30 sec
+    Ocean:     1.0 nm (1852 m) — alarm after 60 sec
+
+5.5 MANUAL OVERRIDE — ALWAYS WORKS
+-----------------------------------
+
+ABSOLUTE REQUIREMENT: The helmsman must be able to override the autopilot
+at ALL times, regardless of software state, processor state, or power state.
+
+IMPLEMENTATION:
+
+  1. MECHANICAL CLUTCH (Required, physical disconnect):
+     - A lever or rotary handle that physically disconnects the autopilot
+       drive from the rudder stock
+     - When clutch is disengaged, the wheel/tiller is directly connected to
+       the rudder with NO electrical intervention
+     - Clutch must be operable with ONE HAND
+     - Clutch position must be VISIBLE (indicator marking)
+     - Clutch must be MECHANICAL (not electrical)
+     - Clutch engagement should require positive action (spring to disengage)
+
+  2. STANDBY BUTTON (Required):
+     - A dedicated, physically prominent button marked "STANDBY" or "AUTO"
+     - Momentary press toggles between autopilot engaged and standby
+     - Button must be lit when autopilot is engaged
+     - Button must be large enough to press with gloves
+     - Button must work regardless of display state
+     - MUST be hardwired to the processor (not via touchscreen)
+
+  3. EMERGENCY DISENGAGE (Recommended):
+     - A mushroom-head emergency stop button
+     - Physically cuts power to solenoid driver circuits
+     - Independent of processor (direct relay contact)
+     - Latching — must be physically reset to re-enable
+
+5.6 POWER FAILURE BEHAVIOR
+---------------------------
+
+RULE: On power loss, the autopilot MUST fail to a safe state.
+
+  HYDRAULIC SYSTEMS:
+    - Solenoid valves are NORMALLY CLOSED (spring return to center)
+    - On power loss, solenoids de-energize, hydraulic fluid flows to center
+    - Rudder returns to center position (or drifts to center via autopump)
+    - Some systems use a mechanical centering spring on the rudder
+
+  ELECTRICAL SYSTEMS:
+    - All solenoid driver outputs are open-drain (or use normally-open relays)
+    - Power loss = all outputs LOW = all solenoids de-energized
+
+  BATTERY BACKUP (Recommended):
+    - Small backup battery (e.g., 12V 7Ah lead-acid) for the control electronics
+    - Provides 5-15 minutes of control after main power loss
+    - Allows orderly autopilot disengagement and alarm sounding
+    - Does NOT drive the solenoids (too much current draw)
+    - Purpose: Keep the microcontroller alive long enough to:
+      1. Sound alarm
+      2. Log the power failure event
+      3. Ensure solenoid driver outputs are LOW
+      4. Display "POWER FAILURE" message
+
+  POWER MONITORING:
+    - Continuously monitor supply voltage
+    - If V_supply < 10.0V (12V system) or < 20.0V (24V system):
+      a. Alarm: "LOW VOLTAGE"
+      b. Reduce autopilot gain (less aggressive steering to save power)
+      c. If V_supply < 9.0V (12V) or < 18.0V (24V):
+         AUTO-DISENGAGE autopilot ("VOLTAGE TOO LOW")
+
+5.7 SEA STATE COMPENSATION
+---------------------------
+
+PROBLEM: In rough seas, wave-induced heading oscillations cause the PID
+controller to fight the waves, resulting in:
+  - Excessive rudder movement (hydraulic pump cycling, power waste, heat)
+  - Poor course holding (the AP may actually make things worse)
+  - Uncomfortable ride (boat may yaw more with AP than without)
+
+SOLUTION: Reduce PID gains and increase deadband in rough conditions.
+
+SEA STATE DETECTION:
+  METHOD 1: Manual sea state setting (user selects 1-9 on AP display)
+  METHOD 2: Automatic detection from heading variance:
+    - Compute rolling standard deviation of heading error over 30-second window
+    - sigma_heading > 3 deg: Sea State >= 3 (moderate)
+    - sigma_heading > 6 deg: Sea State >= 4 (rough)
+    - sigma_heading > 10 deg: Sea State >= 5 (very rough)
+  METHOD 3: Automatic detection from rate of turn (if $ROT available)
+
+GAIN SCHEDULE vs SEA STATE:
+
+  | Sea State | Description  | Gain Factor | Deadband Multiplier |
+  |-----------|-------------|-------------|---------------------|
+  | 0-2       | Calm        | 1.00        | 1.0x                |
+  | 3         | Moderate    | 0.75        | 1.5x                |
+  | 4         | Rough       | 0.50        | 2.0x                |
+  | 5         | Very rough  | 0.35        | 3.0x                |
+  | 6+        | Severe      | 0.20        | 5.0x                |
+  | DISENGAGE | Extreme     | —           | —                   |
+
+  Implementation:
+    Kp_eff = Kp * gain_factor * speed_factor * seastate_factor
+    Ki_eff = Ki * gain_factor * speed_factor * seastate_factor
+    Kd_eff = Kd * speed_factor                  // Kd often NOT reduced
+    db_eff = db_base * db_multiplier
+
+  NOTE: In Sea State 6+, the autopilot should recommend disengagement.
+  In Sea State 8+, the autopilot should auto-disengage with alarm:
+  "SEA STATE TOO HIGH — AUTOPILOT DISENGAGED"
+
+  RATIONALE for reducing Kd less (or not at all):
+  - In rough seas, damping is MORE important (boat is more underdamped due
+    to wave excitation)
+  - Reducing Kd would increase oscillation amplitude
+  - Kd reduction should only happen in extreme conditions (Sea State 6+)
+
+================================================================================
+SECTION 6: PID GAIN RANGES FOR DIFFERENT VESSEL TYPES
+================================================================================
+
+6.1 GAIN TABLE — NOMINAL VALUES AT REFERENCE CONDITIONS
+--------------------------------------------------------
+
+Reference conditions:
+  - Boat speed: 5 knots through water
+  - Sea State: 0-2 (calm to slight)
+  - Loading: Half load, normal trim
+  - Wind: < 10 kts
+  - Units: [deg rudder per deg heading error] for Kp and Kd
+           [deg rudder per (deg heading error * sec)] for Ki
+
+  VESSEL TYPE                 | Kp     | Ki      | Kd     | Notes
+  ----------------------------|--------|---------|--------|-----------------
+  25ft sailboat               | 1.0-   | 0.01-   | 3.0-   | Light disp,
+  (till., tiller steer)       | 2.0    | 0.05    | 8.0    | fast response
+                              |        |         |        |
+  35ft sailboat               | 1.5-   | 0.02-   | 5.0-   | Medium disp,
+  (wheel, hydraulic)          | 3.0    | 0.08    | 12.0   | most common
+                              |        |         |        |
+  40ft powerboat              | 2.0-   | 0.03-   | 3.0-   | Heavy disp,
+  (hydraulic, single engine)  | 4.0    | 0.10    | 8.0    | slower response
+                              |        |         |        |
+  50ft sailboat               | 1.0-   | 0.01-   | 5.0-   | Heavy disp,
+  (hydraulic, wheel)          | 2.5    | 0.06    | 15.0   | high inertia
+                              |        |         |        |
+
+  STARTING POINTS FOR MANUAL TUNING:
+    - Start with Kp at the LOWER end of the range
+    - Ki = 0.01 * Kp (initial estimate)
+    - Kd = 3.0 * Kp (initial estimate)
+    - Increase Kp until oscillation begins, then back off 30%
+    - Increase Kd to damp remaining oscillation
+    - Increase Ki slowly to eliminate steady-state error
+
+6.2 SPEED DEPENDENCE
+---------------------
+
+All gains should be scaled with the square of boat speed relative to the
+tuning reference speed (5 knots):
+
+  GAIN_SPEED_FACTOR = (V_STW / 5.0)^2
+
+  HOWEVER, this factor should be CLAMPED:
+    GAIN_SPEED_FACTOR = clamp(GAIN_SPEED_FACTOR, 0.15, 4.0)
+
+  This prevents:
+    - Gains going to zero at very low speeds (boat would be uncontrollable)
+    - Gains becoming dangerously high at planing speeds
+
+  FULL TABLE — 35FT SAILBOAT GAINS vs SPEED:
+
+  | Speed (kts) | Speed Factor | Kp        | Ki        | Kd        |
+  |-------------|-------------|-----------|-----------|-----------|
+  | 2           | 0.16        | 0.3-0.5   | 0.003-0.013| 5.0-12.0 |
+  | 3           | 0.36        | 0.5-1.1   | 0.007-0.029| 5.0-12.0 |
+  | 5           | 1.00        | 1.5-3.0   | 0.02-0.08 | 5.0-12.0 |
+  | 7           | 1.96        | 2.9-5.9   | 0.039-0.157| 5.0-12.0 |
+  | 10          | 4.00(clamp) | 6.0-12.0  | 0.08-0.32 | 5.0-12.0 |
+  | 15          | 4.00(clamp) | 6.0-12.0  | 0.08-0.32 | 5.0-12.0 |
+
+  NOTE: Kd is NOT scaled by speed in the above table. This is intentional:
+  - At low speed, the boat responds slowly and needs MORE damping relative
+    to the proportional gain to prevent overshoot
+  - At high speed, the rudder is very effective and Kd should not increase
+    (it would amplify sensor noise into aggressive rudder movements)
+  - Some implementations DO scale Kd by speed factor^0.5 as a compromise
+
+  ALTERNATIVE (simpler, recommended for first implementation):
+    - Scale Kp and Ki by speed^2 as shown
+    - Keep Kd CONSTANT across speed range
+    - This provides good stability across the speed range
+
+6.3 SEA STATE DEPENDENCE
+-------------------------
+
+Gains are reduced and deadband increased with sea state:
+
+  FULL TABLE — 35FT SAILBOAT GAINS vs SEA STATE (at 5 kts):
+
+  | Sea State | Gain Factor | Deadband | Kp        | Ki        | Kd        |
+  |-----------|-------------|----------|-----------|-----------|-----------|
+  | 0-2       | 1.00        | 1.0 deg  | 1.5-3.0   | 0.02-0.08 | 5.0-12.0 |
+  | 3         | 0.75        | 1.5 deg  | 1.1-2.3   | 0.015-0.06| 5.0-12.0 |
+  | 4         | 0.50        | 2.0 deg  | 0.75-1.5  | 0.01-0.04 | 5.0-12.0 |
+  | 5         | 0.35        | 3.0 deg  | 0.5-1.1   | 0.007-0.028|5.0-12.0 |
+
+  Note: In Sea State 5, the effective Kp drops to 0.5-1.1. The boat will
+  wander more, but will not fight the waves. This is the correct tradeoff:
+  a +/- 10 degree heading weave in Sea State 5 is acceptable and expected.
+  Aggressive correction would make the ride worse.
+
+6.4 COMBINED GAIN SCHEDULE
+---------------------------
+
+The effective gains combine speed and sea state factors:
+
+  Kp_eff = Kp_nominal * SPEED_FACTOR * SEASTATE_FACTOR
+  Ki_eff = Ki_nominal * SPEED_FACTOR * SEASTATE_FACTOR
+  Kd_eff = Kd_nominal * 1.0  (no sea state scaling for Kd)
+
+  Where:
+    SPEED_FACTOR  = clamp((V_STW / V_ref)^2, 0.15, 4.0)
+    SEASTATE_FACTOR = lookup from sea state table
+
+  DEADBAND:
+    db_eff = db_base * SEASTATE_DB_MULTIPLIER
+
+6.5 TUNING PROCEDURE (FIELD PROCEDURE)
+--------------------------------------
+
+STEP 1: PREPARATION
+  - Choose a calm day (Sea State 0-2) with light wind (< 10 kts)
+  - Motor at 5 kts in open water (at least 1 nm from hazards)
+  - Ensure compass is calibrated and $HDM data is flowing
+  - Ensure rudder feedback is calibrated (center = 0 deg)
+
+STEP 2: ENGAGE AND SET INITIAL GAINS
+  - Set Kp = 1.5, Ki = 0.02, Kd = 5.0 (starting point for 35ft sailboat)
+  - Engage autopilot in HEADING HOLD mode
+  - Set heading to current heading (zero error)
+
+STEP 3: TUNE Kp
+  - Command a 20-degree heading change
+  - Observe response:
+    - Too slow (>30 sec to reach new heading): Increase Kp by 25%
+    - Oversoot > 10 deg: Decrease Kp by 20%
+    - Oscillation (more than 2 cycles): Decrease Kp by 30%
+    - 1-2 deg overshoot with smooth settling: Kp is correct
+  - Repeat until response is satisfactory
+
+STEP 4: TUNE Kd
+  - With Kp set, command 30-degree heading changes
+  - Observe overshoot and oscillation:
+    - If overshoot > 5 deg: Increase Kd by 25%
+    - If rudder is "chattering" (rapid small corrections): Decrease Kd by 20%
+    - If heading settles in one smooth pass with < 3 deg overshoot: Kd correct
+  - IMPORTANT: Kd amplifies compass noise. If the compass is noisy (> 2 deg
+    noise), Kd may need to be lower than theoretically optimal.
+
+STEP 5: TUNE Ki
+  - Sail on a steady heading for 5+ minutes in a steady breeze
+  - Observe steady-state heading error:
+    - If error drifts > 3 deg from wind: Increase Ki by 50%
+    - If heading oscillates slowly (period > 60 sec): Decrease Ki by 50%
+    - Ki should be SMALL. Too much Ki causes slow oscillation (period 2-5 min)
+  - Start with Ki = 0.01 and increase VERY slowly
+
+STEP 6: VERIFY AT DIFFERENT SPEEDS
+  - Repeat heading changes at 3 kts and 7 kts
+  - If response changes significantly, adjust gain scheduling
+  - The speed^2 scaling should handle most of this automatically
+
+STEP 7: VERIFY IN ROUGH WATER
+  - On a day with Sea State 3-4, repeat tests
+  - If excessive rudder activity: Reduce seastate gain factor
+  - Increase deadband if rudder is "hunting"
+
+STEP 8: DOCUMENT AND SAVE
+  - Record final Kp, Ki, Kd, deadband, speed factor, sea state table
+  - Save to non-volatile memory
+  - Label: "TUNED: [DATE], CONDITIONS: [describe], VESSEL: [name]"
+
+================================================================================
+APPENDIX A: TRANSFER FUNCTION DERIVATION
+================================================================================
+
+The Nomoto model is the standard simplified model for vessel steering:
+
+  T1 * T2 * r_dot + (T1 + T2) * r + K * delta = 0
+
+  Where:
+    r     = yaw rate (d(psi)/dt) [rad/s]
+    delta = rudder angle [rad]
+    T1, T2 = time constants [sec]
+    K     = gain [1/sec]
+
+  For many vessels, T2 is small and the model reduces to first-order:
+
+    T * r_dot + r = -K * delta    (NOMOTO FIRST-ORDER MODEL)
+
+  Converting to heading:
+    r = d(psi)/dt
+    T * psi_ddot + psi_dot = -K * delta
+
+  Taking the Laplace transform (zero initial conditions):
+
+    s * (T*s + 1) * Psi(s) = -K * Delta(s)
+
+    Psi(s)       -K
+    --------- = ---------
+    Delta(s)     s*(T*s + 1)
+
+  This is a type-1 system (integrator + first-order lag).
+
+  For the second-order model (retaining T2):
+
+    Psi(s)             -K
+    --------- = -------------------
+    Delta(s)     s*(T1*s + 1)*(T2*s + 1)
+
+  TYPICAL VALUES (35ft sailboat):
+
+    K  = 0.05 - 0.15  [1/sec]
+    T1 = 5 - 15       [sec]
+    T2 = 0.5 - 3.0    [sec]
+
+  CONVERTING TO HEADING ERROR TRANSFER FUNCTION:
+
+    Error = Heading_command - Heading_actual
+
+    E(s)           s*(T*s + 1)
+    ----- = 1 - (-K / (s*(T*s+1))) = 1 + K/(s*(T*s+1)) = ----------------
+    Delta(s)                                           s*(T*s+1) + K
+
+    Open-loop transfer function:
+    L(s) = Kp * (-K) / (s*(T*s + 1))
+
+    (The negative sign accounts for the fact that positive rudder angle
+     produces a negative heading rate change — i.e., the rudder turns the
+     boat, and the sign convention matters.)
+
+    For stability analysis, we analyze:
+    L(s) = Kp * K / (s*(T*s + 1))
+
+    Gain crossover frequency (where |L(jw)| = 1):
+    wc = sqrt(Kp * K / T)
+
+    Phase margin:
+    PM = 90 - atan(wc * T) degrees
+
+    For adequate stability, PM > 45 degrees is required.
+
+================================================================================
+APPENDIX B: NMEA SENTENCE WIRE PROTOCOL REFERENCE
+================================================================================
+
+NMEA 0183 SENTENCE STRUCTURE:
+
+  $<talker><sentence>,<field1>,<field2>,...*<checksum><CR><LF>
+
+  COMPONENTS:
+    $        = Start of sentence delimiter
+    talker   = 2-character talker ID (e.g., GP, HD, AG)
+    sentence = 3-character sentence ID (e.g., HDM, APB, RMB)
+    ,        = Field separator
+    fieldN   = Data field (comma-delimited, may be empty for missing data)
+    *        = Checksum delimiter
+    checksum = 2-character hexadecimal checksum
+    <CR><LF> = Carriage return + Line feed (0x0D 0x0A)
+
+  CHECKSUM CALCULATION:
+    XOR all characters between '$' and '*' (exclusive of both)
+    Output as 2-digit uppercase hex
+
+  Example: $HDHDM,045.5,M
+    XOR of: H, D, H, D, M, ',', 0, 4, 5, '.', 5, ',', M
+    = 0x48 ^ 0x44 ^ 0x48 ^ 0x44 ^ 0x4D ^ 0x2C ^ 0x30 ^ 0x34 ^ 0x35 ^
+      0x2E ^ 0x35 ^ 0x2C ^ 0x4D
+    = 0x2A
+    Full sentence: $HDHDM,045.5,M*2A
+
+  RS-422 ELECTRICAL LEVELS:
+    TX+ (A): V_OH = +5V, V_OL = 0V  (relative to TX-)
+    TX- (B): V_OH = 0V,  V_OL = +5V  (complement)
+    RX threshold: |V_diff| > 200mV = valid
+    Common mode range: -7V to +12V
+
+  MAXIMUM BUS LENGTH:  100 meters at 4800 baud
+  MAXIMUM NODES:       1 talker + 10 listeners (at 4800 baud)
+  TERMINATION:         120-ohm resistor at each end of bus
+
+================================================================================
+APPENDIX C: ANTI-WINDUP ALGORITHM PSEUDOCODE
+================================================================================
+
+```
+// CONSTANTS
+INT_MAX       = 700.0     // Maximum integral accumulator (deg * sec)
+E_INT_THRESH  = 15.0      // Integral enable threshold (deg)
+T_INT_LOCKOUT = 5.0       // Lockout after engage/reset (sec)
+INT_DECAY     = 0.0001    // Integral decay rate (1/sec)
+
+// STATE
+int_accum     = 0.0
+t_since_reset = 0.0
+
+FUNCTION update_integral(e_norm, dt, rudder_at_limit, mode_changed):
+    if mode_changed:
+        int_accum = 0.0
+        t_since_reset = 0.0
+        return 0.0
+
+    t_since_reset += dt
+
+    // CONDITIONAL INTEGRATION: only accumulate when appropriate
+    accumulate = true
+
+    if |e_norm| > E_INT_THRESH:
+        accumulate = false  // Error too large (course change, etc.)
+
+    if t_since_reset < T_INT_LOCKOUT:
+        accumulate = false  // Just engaged or reset
+
+    if rudder_at_limit:
+        accumulate = false  // Rudder saturated, no point accumulating
+
+    if accumulate:
+        int_accum += e_norm * dt
+
+    // SLOW DECAY: prevent indefinite accumulation
+    int_accum *= (1.0 - INT_DECAY * dt)
+
+    // CLAMP: prevent integral from commanding beyond rudder limits
+    int_accum = clamp(int_accum, -INT_MAX, +INT_MAX)
+
+    return Ki * int_accum
+```
+
+================================================================================
+APPENDIX D: SOLENOID DRIVER CIRCUIT NOTES
+================================================================================
+
+TYPICAL HYDRAULIC SOLENOID SPECIFICATIONS:
+  Voltage:           12V DC (or 24V DC for commercial vessels)
+  Current:           1.0 - 2.5 A per solenoid (pull-in)
+  Hold current:      0.5 - 1.5 A per solenoid (after pull-in)
+  Activation time:   20 - 50 ms
+  Deactivation time: 30 - 80 ms (spring return)
+
+DRIVER CIRCUIT REQUIREMENTS:
+  1. MOSFET or relay driver rated for 3A continuous, 10A surge
+  2. Flyback diode (1N4007 or equivalent) across each solenoid coil
+  3. Output must be OPEN-DRAIN (fails to OFF on power loss)
+  4. Separate PORT and STARBOARD solenoid outputs (3-wire: port, starboard, common)
+  5. NEVER energize both solenoids simultaneously (dead zone)
+  6. Minimum inter-solenoid dead time: 50 ms
+
+  Protection:
+  - Overcurrent protection: 3A fuse per solenoid
+  - Thermal protection: heatsink on MOSFETs
+  - Reverse polarity protection on supply input
+  - EMC filtering: 100uF + 100nF capacitors on solenoid supply
+
+  MICROCONTROLLER INTERFACE:
+  - Two GPIO outputs: PORT_SOL and STBD_SOL
+  - Both LOW = rudder centered (no drive)
+  - PORT_SOL HIGH = rudder drives to port
+  - STBD_SOL HIGH = rudder drives to starboard
+  - Software must ensure mutual exclusion (never both HIGH)
+
+  PUMP CONTROL (if applicable):
+  - Some systems have a constant-pressure hydraulic pump (always running)
+  - Some systems have an on-demand pump (activated with solenoid)
+  - If on-demand: PUMP_ENABLE signal must lead solenoid by 100-200 ms
+    to build pressure before the solenoid opens the valve
+
+================================================================================
+DOCUMENT END
+================================================================================
+
+Revision History:
+  Rev 1.0 — Initial release. Covers PID design, NMEA protocol, safety,
+            and gain scheduling for 30-60ft vessels.
+
+Notes for Implementation:
+  - All gain values are starting points. Field tuning is ALWAYS required.
+  - Safety systems (watchdog, solenoid timeout, manual override) are NOT
+    optional. They must be implemented and tested before sea trials.
+  - NMEA sentence parsing must validate checksums and handle malformed data.
+  - This document assumes magnetic heading ($HDM). True heading ($HDT) requires
+    variation correction in software.
+
+================================================================================

@@ -1,0 +1,212 @@
+================================================================================
+           EXPERT REVIEW FIXES APPLIED — ESP32 MARINE AUTOPILOT
+     Source: 08_expert_review.txt  |  Applied: 2025  |  Config Version: 1.1.0
+================================================================================
+
+This document lists every fix applied to the autopilot configuration files in
+response to the expert panel review findings. All files validated as valid JSON.
+
+FILES MODIFIED:
+  1. firmware_config.json  — Fixes 4, 10, 12
+  2. pin_config.json        — Fixes 2, 3
+  3. task_config.json       — Fixes 5, 6
+  4. safety_config.json     — Fixes 1, 7, 9, 11, 14
+  5. jetson_mcp_tools.json  — Fix 8
+  6. nmea_sentence_map.json — Fix 13
+
+================================================================================
+CRITICAL FIXES (C-xx from Expert Review)
+================================================================================
+
+[Fix 1]  Physical Kill Switch — ABYC A-33 Compliance
+  Review:  C-02 (CRITICAL) — No Physical Emergency Stop
+  File:    safety_config.json
+  Change:  Added "hardware_interlocks" section with "kill_switch" field
+  Values:  type: physical_NC_momentary
+           wiring: series_in_12V_solenoid_supply_before_fuse
+           location: helm_station
+           required: true
+  Rationale: Physical normally-closed kill switch breaks solenoid power
+             independently of ESP32. ABYC A-33 mandatory requirement.
+
+[Fix 2]  MOSFET Gate Drive Voltage Fix
+  Review:  C-01 (CRITICAL) — IRLZ44N Rds(on) at 3.3V is 2-4x rated value
+  File:    pin_config.json
+  Change:  Added "gate_driver" object under gpio_solenoid_outputs.drive
+  Values:  gate_driver.ic_part: TC4420 (NEW)
+           gate_driver.supply_pin: LM2596_5V_rail
+           gate_driver.required: true
+           gate_driver.output_drive_v: 5.0
+  Rationale: ESP32 GPIO=3.3V cannot fully saturate IRLZ44N (needs Vgs=5V).
+             TC4420 gate driver converts 3.3V logic to 5V gate drive.
+             Alternative: AO3400 logic-level MOSFET documented.
+
+[Fix 3]  GPIO2 Strapping Pin Conflict
+  Review:  C-09 (CRITICAL) — GPIO2 must be HIGH at boot for ESP32-S3
+  File:    pin_config.json
+  Change:  Moved buzzer from GPIO2 to GPIO4
+  Values:  buzzer.gpio: 2 -> 4
+           port_solenoid.gpio: 4 -> 13 (moved to free GPIO4 for buzzer)
+  Rationale: GPIO2 is a strapping pin. Buzzer circuit can pull it low
+             during boot in marine environment -> bricked device.
+
+[Fix 5]  Heading Double-Buffer Race Condition
+  Review:  C-05 (CRITICAL) — TOCTOU race on heading_buf + heading_active
+  File:    task_config.json
+  Change:  Added "heading_mutex" to mutexes section
+  Values:  type: mutex (NEW)
+           writers: [task_compass_reader]
+           readers: [task_pid_control, task_mqtt_client]
+           max_hold_time_us: 10
+           memory_attribute: __attribute__((section(".dram")))
+  Rationale: Double-buffer without synchronization is a race condition.
+             Single buffer with mutex is safer (lock hold < 1us).
+             DRAM attribute ensures inter-core cache coherence.
+
+[Fix 6]  I2C Bus Lockup Protection
+  Review:  C-06 (CRITICAL) — No recovery from stuck SCL/SDA
+  File:    task_config.json
+  Change:  Added "i2c_bus_watchdog" section + i2c0_mutex timeout
+  Values:  i2c_bus_watchdog.enabled: true (NEW)
+           i2c_bus_watchdog.scl_low_timeout_ms: 25
+           i2c_bus_watchdog.transaction_timeout_ms: 50
+           i2c_bus_watchdog.consecutive_failures_before_recovery: 3
+           i2c_bus_watchdog.max_recovery_attempts: 5
+           i2c_bus_watchdog.recovery_method: manual_scl_clock_9_cycles_then_bus_reset
+           i2c0_mutex.acquire_timeout_ms: 100 (NEW)
+  Rationale: I2C slave holding SDA low locks entire bus. Recovery
+             via manual SCL clocking + peripheral reset. Timeout on
+             mutex prevents indefinite blocking.
+
+[Fix 8]  Voice Engagement Confirmation
+  Review:  C-07 (CRITICAL) — Unintended autopilot activation via voice
+  File:    jetson_mcp_tools.json
+  Change:  Changed set_heading engage default; added confirmation to engage tool
+  Values:  set_heading.engage.default: true -> false
+           engage.confirmation_required.type: verbal_confirmation (NEW)
+           engage.confirmation_required.timeout_seconds: 5 (NEW)
+           engage.engage_guard_conditions: (NEW)
+             refuse_if_speed_below_kts: 1.0
+             refuse_if_heading_rate_above_deg_per_sec: 10.0
+  Rationale: Prevents LLM misinterpretation or noise-triggered wake word
+             from engaging autopilot. Requires explicit "yes/confirm".
+
+[Fix 10] Clutch Engagement Jerk
+  Review:  C-10 (CRITICAL) — Rudder jerk on engage startles crew
+  File:    firmware_config.json
+  Change:  Added clutch_engage_delay_ms to rate_limiter
+  Values:  clutch_engage_delay_ms: 500 (NEW)
+  Rationale: Ramp solenoid output over 500ms to prevent mechanical jerk
+             when transitioning from manual to autopilot control.
+
+[Fix 11] External Hardware Watchdog Requirement
+  Review:  C-11 (CRITICAL) — Internal WDT is SPOF
+  File:    safety_config.json
+  Change:  Added hardware_interlocks.external_watchdog + required flag
+  Values:  hardware_interlocks.external_watchdog.required: true (NEW)
+           watchdog.external_hardware.required: true (NEW)
+           watchdog.external_hardware._comment: MANDATORY (UPDATED)
+  Rationale: Internal ESP32 WDT cannot fire if interrupts disabled.
+             MAX6818 provides independent hardware reset path.
+             Should be kicked by hardware timer ISR, not task.
+
+================================================================================
+MAJOR FIXES (M-xx from Expert Review)
+================================================================================
+
+[Fix 4]  Integral Anti-Windup Limit
+  Review:  M-02 (MAJOR) — Integral essentially useless at +/-5 deg-s
+  File:    firmware_config.json
+  Change:  Increased integral_accum_max_deg_sec
+  Values:  integral_accum_max_deg_sec: 5.0 -> 1500.0
+  Rationale: Simulation shows 5 deg wind disturbance needs ~477 deg-s of
+             integral for compensation. At +/-5, integral was 300x too
+             small for weather helm compensation.
+
+[Fix 7]  Separate Fuses
+  Review:  C-03 (CRITICAL) — Single fuse causes brownout risk
+  File:    safety_config.json
+  Change:  Split single 5A fuse into logic + solenoid fuses
+  Values:  fuse_rating_a: 5.0 (KEPT for backward compat)
+           fuses: [ (NEW)
+             { name: "logic_fuse", rating_a: 5.0,
+               protects: [ESP32, sensors, LDO, logic rail] },
+             { name: "solenoid_fuse", rating_a: 15.0,
+               protects: [PORT, STBD, CLUTCH solenoids, MOSFET board] }
+           ]
+  Rationale: Solenoid short draws 10-20A, blows 5A fuse in 100ms.
+             During blow, +12V rail sags, ESP32 brownout-resets, MOSFETs
+             enter undefined state. Separate fuses isolate faults.
+
+[Fix 9]  TRACK Mode Fallback on Jetson Failure
+  Review:  M-03 (MAJOR) — Frozen APB heading causes collision risk
+  File:    safety_config.json
+  Change:  Updated fallback_mode and added fallback_behavior
+  Values:  fallback_mode: "continue_last_heading" -> "hold_current_heading"
+           fallback_behavior: { (NEW)
+             in_track_mode: "switch_to_auto_hold_current_heading",
+             in_auto_mode: "continue_current_heading",
+             alarm_severity_in_track_mode: "critical",
+             alarm_severity_in_auto_mode: "warning"
+           }
+  Rationale: In TRACK mode with Jetson failure, frozen APB heading
+             steers toward potentially dangerous waypoint. Fall back to
+             AUTO mode holding CURRENT heading (safe heading hold).
+
+[Fix 12] Simulation Gain Sync Documentation
+  Review:  M-02 (MAJOR) — Simulation gains don't match firmware config
+  File:    firmware_config.json
+  Change:  Added simulation_gain_mapping section documenting relationship
+  Values:  simulation_gain_mapping: { (NEW)
+             simulation_form: { Kp: 1.5, Ki: 0.03, Kd: 0.4 },
+             firmware_form: { P: 0.003, I: 0.0, D: 0.090, DD: 0.075, PR: 0.005, FF: 0.600 },
+             notes: [ "Different controller structures - gains NOT interchangeable",
+                      "D term: simulation=on-error, firmware=on-measurement",
+                      "DD, PR, FF have no simulation equivalent",
+                      "RE-RUN simulation with firmware gain structure" ]
+           }
+  Rationale: Documents why simulation and firmware gains differ and
+             what must be done to properly validate the firmware.
+
+[Fix 13] NMEA Buffer Size
+  Review:  M-06 (MAJOR) — 64-byte buffer too small for burst scenarios
+  File:    nmea_sentence_map.json
+  Change:  Added parser section with max_sentence_length_bytes
+  Values:  parser.max_sentence_length_bytes: 128 (NEW, was 64)
+           parser.overflow_action: "discard_and_alarm"
+  Rationale: GPS boot burst can send ~335 bytes at 4800 baud.
+             128-byte minimum per-sentence buffer provides margin for
+             extended sentences and vendor-specific data.
+
+[Fix 14] Undervoltage Threshold (Engine Crank)
+  Review:  M-10 (MAJOR) — False disengage during engine start
+  File:    safety_config.json
+  Change:  Lowered critical undervoltage threshold
+  Values:  undervoltage critical: 10.0V -> 8.0V
+           UNDERVOLTAGE alarm trigger: "Supply voltage < 10.0V" -> "< 8.0V"
+  Rationale: Lead-acid battery drops to 9-10V during engine crank
+             (1-3 seconds). 10.0V threshold causes false disengagement.
+             8.0V indicates genuine battery failure, not crank dip.
+
+================================================================================
+SUMMARY
+================================================================================
+  Total fixes applied:          14
+  Critical (C-xx):              8  (Fixes 1, 2, 3, 5, 6, 8, 10, 11)
+  Major (M-xx):                 6  (Fixes 4, 7, 9, 12, 13, 14)
+  Files modified:               6
+  New fields added:             18
+  Value changes:                8
+  JSON validation:              ALL PASS
+
+  REMAINING ITEMS (not in scope for this fix batch, noted for future):
+  - C-04: Replace LM1117-3.3 LDO with 3A buck converter (hardware change)
+  - C-08: Add 74HC08 hardware interlock PCB (hardware change)
+  - M-01: Implement PWM hold-mode current reduction (firmware feature)
+  - M-04: Change OVERCURRENT_DRIVE action to auto_disengage (alarm config)
+  - M-05: Use atomic operations for inter-core shared variables (firmware)
+  - M-07: Change CLUTCH_FAULT action to de_energize_clutch (alarm config)
+  - M-08: Remove MQTT commands_enabled option (security hardening)
+  - M-09: Confirm CONFIG_FREERTOS_MUTEXES enabled (sdkconfig check)
+
+================================================================================

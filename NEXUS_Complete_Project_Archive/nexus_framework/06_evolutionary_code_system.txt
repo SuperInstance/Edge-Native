@@ -1,0 +1,1920 @@
+================================================================================
+  NEXUS FRAMEWORK — DOCUMENT 06
+  EVOLUTIONARY CODE SYSTEM: SELF-IMPROVING CONTROL THROUGH
+  OBSERVATION, HYPOTHESIS, A/B TESTING, AND PROVENANCE
+================================================================================
+  Agent F — Evolutionary Code System Designer
+  Classification: Core Architecture Design Document
+  Version: 0.1-draft
+  Date: 2025-06-26
+================================================================================
+
+FOREWORD
+--------
+This document describes the most novel subsystem of NEXUS: the mechanism by
+which the system's own control code evolves through a principled loop of
+observation, pattern discovery, hypothesis formation, simulation, live A/B
+testing, and automated deployment—governed by a full provenance chain that
+lets every change be audited, rolled back, and explained. This is not a
+reinforcement-learning loop operating on opaque policy networks; it is
+STRUCTURAL EVOLUTION of human-readable, diffable control code, applying ML
+to the code itself rather than to an internal representation.
+
+The core thesis: if a human operator repeatedly corrects or refines the
+system's behavior in certain conditions, the system should notice, form a
+hypothesis about what change would eliminate the need for that correction,
+and safely test that change — all while maintaining a complete, immutable
+record of what changed, why, and whether it worked.
+
+================================================================================
+1. EVOLUTION LOOP — OBSERVE → DISCOVER → HYPOTHESIZE → SIMULATE → PROPOSE
+                     → TEST → MEASURE → DECIDE → DEPLOY → REPEAT
+================================================================================
+
+The Evolution Loop is the master cycle governing all self-improvement
+activity. It runs continuously as a background daemon on each Jetson
+(edge node), with a cloud-side orchestrator coordinating across nodes
+and managing cross-environment experiments.
+
+1.1 LOOP OVERVIEW
+-----------------
+Each stage is a well-defined phase with entry/exit conditions, data
+structures, timeouts, and escalation paths. The loop is NOT a simple
+linear pipeline — it is a state machine where any stage can fail,
+retry, or escalate to human review.
+
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │                       EVOLUTION STATE MACHINE                       │
+    │                                                                      │
+    │  [OBSERVE] ──► [DISCOVER] ──► [HYPOTHESIZE] ──► [SIMULATE]          │
+    │      ▲              │               │                │                │
+    │      │              ▼               ▼                ▼                │
+    │      │         (no patterns)   (no valid      (low confidence)      │
+    │      │              │          hypothesis)        │                  │
+    │      │              └───────────────┴──────────────┘                 │
+    │      │                         loop back to OBSERVE                  │
+    │      │                                                               │
+    │  [PROPOSE] ◄── [SIMULATE] (high confidence)                         │
+    │      │                                                               │
+    │      ▼                                                               │
+    │  [TEST] ──► [MEASURE] ──► [DECIDE] ──► [DEPLOY]                    │
+    │                 │            │             │                          │
+    │                 │            ▼             │                          │
+    │                 │    (reject/retry)        │                          │
+    │                 │            │             │                          │
+    │                 └────────────┘             │                          │
+    │                                              ▼                        │
+    │                                         [REPEAT] ──► OBSERVE        │
+    └──────────────────────────────────────────────────────────────────────┘
+
+1.2 STAGE DETAIL
+----------------
+
+--- OBSERVE ---
+Entry: System is running; loop timer fires (default: every 60 seconds).
+Exit: Observation window data committed to time-series database.
+
+The system continuously collects:
+  - Raw sensor readings (from the Plant interface)
+  - Current artifact outputs (actuator commands)
+  - Human inputs (overrides, corrections, explicit feedback)
+  - Environmental context (time of day, weather, batch ID, material lot)
+  - Computed performance metrics (see Section 6)
+  - System health telemetry (CPU, memory, latency)
+
+Data is written to the Observation Store (see Section 2) with nanosecond
+timestamps and a monotonic sequence number for ordering. Each observation
+record is ~200 bytes; at 10Hz sensor rate across 8 sensors plus metadata,
+we expect ~2MB/minute per node — approximately 3GB/day.
+
+The observer also marks episodes in real-time when anomaly detectors
+trigger (see Section 2.4). These episode markers are critical inputs
+for the DISCOVER stage.
+
+Algorithm: OBSERVE (pseudocode)
+```
+function observe(window_duration=60s):
+    start_seq = observation_store.last_sequence()
+    start_time = now() - window_duration
+
+    raw_batch = sensor_interface.read_buffer(since=start_seq)
+    artifact_batch = artifact_executor.get_trace(since=start_seq)
+    human_batch = human_interface.get_trace(since=start_seq)
+    context_batch = environment_context.snapshot(start_time, now())
+
+    merged = merge_by_timestamp(raw_batch, artifact_batch,
+                                human_batch, context_batch)
+    compute_realtime_metrics(merged)
+
+    episode_markers = anomaly_detector.scan(merged)
+    if episode_markers:
+        observation_store.mark_episodes(episode_markers)
+
+    observation_store.write_batch(merged)
+    event_bus.publish("observation_cycle_complete",
+                      {"records": len(merged), "episodes": len(episode_markers)})
+```
+
+--- DISCOVER ---
+Entry: Sufficient accumulated data (minimum: 10 episodes of a given
+       pattern type, or 24 hours of continuous data).
+Exit: Ranked list of candidate improvement patterns.
+
+This stage runs a batch job every 4 hours (configurable). It queries
+the observation store for all episodes since the last discovery run,
+extracts features, clusters similar situations, compares human vs.
+artifact behavior, and produces a ranked list of improvement
+opportunities. See Section 3 for the full algorithm.
+
+--- HYPOTHESIZE ---
+Entry: One or more candidate patterns from DISCOVER.
+Exit: Formal hypothesis objects with proposed code changes.
+
+For each candidate pattern, the system formulates a testable hypothesis:
+
+    H: "Under conditions {C}, replacing behavior {B_old} with behavior
+        {B_new} will improve metric {M} by at least Δ% with 95%
+        confidence."
+
+The hypothesis object is a structured record:
+```
+Hypothesis {
+    id: UUID
+    created_at: timestamp
+    pattern_ref: PatternID          // which discovery pattern
+    conditions: ConditionSet         // when this applies
+    old_behavior: BehaviorSpec       // current artifact code reference
+    new_behavior: BehaviorSpec       // proposed change
+    target_metric: MetricName        // what to improve
+    expected_improvement: float      // predicted delta
+    confidence: float                // discovery confidence
+    synthesis_level: int             // 1-4 (see Section 4)
+    proposed_diff: string            // unified diff against current artifact
+    safety_review_status: enum       // PENDING | APPROVED | REJECTED
+    simulation_confidence: float     // filled by SIMULATE stage
+}
+```
+
+The hypothesis is formed by the Code Synthesis Pipeline (Section 4),
+which generates one or more candidate diffs at the appropriate synthesis
+level based on the pattern type and available context.
+
+--- SIMULATE ---
+Entry: Hypothesis with proposed diff.
+Exit: Simulation results including confidence metric.
+
+The Simulation Engine (Section 5) runs the proposed change against
+historical data WITHOUT affecting the live system. It replays the
+conditions from the episodes that triggered the hypothesis and compares
+old behavior vs. new behavior on identical inputs.
+
+Output:
+```
+SimulationResult {
+    hypothesis_id: UUID
+    replay_episodes: [EpisodeID]
+    old_metrics: MetricSnapshot
+    new_metrics: MetricSnapshot
+    delta_metrics: MetricDelta
+    simulation_confidence: float  // 0.0-1.0
+    edge_cases_found: [string]
+    safety_violations: [string]
+    recommendation: enum          // PROCEED | UNCERTAIN | REJECT
+}
+```
+
+If simulation_confidence < 0.6, the hypothesis is flagged UNCERTAIN
+and routed to human review. If any safety violation is detected, it is
+immediately rejected regardless of metric improvement.
+
+--- PROPOSE ---
+Entry: Hypothesis with simulation_confidence >= 0.6.
+Exit: Proposal submitted to human approval queue (if required) or
+       automatically queued for testing (for Level 1 changes).
+
+The proposal includes:
+  - The original hypothesis and pattern evidence
+  - Simulation results with confidence
+  - A human-readable explanation generated by LLM
+  - The unified diff with syntax highlighting
+  - Risk assessment (what could go wrong)
+  - Estimated test duration
+  - Rollback plan
+
+Approval routing:
+  - Level 1 (parameter): Auto-approved if simulation confidence > 0.8
+  - Level 2 (conditional): Requires operator acknowledgment
+  - Level 3 (algorithm): Requires engineer review
+  - Level 4 (architecture): Requires engineering manager approval
+
+--- TEST ---
+Entry: Approved proposal.
+Exit: Test results with statistical analysis.
+
+The hypothesis enters a live A/B test. The system creates a "candidate"
+branch of the artifact (see Section 7) and runs it alongside the
+"baseline" (current production) artifact. Traffic splitting depends on
+safety criticality:
+  - Safety-critical: 5% of episodes to candidate, 95% to baseline
+  - Non-critical: 50/50 split
+
+The test runs for a minimum duration computed by power analysis:
+```
+required_N = (Z_alpha + Z_beta)^2 * (sigma^2) / (delta^2)
+// where Z_alpha=1.96 (95% CI), Z_beta=0.84 (80% power)
+// sigma = observed metric standard deviation
+// delta = minimum detectable effect (default 5%)
+```
+
+If the required N is not reached within 7 days, the test is extended or
+marked inconclusive.
+
+--- MEASURE ---
+Entry: A/B test data collected.
+Exit: Statistical comparison report.
+
+During the test, all metrics (Section 6) are computed in real-time for
+both baseline and candidate branches. At the end of the test window (or
+when required N is reached), the system performs:
+  - Paired t-test (if normally distributed) or Wilcoxon signed-rank test
+  - Effect size computation (Cohen's d)
+  - Confidence interval on the improvement
+  - Stratified analysis by condition subtypes
+  - Safety metric check (no regressions)
+
+The minimum acceptance criteria:
+  1. Primary metric improved by >= 5% (absolute)
+  2. Statistical significance: p < 0.05
+  3. No safety metric regression > 1%
+  4. No stability metric regression > 2%
+
+--- DECIDE ---
+Entry: Measurement report from MEASURE.
+Exit: ACCEPT, REJECT, or RETRY decision.
+
+The decision logic:
+```
+function decide(measurement, hypothesis):
+    if measurement.safety_regression > 1%:
+        return REJECT(reason="safety_regression")
+    if measurement.primary_improvement < 5%:
+        return REJECT(reason="insufficient_improvement")
+    if measurement.p_value >= 0.05:
+        return REJECT(reason="not_significant")
+    if measurement.stability_regression > 2%:
+        return REJECT(reason="stability_regression")
+
+    // Apply human feedback override
+    hf = get_human_feedback(hypothesis.id)
+    if hf.explicit_negative:
+        return REJECT(reason="human_rejection", feedback=hf)
+    if hf.explicit_positive and measurement.primary_improvement > 0%:
+        return ACCEPT(reason="human_preference_override")
+
+    return ACCEPT(reason="statistical_validation",
+                  improvement=measurement.primary_improvement,
+                  confidence=measurement.confidence)
+```
+
+--- DEPLOY ---
+Entry: ACCEPT decision.
+Exit: New artifact version promoted to production.
+
+The candidate branch is merged into the main provenance tree (Section 7).
+The new version hash becomes the current production artifact. All active
+nodes receive the update within 30 seconds via the provenance
+synchronization protocol. Deployment is atomic: the new artifact is
+activated at a tick boundary to prevent mid-cycle inconsistencies.
+
+--- REPEAT ---
+The loop returns to OBSERVE, now watching for whether the deployed
+change produces the expected improvement in the real system. If the
+real-world metrics diverge significantly from the simulation metrics
+(>10% deviation), an automated rollback is triggered and a new
+hypothesis is created to investigate the divergence.
+
+================================================================================
+2. OBSERVATION DATA MODEL
+================================================================================
+
+2.1 TIME-SERIES DATABASE SCHEMA
+-------------------------------
+The observation store is a purpose-built time-series database (TSDB)
+optimized for high-write throughput and efficient range queries. We use
+a column-oriented format inspired by Apache Parquet, stored on local NVMe
+with cloud backup.
+
+Primary table: observations
+```
+Column              Type           Description
+──────────────────────────────────────────────────────────────────────────
+sequence_no         INT64          Monotonically increasing (per node)
+timestamp_ns        INT64          Nanosecond epoch time (UTC)
+node_id             STRING         Jetson device identifier
+sensor_data         BLOB           Protobuf-encoded sensor readings
+                     .temperatures [FLOAT32 x N_sensors]
+                     .pressures    [FLOAT32 x N_sensors]
+                     .flows        [FLOAT32 x N_sensors]
+                     .levels       [FLOAT32 x N_sensors]
+                     .qualities    [FLOAT32 x N_sensors]
+artifact_output     BLOB           Protobuf-encoded actuator commands
+                     .valve_positions  [FLOAT32 x N_actuators]
+                     .pump_speeds      [FLOAT32 x N_actuators]
+                     .heater_power     [FLOAT32 x N_actuators]
+                     .damper_angles    [FLOAT32 x N_actuators]
+human_input         BLOB           Protobuf-encoded human actions
+                     .overrides        [Override x N]
+                     .explicit_feedback [Feedback x N]
+                     .voice_commands   [VoiceCmd x N]
+environment_ctx     BLOB           Protobuf-encoded context
+                     .time_of_day     FLOAT32 (0-24)
+                     .day_of_week     INT8
+                     .season          ENUM
+                     .weather_code    INT16
+                     .ambient_temp    FLOAT32
+                     .batch_id        STRING
+                     .material_lot    STRING
+computed_metrics    BLOB           Protobuf-encoded real-time metrics
+                     .rms_error       FLOAT32
+                     .actuator_effort FLOAT32
+                     .stability       FLOAT32
+                     .response_time_ms FLOAT32
+                     .safety_margin   FLOAT32
+episode_id          STRING|NULL    Non-null if within a marked episode
+quality_flag        UINT8          0=good, 1=suspect, 2=bad (sensor health)
+```
+
+Storage layout: Data is partitioned by day, with each day stored as a
+contiguous column-oriented file. This enables efficient reads for any
+time range (read only the days needed) and efficient compaction.
+
+2.2 RETENTION AND DOWNSAMPLING
+------------------------------
+The storage system maintains three tiers:
+
+  TIER 1 — Full Resolution (30 days)
+    - Raw 10Hz data, all columns
+    - ~3GB/day per node
+    - Stored on local NVMe
+    - Used for: episode analysis, simulation replay, debugging
+
+  TIER 2 — Minute Resolution (1 year)
+    - Downsampled to 1-minute averages (min, max, mean, stddev, count)
+    - ~5MB/day per node
+    - Stored on local SSD with cloud sync
+    - Used for: trend analysis, long-term pattern discovery
+
+  TIER 3 — Hourly Resolution (indefinite)
+    - Downsampled to 1-hour aggregates
+    - ~50KB/day per node
+    - Cloud-only storage
+    - Used for: regulatory reporting, lifetime statistics
+
+Downsampling algorithm:
+```
+function downsample(tier1_block, target_interval):
+    aligned_windows = align_to_interval(tier1_block, target_interval)
+    for window in aligned_windows:
+        agg = Aggregate()
+        for col in ["temperatures", "pressures", "flows", ...]:
+            values = [r[col] for r in window.records if r.quality_flag == 0]
+            agg.set(col, "mean", statistics.mean(values))
+            agg.set(col, "min", min(values))
+            agg.set(col, "max", max(values))
+            agg.set(col, "stddev", statistics.stdev(values) if len(values)>1 else 0)
+            agg.set(col, "count", len(values))
+        agg.episode_count = count_distinct(window.records.episode_id)
+        yield agg
+```
+
+The transition from Tier 1 to Tier 2 happens via a background compaction
+job that runs daily at 02:00 UTC. Data is verified (checksum comparison)
+before deletion from Tier 1.
+
+2.3 EPISODES — MARKED SEGMENTS OF INTEREST
+-------------------------------------------
+An episode is a contiguous time segment flagged for special attention.
+Episodes are the primary unit of analysis in the DISCOVER stage.
+
+Episode triggers:
+  - Anomaly detection: statistical process control (SPC) charts trigger
+    when metrics exceed 3-sigma limits
+  - Human override events: any manual override starts an episode that
+    extends 60 seconds before and 120 seconds after the override
+  - Threshold breach: when any controlled variable exceeds its alarm
+    limits
+  - Scheduled: periodic episodes every 4 hours for baseline comparison
+  - External events: batch changes, shift changes, maintenance windows
+
+Episode record:
+```
+Episode {
+    id: STRING                    // UUID
+    node_id: STRING
+    start_time: TIMESTAMP_NS
+    end_time: TIMESTAMP_NS
+    trigger_type: ENUM            // ANOMALY | OVERRIDE | THRESHOLD |
+                                  // SCHEDULED | EXTERNAL | MANUAL
+    trigger_details: JSON         // specific trigger context
+    conditions_snapshot: BLOB     // environment_ctx at start
+    severity: ENUM                // LOW | MEDIUM | HIGH | CRITICAL
+    tags: [STRING]                // user-added or auto-generated labels
+    associated_hypotheses: [UUID] // linked hypotheses (populated later)
+    human_feedback: [Feedback]    // explicit feedback on this episode
+}
+```
+
+Episodes are stored in a dedicated episodes table, indexed by time range,
+trigger type, and severity. They are also written to the provenance chain
+as immutable records.
+
+2.4 ANOMALY DETECTOR
+--------------------
+The anomaly detector runs as a real-time process alongside the observer.
+It uses a multi-layer approach:
+
+Layer 1 — Statistical Process Control (SPC):
+  - Individual/moving range charts for each sensor
+  - Exponentially Weighted Moving Average (EWMA) charts for metrics
+  - Western Electric rules for trend detection
+
+Layer 2 — Contextual Anomaly:
+  - Compare current behavior to the expected behavior model for the
+    current context (time of day, batch, season)
+  - Deviation > 2 standard deviations flags a potential episode
+
+Layer 3 — Sequence Anomaly:
+  - LSTM autoencoder trained on normal operation sequences
+  - Reconstruction error > threshold triggers episode
+  - Retrained weekly on Tier 2 data with negative sampling
+
+================================================================================
+3. PATTERN DISCOVERY ALGORITHM
+================================================================================
+
+The Pattern Discovery Algorithm is the engine that transforms raw
+observations into actionable improvement opportunities. It operates on
+the accumulated episode database.
+
+3.1 ALGORITHM OVERVIEW
+----------------------
+```
+function discover_patterns(since_timestamp, min_episodes=10):
+    episodes = episode_store.query(since=since_timestamp)
+    
+    // Phase 1: Feature Extraction
+    features = []
+    for ep in episodes:
+        obs = observation_store.query(ep.start_time, ep.end_time)
+        feat = extract_features(ep, obs)
+        features.append(feat)
+    
+    // Phase 2: Condition Clustering
+    clustered = cluster_by_conditions(features, eps=0.15, min_samples=5)
+    
+    // Phase 3: Behavior Comparison
+    candidates = []
+    for cluster in clustered:
+        if len(cluster.episodes) < min_episodes:
+            continue
+        comparison = compare_human_vs_artifact(cluster)
+        if comparison.divergence > threshold:
+            candidates.append(comparison)
+    
+    // Phase 4: Statistical Validation
+    validated = []
+    for candidate in candidates:
+        result = validate_statistically(candidate)
+        if result.significant:
+            validated.append(result)
+    
+    // Phase 5: Priority Ranking
+    ranked = rank_by_priority(validated)
+    return ranked
+```
+
+3.2 FEATURE ENGINEERING FROM EPISODES
+-------------------------------------
+Each episode is converted to a fixed-length feature vector:
+
+```
+EpisodeFeature {
+    // Condition features (what was happening)
+    temperature_mean: FLOAT32        // avg across all temp sensors
+    temperature_stddev: FLOAT32
+    pressure_mean: FLOAT32
+    flow_rate_mean: FLOAT32
+    setpoint: FLOAT32               // target setpoint at episode start
+    setpoint_delta: FLOAT32         // rate of setpoint change
+    time_since_batch_start: FLOAT32 // seconds
+    ambient_temperature: FLOAT32
+    humidity: FLOAT32
+    time_of_day_sin: FLOAT32        // cyclical encoding
+    time_of_day_cos: FLOAT32
+    day_of_week: FLOAT32            // one-hot or ordinal
+    
+    // Behavior features (what the system did)
+    artifact_response_time_ms: FLOAT32
+    artifact_control_effort: FLOAT32  // sum of |actuator changes|
+    artifact_overshoot: FLOAT32       // max error after correction
+    artifact_settling_time_ms: FLOAT32
+    
+    // Human behavior features (what the human did differently)
+    human_override_count: INT32
+    human_override_magnitude: FLOAT32  // avg |human_cmd - artifact_cmd|
+    human_time_to_override_ms: FLOAT32 // delay from episode start
+    human_correction_direction: INT8   // +1, -1, or 0
+    
+    // Outcome features
+    rms_error_reduction_after_override: FLOAT32  // improvement from human
+    time_to_stable_after_override: FLOAT32
+    final_stability: FLOAT32
+    
+    // Composite
+    divergence_score: FLOAT32  // overall human-artifact disagreement
+    improvement_potential: FLOAT32  // estimated possible improvement
+}
+```
+
+Feature normalization uses robust scaling (median and IQR) to handle
+outliers, computed on a rolling 30-day window.
+
+3.3 DBSCAN CLUSTERING
+---------------------
+We use DBSCAN (Density-Based Spatial Clustering of Applications with
+Noise) to group episodes with similar conditions:
+
+```
+function cluster_by_conditions(features, eps=0.15, min_samples=5):
+    // Build feature matrix from condition features only
+    X = np.array([f.condition_vector() for f in features])
+    
+    // Precompute distance matrix using weighted features
+    weights = {
+        'temperature_mean': 2.0,       // high weight: primary variable
+        'pressure_mean': 1.5,
+        'flow_rate_mean': 1.5,
+        'setpoint': 2.0,
+        'setpoint_delta': 1.0,
+        'time_of_day_sin': 0.5,
+        'time_of_day_cos': 0.5,
+        'ambient_temperature': 1.0,
+        'batch_age': 0.8,
+    }
+    X_weighted = X * weights_array
+    
+    // Normalize to [0, 1]
+    scaler = RobustScaler()
+    X_norm = scaler.fit_transform(X_weighted)
+    
+    // DBSCAN
+    clustering = DBSCAN(eps=eps, min_samples=min_samples,
+                        metric='euclidean', n_jobs=-1)
+    labels = clustering.fit_predict(X_norm)
+    
+    // Group episodes by cluster
+    clusters = defaultdict(list)
+    for i, label in enumerate(labels):
+        if label != -1:  // exclude noise
+            clusters[label].append(features[i])
+    
+    return clusters
+```
+
+The eps parameter is dynamically adjusted: if >50% of episodes are
+classified as noise, eps is increased by 20% and clustering is retried.
+The min_samples parameter is set to ensure each cluster has enough
+episodes for statistical power.
+
+3.4 HUMAN VS. ARTIFACT BEHAVIOR COMPARISON
+-------------------------------------------
+For each cluster, we compare the artifact's behavior to the human's
+corrections:
+
+```
+function compare_human_vs_artifact(cluster):
+    episodes = cluster.episodes
+    
+    // For episodes with human overrides, compute the "correction vector"
+    corrections = []
+    for ep in episodes:
+        if ep.human_override_count > 0:
+            // The delta between what the artifact did and what the
+            // human wanted, averaged over the override duration
+            correction = compute_average_correction(ep)
+            corrections.append(correction)
+    
+    // If most episodes in this cluster had overrides, there's a
+    // systematic mismatch
+    override_rate = len(corrections) / len(episodes)
+    
+    if override_rate < 0.3:
+        return None  // not enough signal
+    
+    // Aggregate correction direction and magnitude
+    avg_correction = mean(corrections)
+    correction_consistency = 1.0 - stddev(corrections) / (mean_abs(corrections) + 1e-6)
+    
+    // Check if corrections are consistent (humans agree with each other)
+    if correction_consistency < 0.5:
+        return None  // humans disagree; no clear pattern
+    
+    // Compute the improvement humans achieved
+    improvements = [ep.rms_error_reduction_after_override for ep in episodes
+                    if ep.human_override_count > 0]
+    avg_improvement = mean(improvements)
+    
+    return ComparisonResult(
+        cluster_id=cluster.id,
+        condition_profile=cluster.centroid(),
+        override_rate=override_rate,
+        avg_correction=avg_correction,
+        correction_consistency=correction_consistency,
+        avg_improvement=avg_improvement,
+        divergence_score=override_rate * abs(avg_correction),
+        episode_count=len(episodes),
+        episode_ids=[ep.id for ep in episodes],
+    )
+```
+
+3.5 STATISTICAL VALIDATION
+--------------------------
+Each candidate pattern must pass statistical validation:
+
+```
+function validate_statistically(comparison):
+    // Collect paired samples: (artifact_metric, human_corrected_metric)
+    // from each episode in the cluster
+    artifact_metrics = []
+    human_metrics = []
+    for ep_id in comparison.episode_ids:
+        ep = episode_store.get(ep_id)
+        artifact_metrics.append(ep.artifact_rms_error)
+        human_metrics.append(ep.human_corrected_rms_error)
+    
+    // Normality test (Shapiro-Wilk) to choose test
+    _, p_normal = shapiro(artifact_metrics)
+    
+    if p_normal > 0.05 and len(artifact_metrics) >= 30:
+        // Paired t-test
+        t_stat, p_value = scipy.stats.ttest_rel(human_metrics, artifact_metrics)
+        effect_size = (mean(human_metrics) - mean(artifact_metrics)) / \
+                      stddev([a - h for a, h in zip(artifact_metrics, human_metrics)])
+        test_name = "paired_t_test"
+    else:
+        // Mann-Whitney U test (non-parametric)
+        u_stat, p_value = scipy.stats.mannwhitneyu(human_metrics, artifact_metrics)
+        // Effect size: rank-biserial correlation
+        n = len(artifact_metrics) + len(human_metrics)
+        effect_size = 1 - (2 * u_stat) / (len(artifact_metrics) * len(human_metrics))
+        test_name = "mann_whitney_u"
+    
+    // Confidence interval via bootstrap
+    improvement = [h - a for h, a in zip(human_metrics, artifact_metrics)]
+    ci_low, ci_high = bootstrap_ci(improvement, confidence=0.95, n_resamples=10000)
+    
+    return ValidationResult(
+        significant=(p_value < 0.05),
+        p_value=p_value,
+        effect_size=effect_size,
+        improvement_ci=(ci_low, ci_high),
+        n_samples=len(artifact_metrics),
+        test_used=test_name,
+        normality_p=p_normal,
+    )
+```
+
+3.6 PRIORITY RANKING
+--------------------
+Validated patterns are ranked by a composite score:
+
+```
+priority_score = improvement_magnitude * statistical_confidence * occurrence_frequency * correction_consistency
+
+where:
+  improvement_magnitude = mean human improvement in cluster (normalized 0-1)
+  statistical_confidence = 1 - p_value (capped at 0.99)
+  occurrence_frequency = cluster.episode_count / total_episodes (normalized)
+  correction_consistency = how consistently humans correct (0-1)
+```
+
+Top-ranked patterns become inputs to the HYPOTHESIZE stage.
+
+================================================================================
+4. CODE SYNTHESIS PIPELINE
+================================================================================
+
+The Code Synthesis Pipeline translates validated patterns into concrete
+code changes. It operates at four levels of increasing complexity and
+risk.
+
+4.1 LEVEL 1 — PARAMETER ADJUSTMENT
+----------------------------------
+Scope: Modifying numeric constants in existing configuration or control
+       parameters (gains, setpoints, thresholds, time constants).
+
+Trigger conditions:
+  - The pattern shows a consistent bias (artifact consistently overshoots
+    or undershoots by a fixed proportion)
+  - The correction is a simple additive or multiplicative adjustment
+  - No conditional logic changes needed
+
+Synthesis process:
+```
+function synthesize_level1(pattern, current_artifact):
+    // Identify which parameter(s) are involved
+    // Use sensitivity analysis: which parameter, when changed, produces
+    // an output closest to the human correction?
+    
+    parameters = extract_tunable_parameters(current_artifact)
+    sensitivity = compute_sensitivity(parameters, pattern.condition_profile)
+    
+    // Pick the most sensitive parameter
+    target_param = max(sensitivity, key=lambda p: p.sensitivity_score)
+    
+    // Compute adjustment
+    // Simple: delta = human_avg - artifact_avg, applied proportionally
+    delta = pattern.avg_correction * target_param.sensitivity_inverse
+    
+    // Clamp to safe range
+    new_value = clamp(target_param.current_value + delta,
+                      target_param.min_safe, target_param.max_safe)
+    
+    // Generate JSON diff
+    diff = {
+        "op": "replace",
+        "path": target_param.json_path,  // e.g., "/controller/gains/kp"
+        "old_value": target_param.current_value,
+        "new_value": new_value
+    }
+    
+    return SynthesisResult(
+        level=1,
+        diff=diff,
+        confidence=0.9,  // high confidence for simple parameter changes
+        safety_impact="LOW",
+        description=f"Adjusted {target_param.name} from {target_param.current_value:.4f} to {new_value:.4f}"
+    )
+```
+
+4.2 LEVEL 2 — CONDITIONAL LOGIC
+--------------------------------
+Scope: Adding or modifying if/else branches, threshold conditions, or
+       mode-switching logic.
+
+Trigger conditions:
+  - The correction is condition-dependent (different corrections in
+    different sub-conditions)
+  - The pattern shows that current logic is correct for most conditions
+    but wrong for a specific subset
+  - Multiple parameter adjustments alone cannot capture the pattern
+
+Synthesis process uses a LOCAL LLM (runs on the Jetson) to generate a
+targeted code diff:
+
+```
+function synthesize_level2(pattern, current_artifact):
+    // Extract the specific condition under which corrections occur
+    sub_conditions = partition_by_subcondition(pattern.episodes)
+    
+    // Find the distinguishing condition feature
+    discriminator = find_discriminating_feature(sub_conditions)
+    
+    // Build a prompt for the local LLM
+    prompt = f"""
+    You are a control systems engineer modifying PID control code.
+    
+    CURRENT CODE (relevant section):
+    ```python
+    {extract_relevant_section(current_artifact, discriminator.location)}
+    ```
+    
+    OBSERVED BEHAVIOR:
+    - Under condition: {discriminator.description}
+      ({discriminator.feature} {discriminator.operator} {discriminator.value})
+    - Current artifact output: {pattern.artifact_avg_output:.2f}
+    - Desired output (based on human corrections): {pattern.human_avg_output:.2f}
+    - Correction direction: {pattern.correction_direction}
+    - This pattern was observed {pattern.episode_count} times with 95% confidence.
+    
+    TASK: Generate a MINIMAL code change (as a unified diff) that adds
+    a conditional branch to handle the identified condition. The change
+    must:
+    1. Only activate when {discriminator.feature} {discriminator.operator} {discriminator.value}
+    2. NOT affect behavior in other conditions
+    3. Include a comment explaining the condition
+    4. Follow the existing code style
+    
+    OUTPUT: Unified diff only, no explanation.
+    """
+    
+    response = local_llm.generate(prompt, max_tokens=500, temperature=0.1)
+    diff = parse_unified_diff(response.text)
+    
+    // Validate the diff
+    validation = validate_diff(diff, current_artifact)
+    if not validation.safe:
+        return SynthesisResult(level=2, error="unsafe_diff", details=validation)
+    
+    return SynthesisResult(
+        level=2,
+        diff=diff,
+        confidence=0.7,  // moderate confidence for logic changes
+        safety_impact="MEDIUM",
+        description=f"Added conditional branch for {discriminator.description}"
+    )
+```
+
+4.3 LEVEL 3 — ALGORITHM REPLACEMENT
+------------------------------------
+Scope: Replacing an entire control algorithm or significant computational
+       block with a fundamentally different approach.
+
+Trigger conditions:
+  - Level 2 changes have been attempted but insufficient
+  - The pattern indicates a structural limitation of the current approach
+  - Human behavior suggests a different control paradigm (e.g., switching
+    from PID to model-predictive control for a specific subsystem)
+
+Synthesis uses a CLOUD LLM with access to:
+  - Full codebase context
+  - Control theory knowledge base
+  - Similar patterns from other NEXUS nodes
+  - Published control strategies
+
+```
+function synthesize_level3(pattern, current_artifact, related_patterns):
+    // Gather full context
+    codebase = artifact_store.get_full_codebase(current_artifact.id)
+    related = [p for p in related_patterns if p.similarity(pattern) > 0.7]
+    
+    prompt = f"""
+    You are an expert control systems engineer and software architect.
+    
+    PROBLEM: The current control algorithm exhibits the following
+    systematic deficiency:
+    
+    - Condition: {pattern.condition_profile.to_string()}
+    - Current behavior: {pattern.artifact_behavior_description}
+    - Desired behavior: {pattern.human_behavior_description}
+    - Observed in {pattern.episode_count} episodes (p={pattern.p_value:.4f})
+    - Average performance gap: {pattern.improvement_potential:.1%}
+    
+    Similar patterns observed at other nodes:
+    {format_related_patterns(related)}
+    
+    CURRENT ALGORITHM:
+    ```python
+    {codebase.algorithm_section}
+    ```
+    
+    PLANT MODEL (if available):
+    ```python
+    {codebase.plant_model}
+    ```
+    
+    TASK: Design a replacement algorithm that:
+    1. Addresses the identified deficiency
+    2. Maintains or improves performance in all other conditions
+    3. Does not exceed current computational budget (max {codebase.compute_budget}ms per cycle)
+    4. Is well-commented and maintainable
+    5. Includes fallback behavior if the new approach fails
+    
+    Provide the complete replacement function and a migration plan.
+    """
+    
+    response = cloud_llm.generate(prompt, max_tokens=4000, temperature=0.2)
+    new_code = parse_code_block(response.text)
+    migration_plan = parse_migration_plan(response.text)
+    
+    // Comprehensive safety review
+    safety_review = comprehensive_safety_review(new_code, codebase)
+    
+    return SynthesisResult(
+        level=3,
+        diff=compute_full_diff(codebase.algorithm_section, new_code),
+        new_code=new_code,
+        migration_plan=migration_plan,
+        confidence=0.5,  // lower confidence for major changes
+        safety_impact=safety_review.impact_level,
+        safety_concerns=safety_review.concerns,
+        description=f"Replaced {codebase.algorithm_name} with new approach"
+    )
+```
+
+4.4 LEVEL 4 — ARCHITECTURE CHANGE
+----------------------------------
+Scope: Adding new sensors, actuators, communication paths, or structural
+       modifications to the system.
+
+These changes CANNOT be fully automated. The system generates a
+RECOMMENDATION document that includes:
+  - Engineering specification for the hardware change
+  - Expected performance improvement with uncertainty bounds
+  - Cost-benefit analysis
+  - Integration plan with existing system
+  - Required modifications to control code (as much as can be predicted)
+
+Level 4 changes require human engineering work and are tracked as
+long-term improvement projects.
+
+4.5 SAFETY REVIEW GATE
+-----------------------
+ALL synthesized changes (Levels 1-3) pass through an automated safety
+review before becoming proposals:
+
+```
+function safety_review(synthesis_result):
+    checks = [
+        // Structural checks
+        check_syntax(synthesis_result.diff),
+        check_type_safety(synthesis_result.diff),
+        check_no_infinite_loops(synthesis_result.diff),
+        check_no_dead_code(synthesis_result.diff),
+        
+        // Semantic checks
+        check_output_bounds(synthesis_result.diff, actuator_limits),
+        check_state_space_coverage(synthesis_result.diff, operating_envelope),
+        check_timing_constraints(synthesis_result.diff, cycle_budget),
+        
+        // Behavioral checks (via static analysis + lightweight simulation)
+        check_stability(synthesis_result.diff, linearized_plant_model),
+        check_no_oscillation(synthesis_result.diff, critical_frequencies),
+        check_safety_limits(synthesis_result.diff, safety_critical_variables),
+        
+        // Regression checks
+        check_no_degradation_on_known_cases(synthesis_result.diff, test_suite),
+        check_backward_compatibility(synthesis_result.diff, api_contract),
+    ]
+    
+    failures = [c for c in checks if not c.passed]
+    warnings = [c for c in checks if c.warning]
+    
+    return SafetyReviewResult(
+        approved=(len(failures) == 0),
+        failures=failures,
+        warnings=warnings,
+        overall_risk=compute_risk_score(failures, warnings),
+        required_approvals=compute_approval_level(synthesis_result.level,
+                                                   len(failures),
+                                                   len(warnings)),
+    )
+```
+
+================================================================================
+5. SIMULATION ENGINE
+================================================================================
+
+The Simulation Engine provides a safe sandbox for testing proposed changes
+before they ever touch the real plant. It is NOT a replacement for live
+A/B testing — it is a pre-filter that catches obviously bad changes and
+provides confidence estimates.
+
+5.1 ARCHITECTURE
+----------------
+The simulation engine has three components:
+
+  1. PLANT MODEL — A digital twin of the physical system being controlled.
+     This can be:
+     - First-principles physics model (ideal, but rarely available)
+     - Data-driven model (neural network or state-space identified from
+       historical data)
+     - Hybrid model (physics-informed neural network)
+
+  2. ENVIRONMENT MODEL — Simulates external conditions:
+     - Disturbances (load changes, ambient fluctuations)
+     - Noise (sensor noise, actuator imprecision)
+     - Failures (sensor dropout, actuator degradation)
+     - Context sequences (batch profiles, shift patterns)
+
+  3. REPLAY ENGINE — Feeds historical inputs to both the old and new
+     artifacts simultaneously and compares outputs.
+
+5.2 PLANT MODEL MANAGEMENT
+---------------------------
+```
+PlantModel {
+    id: STRING
+    version: STRING
+    model_type: ENUM            // FIRST_PRINCIPLES | DATA_DRIVEN | HYBRID
+    trained_on: TimeRange       // what historical data was used
+    validation_metrics: {
+        mape: FLOAT32           // mean absolute percentage error
+        r_squared: FLOAT32      // coefficient of determination
+        residual_distribution: DistributionFit
+    }
+    fidelity_score: FLOAT32     // overall model quality (0-1)
+    applicable_conditions: ConditionSet  // where this model is valid
+    last_updated: TIMESTAMP
+}
+```
+
+The plant model is continuously retrained/updated:
+  - Weekly retraining on the most recent 30 days of Tier 2 data
+  - Validation on held-out 20% of training data
+  - If fidelity_score drops below 0.7, the model is flagged and
+    simulation confidence is reduced
+  - Multiple models can coexist for different operating regimes
+
+5.3 HISTORICAL DATA REPLAY
+--------------------------
+The core simulation mechanism:
+
+```
+function simulate_replay(hypothesis, episodes, plant_model, env_model):
+    old_artifact = load_artifact(hypothesis.old_behavior.version)
+    new_artifact = load_artifact(hypothesis.old_behavior.version)
+    apply_diff(new_artifact, hypothesis.proposed_diff)
+    
+    results = []
+    for episode in episodes:
+        // Get historical inputs (sensor readings) for this episode
+        inputs = observation_store.get_sensor_data(
+            start=episode.start_time,
+            end=episode.end_time,
+            node_id=episode.node_id
+        )
+        
+        // Replay through both artifacts
+        old_outputs = []
+        new_outputs = []
+        plant_states_old = []
+        plant_states_new = []
+        
+        // Initialize plant state from 60 seconds before episode
+        pre_episode = observation_store.get_sensor_data(
+            start=episode.start_time - 60s,
+            end=episode.start_time,
+            node_id=episode.node_id
+        )
+        plant_state = plant_model.initialize(pre_episode)
+        
+        for step in inputs:
+            // Both artifacts receive the same plant state
+            old_cmd = old_artifact.compute(step.sensor_data, plant_state)
+            new_cmd = new_artifact.compute(step.sensor_data, plant_state)
+            
+            // Plant evolves based on the OLD command (we're testing
+            // what would have happened if the NEW command had been used)
+            plant_state_new = plant_model.step(plant_state, new_cmd,
+                                                env_model.get_disturbance(step))
+            plant_state_old = plant_model.step(plant_state, old_cmd,
+                                                env_model.get_disturbance(step))
+            
+            old_outputs.append(old_cmd)
+            new_outputs.append(new_cmd)
+            plant_states_old.append(plant_state_old)
+            plant_states_new.append(plant_state_new)
+        
+        // Compute metrics for both trajectories
+        old_metrics = compute_metrics(old_outputs, plant_states_old, inputs)
+        new_metrics = compute_metrics(new_outputs, plant_states_new, inputs)
+        
+        results.append(SimulationStepResult(
+            episode_id=episode.id,
+            old_metrics=old_metrics,
+            new_metrics=new_metrics,
+            delta=new_metrics - old_metrics,
+        ))
+    
+    // Aggregate across all replayed episodes
+    return aggregate_simulation_results(results)
+```
+
+5.4 SIMULATION CONFIDENCE METRIC
+---------------------------------
+The simulation confidence metric answers: "How much should we trust these
+simulation results?"
+
+```
+simulation_confidence = w1 * plant_model.fidelity_score
+                       + w2 * env_model.coverage_score
+                       + w3 * episode_representativeness
+                       + w4 * condition_coverage
+                       - w5 * extrapolation_penalty
+                       - w6 * model_age_penalty
+
+where:
+  w1=0.3  — plant model fidelity is most important
+  w2=0.15 — environment model coverage
+  w3=0.2  — how well the replay episodes cover the target condition
+  w4=0.15 — breadth of conditions tested
+  w5=0.1  — penalty if testing conditions outside training distribution
+  w6=0.1  — penalty for stale models (>7 days since retraining)
+```
+
+Confidence thresholds:
+  - >= 0.8: High confidence — proceed to A/B test
+  - 0.6-0.8: Moderate confidence — proceed with caution, wider safety
+    margins in A/B test
+  - < 0.6: Low confidence — flag as uncertain, require human review
+    before any testing
+
+5.5 EDGE CASE AND FAILURE INJECTION
+------------------------------------
+Beyond normal replay, the simulation engine proactively tests edge cases:
+
+```
+function stress_test(new_artifact, plant_model):
+    edge_cases = [
+        // Extreme conditions
+        ("max_load", {load_factor: 1.5}),
+        ("min_load", {load_factor: 0.1}),
+        ("rapid_transitions", {setpoint_slew_rate: "extreme"}),
+        ("sensor_failure", {sensor_noise: "infinite", sensor: "primary_temp"}),
+        ("actuator_saturation", {actuator_limit: "0.1*normal"}),
+        ("communication_delay", {latency_ms: 500}),
+        ("simultaneous_disturbances", {disturbance_count: 5}),
+        
+        // Boundary conditions
+        ("start_up", {initial_state: "cold"}),
+        ("shut_down", {initial_state: "running", command: "stop"}),
+        ("mode_switch", {mode_from: "auto", mode_to: "manual"}),
+    ]
+    
+    results = []
+    for name, params in edge_cases:
+        try:
+            result = run_simulation(new_artifact, plant_model,
+                                    duration=300s, params=params)
+            if result.safety_violation:
+                results.append(EdgeCaseResult(name, "VIOLATION", result))
+            elif result.degraded_performance > 0.2:
+                results.append(EdgeCaseResult(name, "DEGRADED", result))
+            else:
+                results.append(EdgeCaseResult(name, "PASS", result))
+        except Exception as e:
+            results.append(EdgeCaseResult(name, "CRASH", str(e)))
+    
+    return results
+```
+
+================================================================================
+6. METRICS FRAMEWORK
+================================================================================
+
+The Metrics Framework provides the quantitative foundation for all
+evaluation in the evolution loop. Every hypothesis, simulation, and A/B
+test is evaluated against these metrics.
+
+6.1 METRIC DEFINITIONS
+-----------------------
+
+CONTROL_ACCURACY (Primary Metric):
+  Definition: Root Mean Square (RMS) error between controlled variable(s)
+              and their setpoints, computed over a sliding window.
+  Formula:   RMS = sqrt(mean((actual_i - setpoint_i)^2))
+  Units:     Same as controlled variable (e.g., degrees C, PSI, GPM)
+  Target:    Minimize. Lower is better.
+  Computed:  Every control cycle (10Hz), aggregated to 1-minute means.
+
+CONTROL_EFFORT:
+  Definition: Sum of absolute actuator movements per unit time.
+  Formula:   Effort = sum(|u_i - u_{i-1}|) / delta_t
+  Units:     Actuator units per second (e.g., %/s for valve position)
+  Target:    Minimize (but not at the expense of accuracy).
+  Computed:  Every control cycle, aggregated to 1-minute means.
+  Note:      Excessive effort indicates oscillation or aggressive tuning.
+
+STABILITY:
+  Definition: Variance of the error signal over a sliding window.
+  Formula:   Stability = var(actual_i - setpoint_i)
+  Units:     (controlled variable units)^2
+  Target:    Minimize. Low variance = stable control.
+  Computed:  Every 10 seconds, using a 60-second sliding window.
+  Warning:   If stability increases by >2x after a change, flag for review.
+
+RESPONSE_TIME:
+  Definition: Time from a setpoint change to the controlled variable
+              first entering and remaining within 2% of the new setpoint.
+  Formula:   Time from setpoint_step to min(t where |error(t)| < 0.02 * step_size
+              for all t' >= t, |error(t')| < 0.02 * step_size)
+  Units:     Milliseconds
+  Target:    Minimize (for setpoint changes only; does not apply during
+              steady-state).
+  Computed:  On each setpoint change event, with a maximum observation
+              window of 300 seconds.
+
+SAFETY_MARGIN:
+  Definition: Minimum distance between any controlled/intermediate
+              variable and its safety limit, normalized to [0, 1].
+  Formula:   Margin = min_i(|variable_i - limit_i| / |limit_i|) for all
+              safety-critical variables and limits.
+  Units:     Dimensionless (0 = at limit, 1 = far from limit)
+  Target:    Maintain > 0.1 at all times. Below 0.05 triggers alarm.
+  Computed:  Every control cycle.
+  Note:      This is a NEVER-REGRESS metric. Any change that reduces the
+              minimum observed safety margin is automatically rejected.
+
+HUMAN_OVERRIDES:
+  Definition: Count of human override events per hour, segmented by type.
+  Formula:   Overrides = count(override_events) / elapsed_hours
+  Units:     Events per hour
+  Target:    Minimize. Zero is ideal.
+  Computed:  Real-time, with 1-hour, 4-hour, and 24-hour rolling windows.
+  Note:      This is a strong signal of artifact inadequacy. An increase
+              after a code change is a serious regression indicator.
+
+6.2 REAL-TIME COMPUTATION DURING A/B TESTING
+--------------------------------------------
+During A/B testing, metrics are computed independently for the baseline
+and candidate branches. A dedicated metrics daemon handles this:
+
+```
+class ABMetricsCollector:
+    def __init__(self, baseline_id, candidate_id):
+        self.baseline_buffer = RingBuffer(capacity=10000)
+        self.candidate_buffer = RingBuffer(capacity=10000)
+        self.baseline_metrics = LiveMetrics()
+        self.candidate_metrics = LiveMetrics()
+    
+    def record(self, branch_id, observation):
+        if branch_id == self.baseline_id:
+            self.baseline_buffer.push(observation)
+            self.baseline_metrics.update(observation)
+        elif branch_id == self.candidate_id:
+            self.candidate_buffer.push(observation)
+            self.candidate_metrics.update(observation)
+    
+    def get_comparison(self):
+        return MetricsComparison(
+            baseline=self.baseline_metrics.snapshot(),
+            candidate=self.candidate_metrics.snapshot(),
+            test_duration=now() - self.test_start,
+            baseline_samples=self.baseline_buffer.size(),
+            candidate_samples=self.candidate_buffer.size(),
+            power_analysis=self.compute_power(),
+        )
+    
+    def compute_power(self):
+        // How many more samples do we need to detect a 5% improvement?
+        delta = self.baseline_metrics.primary_metric.mean * 0.05
+        sigma = self.baseline_metrics.primary_metric.stddev
+        current_n = self.candidate_buffer.size()
+        required_n = power_analysis(delta, sigma, alpha=0.05, power=0.80)
+        return PowerAnalysis(
+            current_n=current_n,
+            required_n=required_n,
+            estimated_remaining=required_n - current_n,
+            estimated_completion_time=now() + (required_n - current_n) / self.sample_rate,
+        )
+```
+
+6.3 STATISTICAL TESTING
+------------------------
+At the end of the A/B test (or when power analysis indicates sufficient
+samples), the system performs statistical comparison:
+
+```
+function statistical_test(baseline_metrics, candidate_metrics):
+    // Paired comparison: each episode has both baseline and candidate
+    // measurements (since we're running both on the same conditions,
+    // just at different times or on split traffic)
+    
+    if is_paired:
+        // Paired t-test
+        differences = candidate_metrics.episode_values - baseline_metrics.episode_values
+        t_stat, p_value = scipy.stats.ttest_1samp(differences, 0)
+        
+        // Effect size: Cohen's d for paired samples
+        d = mean(differences) / stddev(differences)
+        
+        // Confidence interval
+        se = stddev(differences) / sqrt(len(differences))
+        ci = (mean(differences) - 1.96*se, mean(differences) + 1.96*se)
+        
+        improvement_pct = mean(differences) / mean(baseline_metrics.episode_values) * 100
+    else:
+        // Independent samples t-test (for non-paired designs)
+        t_stat, p_value = scipy.stats.ttest_ind(
+            candidate_metrics.episode_values,
+            baseline_metrics.episode_values
+        )
+        d = (mean(candidate_metrics.episode_values) - mean(baseline_metrics.episode_values)) / \
+            pooled_stddev(candidate_metrics, baseline_metrics)
+        improvement_pct = d * ... // pooled stddev normalization
+    
+    return StatisticalResult(
+        test_type="paired_t_test" if is_paired else "independent_t_test",
+        t_statistic=t_stat,
+        p_value=p_value,
+        effect_size=d,
+        effect_magnitude="small" if abs(d)<0.5 else "medium" if abs(d)<0.8 else "large",
+        improvement_pct=improvement_pct,
+        confidence_interval=ci,
+        n_baseline=len(baseline_metrics.episode_values),
+        n_candidate=len(candidate_metrics.episode_values),
+        normality_check=shapiro_check(differences if is_paired else None),
+    )
+```
+
+6.4 ACCEPTANCE CRITERIA
+-------------------------
+A change is accepted only if ALL of the following are true:
+
+  1. PRIMARY METRIC: CONTROL_ACCURACY improved by >= 5% (relative), AND
+     the paired t-test yields p < 0.05 (one-sided, testing improvement).
+
+  2. SAFETY: SAFETY_MARGIN did not decrease. If any episode during the
+     test had safety_margin < 0.05, immediate rejection regardless of
+     other metrics.
+
+  3. STABILITY: STABILITY (error variance) did not increase by more than
+     20%. Increased variance indicates potential oscillation.
+
+  4. HUMAN_OVERRIDES: Override rate did not increase by more than 10%.
+     If override rate increased at all, additional scrutiny is applied.
+
+  5. EFFORT: CONTROL_EFFORT did not increase by more than 15% (prevents
+     accepting changes that achieve accuracy through aggressive actuation).
+
+  6. RESPONSE_TIME: Did not degrade by more than 10% for setpoint
+     tracking scenarios.
+
+These criteria are configurable per subsystem and can be tightened for
+safety-critical applications.
+
+================================================================================
+7. PROVENANCE CHAIN — "GIT FOR CONTROL CODE"
+================================================================================
+
+The provenance chain is the backbone that makes evolutionary control
+ trustworthy, auditable, and safe. It is inspired by Git's content-addressed
+storage and branching model, but designed specifically for control code
+with additional metadata for regulatory compliance.
+
+7.1 ARTIFACT VERSIONING
+-----------------------
+Every artifact (control program) is stored as an immutable versioned
+object in a content-addressed store:
+
+```
+ArtifactVersion {
+    version_hash: STRING          // SHA-256 of the artifact content + metadata
+    parent_hash: STRING           // SHA-256 of the parent version (or empty for root)
+    content_hash: STRING          // SHA-256 of just the code content
+    content: BLOB                 // gzipped source code
+    metadata: {
+        author: ENUM              // HUMAN | SYSTEM_LEVEL1 | SYSTEM_LEVEL2 | SYSTEM_LEVEL3
+        author_id: STRING         // user ID or "evolution_engine"
+        timestamp: TIMESTAMP_NS
+        hypothesis_id: UUID|NULL  // linked hypothesis if system-generated
+        description: STRING       // human-readable change description
+        commit_message: STRING    // detailed explanation
+        synthesis_level: INT      // 1-4
+        simulation_results: JSON|NULL
+        ab_test_results: JSON|NULL
+        approval_status: ENUM     // AUTO_APPROVED | HUMAN_APPROVED | PENDING_REVIEW
+        approved_by: STRING|NULL
+        metrics_at_creation: JSON // system metrics at the time of creation
+    }
+    diff_from_parent: STRING|NULL // unified diff for efficient storage
+    signatures: [Signature]       // cryptographic signatures for integrity
+}
+```
+
+7.2 MERKLE TREE STRUCTURE
+--------------------------
+Versions are organized in a Merkle tree for efficient verification and
+synchronization:
+
+```
+                    Root Hash
+                   /         \
+              Branch A       Branch B
+             /        \     /        \
+           v1→v2→v3   v4  v5→v6    v7(v3+v5 merge)
+                                   
+  Where:
+  - v1 is the initial artifact
+  - v2, v3 are evolutionary improvements on the main branch
+  - v4 is an experimental branch (hypothesis test)
+  - v5, v6 are improvements on branch B
+  - v7 is a merge of v3 and v5 (convergent improvements)
+```
+
+Merkle tree operations:
+  - get_root_hash() — Returns the hash of the current production version
+  - verify_integrity() — Walks the tree, verifying every hash chain
+  - get_history(version_hash, depth=N) — Returns N ancestors with metadata
+  - get_diff(version_a, version_b) — Computes the diff between any two versions
+  - find_common_ancestor(version_a, version_b) — For merge conflict detection
+
+7.3 BRANCHING FOR A/B TESTING
+-------------------------------
+When a hypothesis enters the TEST stage:
+
+```
+function create_test_branch(parent_hash, hypothesis):
+    // Create a branch pointer (lightweight, like Git refs)
+    branch = Branch(
+        name=f"test/{hypothesis.id}",
+        target_hash=parent_hash,
+        created_at=now(),
+        hypothesis_id=hypothesis.id,
+        status="TESTING",
+        traffic_split=compute_traffic_split(hypothesis.safety_impact),
+    )
+    
+    // The candidate artifact is a child of the parent
+    candidate = ArtifactVersion(
+        parent_hash=parent_hash,
+        content=apply_diff(get_artifact(parent_hash), hypothesis.diff),
+        metadata={
+            author: "SYSTEM",
+            hypothesis_id: hypothesis.id,
+            approval_status: "PENDING_REVIEW",
+        }
+    )
+    
+    // Both the main branch and the test branch point to their respective
+    // versions. The runtime alternates between them based on traffic_split.
+    branch_store.create(branch)
+    artifact_store.put(candidate)
+    
+    return branch
+```
+
+7.4 MERGING ON ACCEPTANCE
+--------------------------
+When a hypothesis passes A/B testing:
+
+```
+function merge_test_branch(branch_name, test_results):
+    branch = branch_store.get(branch_name)
+    test_version = artifact_store.get(branch.target_hash)
+    main_version = artifact_store.get(branch.parent_hash)
+    
+    // Check for conflicts: has the main branch advanced since the test
+    // was created?
+    current_main = get_production_version()
+    if current_main.version_hash != branch.parent_hash:
+        // Main branch has moved forward. Need to rebase or merge.
+        conflict_check = check_conflicts(test_version, current_main)
+        if conflict_check.has_conflicts:
+            // Re-run simulation with the combined changes
+            combined_diff = merge_diffs(test_version.diff, current_main.diff)
+            sim_result = simulate(combined_diff, ...)
+            if sim_result.confidence < 0.7:
+                return MERGE_REJECTED(reason="conflict_with_newer_changes")
+            // Otherwise, create a merge commit
+            merged = create_merge_commit(current_main, test_version, sim_result)
+        else:
+            merged = fast_forward_merge(test_version)
+    else:
+        merged = fast_forward_merge(test_version)
+    
+    // Update main branch pointer
+    branch_store.update("main", merged.version_hash)
+    
+    // Record the merge in provenance
+    provenance_log.record_merge(
+        source_branch=branch_name,
+        target_branch="main",
+        merge_hash=merged.version_hash,
+        test_results=test_results,
+    )
+    
+    return MERGE_SUCCESS(new_production_hash=merged.version_hash)
+```
+
+7.5 ROLLBACK MECHANISM
+------------------------
+Any version in the history can be restored instantly:
+
+```
+function rollback(target_hash, reason):
+    current = get_production_version()
+    
+    // Verify the target exists and is in our history
+    if not is_ancestor(target_hash, current.version_hash):
+        return ROLLBACK_ERROR("target not in history")
+    
+    // Create a rollback commit (not a branch pointer change — this is
+    // a NEW commit that happens to have the same content as an old one)
+    rollback_version = ArtifactVersion(
+        parent_hash=current.version_hash,
+        content=get_artifact(target_hash).content,
+        metadata={
+            author: "SYSTEM",
+            description: f"ROLLBACK to {target_hash[:8]}: {reason}",
+            rollback_target: target_hash,
+            rollback_reason: reason,
+        }
+    )
+    
+    // Deploy immediately
+    artifact_store.put(rollback_version)
+    deploy_artifact(rollback_version.version_hash)
+    
+    // Notify
+    event_bus.publish("rollback_executed", {
+        "from": current.version_hash,
+        "to": target_hash,
+        "reason": reason,
+        "rollback_commit": rollback_version.version_hash,
+    })
+```
+
+Rollback is guaranteed to complete in < 500ms because:
+  1. All versions are pre-compiled and cached
+  2. The rollback commit references existing content (no recompilation)
+  3. Deployment swaps a pointer, not a file
+
+7.6 REGULATORY EXPORT
+----------------------
+For regulatory review or audit, the system can export the complete
+provenance chain:
+
+```
+function export_for_regulatory(time_range, format="PDF"):
+    versions = get_versions_in_range(time_range)
+    
+    report = RegulatoryReport(
+        period=time_range,
+        versions=[],
+        summary={
+            total_changes: len(versions),
+            system_initiated: count(v.author == "SYSTEM" for v in versions),
+            human_initiated: count(v.author == "HUMAN" for v in versions),
+            rollbacks: count(v.is_rollback for v in versions),
+            avg_improvement_per_change: ...,
+            safety_incidents: ...,
+        }
+    )
+    
+    for v in versions:
+        entry = VersionRecord(
+            version=v.version_hash,
+            timestamp=v.metadata.timestamp,
+            author=v.metadata.author,
+            hypothesis=v.metadata.hypothesis_id,
+            change_description=v.metadata.description,
+            diff=v.diff_from_parent,
+            test_results=v.metadata.ab_test_results,
+            approval=v.metadata.approval_status,
+            metrics_before=v.metadata.metrics_at_creation,
+            metrics_after=get_metrics_after(v.version_hash, window=24h),
+        )
+        report.versions.append(entry)
+    
+    if format == "PDF":
+        return generate_pdf_report(report)
+    elif format == "JSON":
+        return report.to_json()
+    elif format == "CSV":
+        return generate_csv_report(report)
+```
+
+7.7 REPLICATION ACROSS JETSONS AND CLOUD
+------------------------------------------
+The provenance store is replicated using a conflict-free replicated data
+type (CRDT) approach:
+
+  - Each Jetson maintains a local provenance store
+  - Changes are propagated to the cloud via a persistent sync queue
+  - The cloud maintains the authoritative global provenance tree
+  - Jetsons can operate independently for up to 7 days without cloud
+    connectivity, then sync their local changes upstream
+  - Conflict resolution: if two Jetsons independently evolve the same
+    artifact, both branches are preserved and a merge is attempted
+    automatically (falling back to human resolution if conflicts are
+    detected)
+
+Sync protocol:
+```
+function sync_to_cloud(local_store, cloud_store):
+    // Find local commits not yet in cloud
+    local_hashes = local_store.get_all_hashes()
+    cloud_hashes = cloud_store.get_all_hashes()
+    missing_in_cloud = [h for h in local_hashes if h not in cloud_hashes]
+    
+    // Push missing commits in order
+    for h in sorted(missing_in_cloud, key=lambda h: local_store.get(h).timestamp):
+        version = local_store.get(h)
+        cloud_store.put(version)
+    
+    // Pull any commits from other nodes
+    cloud_all = cloud_store.get_all_hashes()
+    missing_locally = [h for h in cloud_all if h not in local_hashes]
+    for h in missing_locally:
+        version = cloud_store.get(h)
+        local_store.put(version)
+    
+    // Reconcile branches
+    reconcile_branches(local_store, cloud_store)
+```
+
+================================================================================
+8. HUMAN FEEDBACK INTEGRATION
+================================================================================
+
+The evolution loop is NOT fully autonomous — human judgment is a first-
+class input, not an afterthought. The system integrates two categories of
+human feedback, both of which influence the DECIDE stage and future
+pattern discovery.
+
+8.1 EXPLICIT FEEDBACK CHANNELS
+-------------------------------
+Users can provide direct, unambiguous feedback through multiple channels:
+
+Button Interface:
+  - Physical or touchscreen buttons on the operator console
+  - Predefined actions: "Good Job", "Not Quite", "Wrong Direction", "Stop"
+  - Each button press is timestamped and associated with the current episode
+  - Button presses can optionally include a free-text comment
+
+Voice Interface:
+  - Voice commands captured via the operator headset or console microphone
+  - Transcribed by on-device ASR (see Agent D's ASR implementation)
+  - Parsed for intent: positive, negative, or neutral sentiment
+  - Examples: "That's better", "No, go back to how it was", "Too aggressive"
+  - Voice feedback is associated with the current episode and any
+    recent artifact version change
+
+Comments/Annotations:
+  - Operators can attach comments to any episode via the HMI
+  - Free-text comments are processed for sentiment and关键词 extraction
+  - Comments are stored in the provenance chain alongside the episode
+
+Structured Review:
+  - For Level 2+ changes, the review form includes:
+    - Approval/Rejection dropdown
+    - Confidence slider (1-5)
+    - Optional comments
+    - Suggested modifications (as text or sketches)
+
+Data model:
+```
+ExplicitFeedback {
+    id: UUID
+    timestamp: TIMESTAMP_NS
+    channel: ENUM              // BUTTON | VOICE | COMMENT | STRUCTURED_REVIEW
+    channel_detail: STRING     // which button, transcription, etc.
+    episode_id: UUID|NULL      // associated episode (NULL if general)
+    artifact_version: STRING   // which version the feedback is about
+    sentiment: ENUM            // POSITIVE | NEGATIVE | NEUTRAL | MIXED
+    confidence: FLOAT32        // confidence in sentiment classification
+    raw_input: STRING          // original button/voice/text input
+    processed_input: JSON      // parsed intent and entities
+    user_id: STRING            // who provided the feedback
+    node_id: STRING            // which Jetson
+    linked_hypothesis: UUID|NULL  // if related to a specific hypothesis
+}
+```
+
+8.2 IMPLICIT FEEDBACK SIGNALS
+------------------------------
+In many cases, the most valuable feedback is what operators DO, not what
+they SAY. The system extracts implicit signals from operator behavior:
+
+Override Frequency:
+  - How often the operator takes manual control
+  - Computed as overrides per hour, with rolling windows (1h, 4h, 24h)
+  - An increase in override frequency after a code change is a strong
+    negative signal
+  - A sustained decrease is a strong positive signal
+
+Override Magnitude:
+  - How far the operator moves the setpoint/actuator from the artifact's
+    command
+  - Large corrections indicate the artifact is significantly wrong
+  - Small corrections indicate the artifact is close but not quite right
+  - Trend analysis: are corrections getting smaller over time?
+
+Time-to-Override:
+  - How quickly the operator intervenes after an episode trigger
+  - Short time-to-override = high operator vigilance = low trust in artifact
+  - Increasing time-to-override = growing trust (or resignation)
+  - Decreasing time-to-override = deteriorating artifact performance
+
+Override Duration:
+  - How long the operator maintains manual control before returning to
+    automatic mode
+  - Long durations indicate the operator does not trust the artifact to
+    handle the current situation
+
+Pattern of Returns:
+  - Does the operator always return to auto mode? (indicates the system
+    is usable even if imperfect)
+  - Does the operator stay in manual for entire shifts? (indicates the
+    system has lost operator trust)
+
+```
+ImplicitFeedback {
+    timestamp: TIMESTAMP_NS
+    episode_id: UUID
+    artifact_version: STRING
+    
+    override_frequency_1h: FLOAT32     // overrides per hour (1h window)
+    override_frequency_24h: FLOAT32    // overrides per hour (24h window)
+    override_frequency_delta: FLOAT32  // change from previous period
+    
+    override_magnitude_mean: FLOAT32   // avg |human - artifact|
+    override_magnitude_max: FLOAT32    // max single correction
+    override_magnitude_trend: FLOAT32  // slope over last 7 days (-1 to 1)
+    
+    time_to_override_ms: FLOAT32       // ms from episode start to first override
+    
+    override_duration_s: FLOAT32       // how long manual mode was active
+    
+    auto_return_rate: FLOAT32          // fraction of overrides that returned to auto
+    
+    composite_trust_score: FLOAT32     // aggregate 0-1 (higher = more trust)
+}
+```
+
+8.3 FEEDBACK-EPISODE ASSOCIATION
+---------------------------------
+All feedback (explicit and implicit) is associated with specific episodes
+and operating conditions. This allows the system to:
+
+  1. Correlate feedback with specific context (e.g., "operators dislike
+     the new behavior during cold starts but like it during normal operation")
+
+  2. Attribute feedback to specific code changes (via the artifact_version
+     field), enabling precise rollback if needed
+
+  3. Weight feedback by operator expertise (configurable per user)
+
+  4. Detect consensus vs. disagreement among operators
+
+8.4 NEGATIVE FEEDBACK → ROLLBACK OFFER
+---------------------------------------
+When negative feedback is detected, the system takes graduated action:
+
+```
+function handle_negative_feedback(feedback, current_episode):
+    if feedback.sentiment == NEGATIVE:
+        // Check if this is a pattern or an isolated incident
+        recent_feedback = get_recent_feedback(window=4h,
+                                              artifact_version=feedback.artifact_version)
+        negative_count = sum(1 for f in recent_feedback if f.sentiment == NEGATIVE)
+        total_count = len(recent_feedback)
+        
+        if negative_count / total_count > 0.5 and total_count >= 3:
+            // Majority negative — offer rollback
+            previous_version = get_previous_version(feedback.artifact_version)
+            
+            notification = RollbackOffer(
+                current_version=feedback.artifact_version,
+                rollback_target=previous_version,
+                reason=f"{negative_count}/{total_count} negative feedback in last 4h",
+                feedback_details=recent_feedback,
+                auto_rollback_in=300,  // seconds until auto-rollback
+            )
+            
+            hmi.display_rollback_offer(notification)
+            event_bus.publish("rollback_offered", notification)
+            
+            // If not dismissed within 5 minutes, auto-rollback
+            schedule_auto_rollback(feedback.artifact_version, previous_version,
+                                   delay=300)
+        
+        elif negative_count >= 2:
+            // Some negative feedback — log and monitor
+            event_bus.publish("negative_feedback_trend", {
+                "count": negative_count,
+                "recent_feedback": recent_feedback,
+            })
+        
+        else:
+            // Isolated negative — record but no action
+            pass
+```
+
+8.5 POSITIVE FEEDBACK WITHOUT METRIC IMPROVEMENT
+-------------------------------------------------
+An important design decision: HUMAN PREFERENCE IS ACCEPTED EVEN WITHOUT
+STATISTICAL IMPROVEMENT. This recognizes that:
+
+  - Operators may value characteristics not captured by current metrics
+    (smoothness, predictability, noise level, etc.)
+  - Operators may prefer a slightly worse-performing algorithm because it
+    is more understandable and predictable
+  - Trust and comfort are legitimate operational concerns
+
+```
+function evaluate_human_preference(feedback, measurement, hypothesis):
+    // If metrics show improvement AND human feedback is positive:
+    //   → Standard acceptance (both agree)
+    
+    // If metrics show improvement BUT human feedback is negative:
+    //   → Escalate to human review (metrics say yes, human says no)
+    
+    // If metrics show NO improvement BUT human feedback is positive:
+    positive_feedback = get_explicit_feedback(hypothesis.id, sentiment=POSITIVE)
+    if len(positive_feedback) >= 3:  // at least 3 different operators
+        return ACCEPT(
+            reason="human_preference_override",
+            detail=f"{len(positive_feedback)} operators expressed positive "
+                   f"preference despite no statistical improvement "
+                   f"(improvement={measurement.improvement_pct:.1f}%, "
+                   f"p={measurement.p_value:.3f})",
+            condition="retain_for_90_days_then_re_evaluate"
+        )
+    
+    // If metrics show degradation AND human feedback is positive:
+    //   → Accept with monitoring window and automatic revert if metrics
+    //     degrade beyond 10%
+    
+    return measure.decision  // default to statistical decision
+```
+
+8.6 LEARNING FROM REJECTION REASONS
+------------------------------------
+When a human rejects a proposed change, the system extracts the rejection
+reason and uses it to improve future proposals:
+
+```
+function learn_from_rejection(hypothesis, rejection):
+    // Parse rejection reason
+    reason = parse_rejection_reason(rejection.feedback)
+    // reason could be: "too_aggressive", "wrong_direction",
+    // "not_applicable_to_this_unit", "unsafe_condition_X",
+    // "already_tried_and_failed", etc.
+    
+    // Update the pattern discovery weights
+    pattern_store.update_rejection(
+        pattern_id=hypothesis.pattern_ref,
+        reason=reason,
+        conditions=hypothesis.conditions,
+    )
+    
+    // Add to the "avoid" list for code synthesis
+    if reason == "too_aggressive":
+        synthesis_constraints.add(hypothesis.conditions,
+                                  "max_actuator_slew_rate",
+                                  "reduce_by_50%")
+    elif reason == "wrong_direction":
+        synthesis_constraints.add(hypothesis.conditions,
+                                  "correction_sign",
+                                  "invert")
+    
+    // If the same type of hypothesis has been rejected 3+ times:
+    rejection_count = hypothesis_store.count_rejections(
+        hypothesis.pattern_ref,
+        synthesis_level=hypothesis.synthesis_level
+    )
+    if rejection_count >= 3:
+        // Escalate to Level 3 (algorithm) or Level 4 (architecture)
+        // — the current approach fundamentally doesn't work
+        escalation = Escalation(
+            pattern_id=hypothesis.pattern_ref,
+            message=f"Level {hypothesis.synthesis_level} approach rejected "
+                    f"{rejection_count} times. Consider higher-level change.",
+            suggested_level=min(hypothesis.synthesis_level + 1, 4),
+        )
+        event_bus.publish("pattern_escalation", escalation)
+    
+    // Train the synthesis LLM on the rejection
+    if rejection.free_text:
+        synthesis_training_data.add_negative_example(
+            context=hypothesis_to_context(hypothesis),
+            output=hypothesis.proposed_diff,
+            feedback=rejection.free_text,
+        )
+```
+
+================================================================================
+CONCLUSION AND DESIGN PRINCIPLES
+================================================================================
+
+The Evolutionary Code System is designed around these principles:
+
+1. TRANSPARENCY: Every change is human-readable, diffable, and explained.
+   No black-box optimization. The operator can always understand what
+   changed and why.
+
+2. EVIDENCE-BASED: No change is deployed without statistical evidence of
+   improvement. The bar is intentionally high (5% improvement + 95%
+   confidence) to prevent churn.
+
+3. HUMAN-CENTERED: Human feedback is a first-class input that can
+   override statistical metrics. The system serves the operator, not
+   the other way around.
+
+4. SAFE BY DEFAULT: Multiple safety gates (simulation, safety review,
+   A/B testing with traffic splitting, automatic rollback). The system
+   assumes changes are dangerous until proven otherwise.
+
+5. AUDITABLE: Complete provenance chain with cryptographic integrity.
+   Every change can be traced back to its originating hypothesis,
+   supporting evidence, test results, and approval chain.
+
+6. PROGRESSIVE: Changes start small (parameter tweaks) and escalate to
+   larger modifications only when evidence warrants it. The system
+   naturally converges on the right level of intervention.
+
+7. RESILIENT: The system operates correctly even when the cloud is
+   unavailable, when sensors degrade, or when the plant model is
+   inaccurate. Low-confidence situations are flagged for human review
+   rather than producing unreliable autonomous changes.
+
+This architecture enables NEXUS to continuously improve its control
+performance while maintaining the trust, safety, and regulatory
+compliance required for industrial operation.
+
+================================================================================
+END OF DOCUMENT 06 — EVOLUTIONARY CODE SYSTEM
+================================================================================

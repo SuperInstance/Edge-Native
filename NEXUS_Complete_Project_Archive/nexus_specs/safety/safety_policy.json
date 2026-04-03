@@ -1,0 +1,864 @@
+{
+  "_document": {
+    "title": "NEXUS Platform Safety Policy",
+    "version": "2.0.0",
+    "date": "2025-01-15",
+    "schema_version": "1.0.0",
+    "description": "Machine-readable safety rules for the NEXUS distributed intelligence platform. The validation pipeline programmatically checks all generated code artifacts against this policy.",
+    "compliance_refs": ["IEC 61508", "ISO 26262", "IEC 60945", "ABYC A-33"],
+    "enforcement": "All rules are enforced at compile-time (static analysis), run-time (watchdog/monitoring), and deployment-time (pipeline gates). No rule may be overridden without a signed safety review."
+  },
+
+  "global_safety_rules": [
+    {
+      "id": "SR-001",
+      "title": "Explicit Enable Signal Required for Actuation",
+      "description": "No actuator may activate without an explicit, separate enable signal. The enable signal must be independent of the control signal. A single control value alone must never be sufficient to drive an actuator output pin HIGH.",
+      "severity": "CRITICAL",
+      "check_method": "static_analysis",
+      "tool": "clang-tidy + custom AST checker: for every gpio_set_level(pin, HIGH) call, verify that a preceding safety_enable[channel] == true check exists in the same or enclosing function scope. Also check that the enable flag is set by a separate code path from the control value computation.",
+      "code_pattern": {
+        "violation_regex": "gpio_set_level\\s*\\(\\s*\\w+\\s*,\\s*(?:1|true|HIGH)\\s*\\)(?![\\s\\S]*?safety_enable|enable_pin|actuator_enable)",
+        "ast_pattern": {
+          "type": "function_call",
+          "name": "gpio_set_level",
+          "argument_1_value": ["1", "true", "HIGH"],
+          "must_have_ancestor": {
+            "type": "conditional",
+            "contains_identifier": "safety_enable"
+          }
+        },
+        "notes": "AST pattern check is the primary method. Regex is a supplementary heuristic for quick scanning."
+      },
+      "remediation": "Add an independent enable gate: wrap all gpio_set_level(pin, HIGH) calls inside `if (safety_enable[actuator_id]) { ... }`. The enable flag must be set by a separate safety task, never by the same control computation that sets the output value.",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-002",
+      "title": "Timeout Watchdog on All Control Loops",
+      "description": "Every control loop (PID, reflex, feedback, or iterative computation) must have a timeout watchdog. If the loop does not complete within its specified time budget, the system must abort the loop iteration and enter a safe state for that actuator.",
+      "severity": "CRITICAL",
+      "check_method": "static_analysis",
+      "tool": "custom AST checker: identify all while/for loops that compute actuator outputs. Verify each contains a break condition based on an elapsed-time check (e.g., xTaskGetTickCount() - start_time > timeout_ms) or is bounded by a known-constant iteration count validated against worst-case execution time.",
+      "code_pattern": {
+        "violation_ast": {
+          "type": "loop",
+          "contains_actuator_write": true,
+          "missing_time_bound": true
+        },
+        "violation_regex": "(?:while|for)\\s*\\([^)]*\\)[\\s\\S]{0,500}(?:gpio_set_level|pwm_set_duty|ledc_set_duty)(?![\\s\\S]{0,300}(?:xTaskGetTickCount|esp_timer_get_time|timeout|deadline|TICK|elapsed))",
+        "notes": "Any loop that can write to an actuator pin must have a time-based exit condition."
+      },
+      "remediation": "Add `TickType_t loop_start = xTaskGetTickCount();` before the loop and `if (xTaskGetTickCount() - loop_start > pdMS_TO_TICKS(timeout_ms)) { break; }` as the first statement inside the loop body.",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-003",
+      "title": "Defined Safe-State Value for Every Actuator",
+      "description": "Every actuator configured on any node must have a defined safe-state value in the safety configuration. This value is applied on boot, on watchdog timeout, on heartbeat loss, and on any safety event that triggers a failsafe.",
+      "severity": "CRITICAL",
+      "check_method": "config_validation",
+      "tool": "JSON schema validator at deployment time: every entry in node_config.actuators[] must have a matching entry in safety_policy.actuator_profiles[actuator.type].safe_value. Fail deployment if any actuator lacks a defined safe-state.",
+      "code_pattern": {
+        "violation_schema": {
+          "path": "$.nodes[*].actuators[*]",
+          "required_fields": ["type", "safe_value"],
+          "reference": "$.actuator_profiles[*].safe_value"
+        }
+      },
+      "remediation": "Add a `safe_value` field to the actuator configuration. If the actuator type is not in the actuator_profiles table, the deployment must be blocked until the safety engineer adds the profile.",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-004",
+      "title": "Single Sensor Failure Shall Not Cause Uncontrolled Actuation",
+      "description": "No single sensor reading (or lack thereof) may cause an actuator to move to an unsafe position. Sensor failures must be detected (stale data, out-of-range, CRC error) and the system must gracefully degrade to a safe state rather than reacting to bad data.",
+      "severity": "CRITICAL",
+      "check_method": "static_analysis + runtime",
+      "tool": "AST checker: for every control computation that reads a sensor and writes an actuator, verify there is a sensor_validity check (stale timeout, range check, or CRC check) between the sensor read and the actuator write. Runtime: sensor watchdog task monitors all sensor channels for staleness.",
+      "code_pattern": {
+        "violation_ast": {
+          "type": "data_flow",
+          "from": "sensor_read",
+          "to": "actuator_write",
+          "missing_intermediate": "sensor_validity_check"
+        },
+        "violation_regex": "(?:sensor_read|adc_read|i2c_read|read_|get_)(?:\\w+)[\\s\\S]{0,500}(?:gpio_set_level|pwm_set_duty|ledc_set_duty|actuator_set)(?![\\s\\S]{0,200}(?:sensor_valid|data_stale|timeout|crc|range_check|is_valid))",
+        "notes": "Data-flow analysis is the primary check. Regex is supplementary."
+      },
+      "remediation": "Add a sensor validity gate: `if (!sensor_is_valid(sensor_id, max_age_ms)) { set_actuator_safe(actuator_id); return; }` before any control computation that uses that sensor's value.",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-005",
+      "title": "Rate Limiting on All Actuators",
+      "description": "All actuators must have configurable rate limiting to prevent abrupt transitions that could cause mechanical stress, instability, or danger. Rate limiting must be applied at the output driver level, not just at the command level.",
+      "severity": "HIGH",
+      "check_method": "static_analysis + config_validation",
+      "tool": "AST checker: for every actuator write function, verify a rate_limit_apply() or equivalent function is called before the actual hardware write. Config validator: every actuator in the node config must have a rate_limit field matching its actuator profile.",
+      "code_pattern": {
+        "violation_ast": {
+          "type": "function_call",
+          "name": ["gpio_set_level", "ledc_set_duty", "pwm_set_duty", "dac_output_voltage"],
+          "missing_preceding_call": "rate_limit"
+        },
+        "violation_regex": "(?:gpio_set_level|ledc_set_duty|pwm_set_duty|dac_output_voltage)\\s*\\((?![\\s\\S]{0,300}rate_limit)"
+      },
+      "remediation": "Apply rate limiting before every actuator write: `value = rate_limit_apply(channel, requested_value, max_delta_per_period, period_ms);` then write `value` to the hardware.",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-006",
+      "title": "Watchdog Timer Disable Prohibition",
+      "description": "No code path may disable, reconfigure to a longer timeout, or bypass the watchdog timer. The watchdog is a critical safety mechanism and must remain active at all times during normal operation.",
+      "severity": "CRITICAL",
+      "check_method": "static_analysis",
+      "tool": "AST checker: flag any call to esp_task_wdt_delete(), esp_task_wdt_reset() without a preceding esp_task_wdt_add(), iwdg_disable(), wdt_disable(), or any assignment to WDT registers. Also flag any #define that redefines the WDT timeout to a larger value.",
+      "code_pattern": {
+        "violation_regex": "(?:esp_task_wdt_delete|wdt_disable|iwdg_disable|WDT\\.disable|WATCHDOG_DISABLE|esp_task_wdt_init\\s*\\(\\s*\\d+\\s*,\\s*false)|(?:#define\\s+WDT_TIMEOUT\\s+\\d+)",
+        "forbidden_apis": [
+          "esp_task_wdt_delete",
+          "wdt_disable",
+          "iwdg_disable",
+          "WDT.disable",
+          "esp_task_wdt_init(timeout, false)"
+        ],
+        "notes": "esp_task_wdt_init with reset=true is permitted. esp_task_wdt_init with reset=false is a violation."
+      },
+      "remediation": "Remove any code that disables the watchdog. If a long operation is needed, use watchdog feed (kick) operations within the operation, or split the operation into smaller chunks that each complete within the WDT timeout.",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-007",
+      "title": "Emergency Stop Has Highest Priority",
+      "description": "The emergency stop (kill switch) must have the highest interrupt priority in the system. No other ISR, task, or code path may block, delay, or preempt the emergency stop handler. The E-Stop ISR must run to completion without any blocking operations.",
+      "severity": "CRITICAL",
+      "check_method": "static_analysis",
+      "tool": "AST checker: verify the E-Stop ISR is registered at the highest available interrupt priority (e.g., ESP_INTR_FLAG_LEVEL1 on ESP32, or the numerical highest priority). Verify no other ISR is registered at the same or higher priority. Verify the E-Stop ISR body contains no blocking calls (no vTaskDelay, no xQueueSend with non-zero timeout, no mutex operations).",
+      "code_pattern": {
+        "violation_ast": {
+          "type": "function",
+          "attributes": ["ISR", "interrupt"],
+          "name_contains": "estop|kill_switch|emergency",
+          "priority_check": "must_be_highest",
+          "body_must_not_contain": ["vTaskDelay", "xQueueSend", "xSemaphoreTake", "xQueueReceive", "vTaskSuspend", "portYIELD"]
+        },
+        "violation_regex": "(?:gpio_isr_handler_add|gpio_install_isr_service).*?(?:estop|kill|emergency)[\\s\\S]{0,200}(?:vTaskDelay|xQueueSend[^,]*,\\s*(?!0\\s*\\))|xSemaphoreTake[^,]*,\\s*(?!0\\s*\\)))"
+      },
+      "remediation": "Register the E-Stop ISR at the highest interrupt priority. Remove all blocking operations from the ISR body. The ISR should only: (1) set a volatile flag, (2) immediately write all actuator GPIOs to safe values, (3) notify a deferred handler task via xSemaphoreGiveFromISR() with a zero timeout.",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-008",
+      "title": "All Outputs LOW/SAFE on Boot",
+      "description": "All GPIO outputs must be driven to their safe state (LOW for most actuators) during the earliest stage of boot, before any configuration is loaded. This ensures that no actuator can activate due to uninitialized pin states during the boot process.",
+      "severity": "CRITICAL",
+      "check_method": "static_analysis",
+      "tool": "AST checker: verify that the app_main() or equivalent entry point contains a call to an init_safe_outputs() or gpio_safe_init() function as its FIRST operation (before NVS load, before peripheral init, before any task creation). Verify this function sets all actuator-capable GPIOs to their defined safe state.",
+      "code_pattern": {
+        "violation_ast": {
+          "type": "function",
+          "name": ["app_main", "main"],
+          "first_statement_must_call": ["gpio_safe_init", "init_safe_outputs", "safety_init_outputs"],
+          "before_any_call_to": ["nvs_flash_init", "nvs_open", "i2c_init", "spi_init", "uart_init", "xTaskCreate", "mqtt_client_init"]
+        },
+        "violation_regex": "void\\s+app_main\\s*\\([^)]*\\)\\s*\\{(?![\\s\\S]{0,300}(?:gpio_safe_init|init_safe_outputs|safety_init_outputs))",
+        "notes": "The safe output init must be the very first thing in app_main, before ANY other initialization."
+      },
+      "remediation": "Add `gpio_safe_init();` as the first line of app_main(). This function must iterate over all configured actuator pins and drive them to their safe-state value using gpio_set_direction() and gpio_set_level() before any other peripheral is initialized.",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-009",
+      "title": "Division-by-Zero Protection for Floating Point",
+      "description": "All floating-point division operations must be protected against division by zero. A zero or near-zero denominator must be detected and handled before the division is performed. This applies to all floating-point division operators (/) and all division function calls (div, fmod, etc.).",
+      "severity": "HIGH",
+      "check_method": "static_analysis",
+      "tool": "AST checker: for every floating-point division operation (binary operator / where either operand is float/double, or calls to fmod, divf, etc.), verify there is a preceding check that the denominator is not zero or within an epsilon of zero.",
+      "code_pattern": {
+        "violation_ast": {
+          "type": "binary_op",
+          "operator": "/",
+          "right_operand_type": ["float", "double", "float32_t", "float64_t"],
+          "missing_preceding_check": {
+            "denominator_not_zero": true,
+            "epsilon": "1e-6 or configurable"
+          }
+        },
+        "violation_regex": "(?:float|double|float32_t|float64_t)\\s+\\w+\\s*=\\s*(?:\\w+|\\([^)]+\\))\\s*/\\s*(\\w+)(?![\\s\\S]{0,100}(?:fabs\\s*\\(\\s*\\1\\s*\\)\\s*>|!=\\s*0|!=\\s*0\\.0|>\\s*EPSILON|>\\s*1e-|ZERO_CHECK))",
+        "notes": "The check must be for the specific denominator variable, not a generic check."
+      },
+      "remediation": "Before every float division: `if (fabs(denominator) < EPSILON) { handle_error(); denominator = EPSILON; /* or return safe default */ }`. Use a project-wide EPSILON constant (default: 1e-6f).",
+      "applicable_roles": ["ALL"]
+    },
+    {
+      "id": "SR-010",
+      "title": "Bounded Iteration Count for Reflex Loops",
+      "description": "All reflex loops (including those generated dynamically) must have a bounded, statically-determinable maximum iteration count. This prevents infinite loops in reflex processing that could starve the watchdog or other safety-critical tasks.",
+      "severity": "HIGH",
+      "check_method": "static_analysis",
+      "tool": "AST checker: identify all loops within reflex execution paths. Verify each loop has a constant upper bound (e.g., `for (int i = 0; i < MAX_REFLEX_ITERATIONS; i++)` where MAX_REFLEX_ITERATIONS is a #define or constexpr). Loops with variable bounds must have a secondary absolute upper bound check.",
+      "code_pattern": {
+        "violation_ast": {
+          "type": "loop",
+          "in_reflex_context": true,
+          "bound_type": ["unbounded", "variable_without_max_cap"]
+        },
+        "violation_regex": "(?:while\\s*\\(\\s*true\\s*\\)|while\\s*\\(\\s*1\\s*\\)|for\\s*\\(\\s*;\\s*;\\s*\\))",
+        "context_regex": "reflex",
+        "notes": "Infinite loops (`while(true)`) in reflex code are always a violation unless they contain a bounded break with a constant maximum iteration count."
+      },
+      "remediation": "Add a maximum iteration counter: `int iterations = 0; while (condition && iterations < MAX_REFLEX_ITERATIONS) { ... iterations++; }`. MAX_REFLEX_ITERATIONS must be defined as a constant (recommended: 100). Reflex loops with variable bounds must additionally check `iterations < ABSOLUTE_MAX` (recommended: 1000).",
+      "applicable_roles": ["ALL"]
+    }
+  ],
+
+  "actuator_safety_profiles": {
+    "_comment": "Default safety parameters for each actuator type. Node configs reference these by type. Values can be overridden per-instance in the node configuration with a safety_engineer sign-off.",
+    "servo": {
+      "type": "servo",
+      "description": "RC servo via PWM (typical 50Hz, 1-2ms pulse)",
+      "safe_state": {
+        "pulse_us": 1500,
+        "description": "Center position (neutral)"
+      },
+      "default_value": {
+        "pulse_us": 1500
+      },
+      "limits": {
+        "min_pulse_us": 500,
+        "max_pulse_us": 2500,
+        "min_angle_deg": null,
+        "max_angle_deg": null,
+        "_comment": "Angle limits are set per-instance based on mechanical setup"
+      },
+      "rate_limiting": {
+        "max_delta_us_per_10ms": 200,
+        "description": "Maximum pulse width change per 10ms period. Prevents jerky motion."
+      },
+      "startup_behavior": {
+        "initial_output": "safe_state",
+        "require_explicit_enable": true
+      },
+      "monitoring": {
+        "stall_detection": false,
+        "current_monitoring": false,
+        "position_feedback": "optional"
+      }
+    },
+    "relay": {
+      "type": "relay",
+      "description": "Electromechanical or solid-state relay",
+      "safe_state": {
+        "state": "OPEN",
+        "description": "Relay de-energized (normally-open contact)"
+      },
+      "default_value": {
+        "state": "OPEN"
+      },
+      "limits": {
+        "max_on_time_ms": 5000,
+        "cooldown_after_off_ms": 1000,
+        "min_on_time_ms": 50,
+        "_comment": "Minimum on-time prevents relay chattering from rapid cycling"
+      },
+      "hardware_requirements": {
+        "flyback_diode": true,
+        "flyback_diode_spec": "1N4007 or equivalent, across relay coil",
+        "description": "Mandatory flyback diode across inductive relay coil to prevent voltage spikes"
+      },
+      "rate_limiting": {
+        "max_cycles_per_minute": 30,
+        "description": "Prevents excessive relay cycling that could cause wear or overheating"
+      },
+      "startup_behavior": {
+        "initial_output": "safe_state",
+        "require_explicit_enable": true
+      },
+      "monitoring": {
+        "current_monitoring": true,
+        "contact_wear_counter": true,
+        "max_lifetime_cycles": 1000000
+      }
+    },
+    "motor_pwm": {
+      "type": "motor_pwm",
+      "description": "DC motor controlled via PWM duty cycle",
+      "safe_state": {
+        "duty_percent": 0.0,
+        "description": "Motor stopped (0% duty cycle)"
+      },
+      "default_value": {
+        "duty_percent": 0.0
+      },
+      "limits": {
+        "max_duty_percent": 100.0,
+        "min_duty_percent": 0.0,
+        "max_reverse_duty_percent": null,
+        "_comment": "Bidirectional motor: set max_reverse_duty_percent to negative value if supported"
+      },
+      "rate_limiting": {
+        "max_delta_percent_per_100ms": 10.0,
+        "description": "Maximum duty cycle change per 100ms. 0-100% ramp takes minimum 1 second."
+      },
+      "overcurrent_protection": {
+        "enabled": true,
+        "threshold_a": null,
+        "_comment": "Configurable per-instance. Typical: 2x nominal motor current.",
+        "threshold_default_a": 5.0,
+        "response": "immediate_output_disable",
+        "recovery_requires_manual_reset": true
+      },
+      "hardware_requirements": {
+        "flyback_diode": true,
+        "flyback_diode_spec": "Schottky diode across motor terminals (e.g., SR305)",
+        "polyfuse": true,
+        "polyfuse_spec": "PTC fuse rated at 1.5x nominal motor current hold"
+      },
+      "startup_behavior": {
+        "initial_output": "safe_state",
+        "require_explicit_enable": true,
+        "soft_start_enabled": true,
+        "soft_start_ramp_ms": 500
+      },
+      "monitoring": {
+        "current_monitoring": true,
+        "rpm_feedback": "optional",
+        "temperature_monitoring": "recommended"
+      }
+    },
+    "solenoid": {
+      "type": "solenoid",
+      "description": "Hydraulic or pneumatic solenoid valve",
+      "safe_state": {
+        "state": "DEENERGIZED",
+        "description": "Solenoid de-energized (spring-return to default position)"
+      },
+      "default_value": {
+        "state": "DEENERGIZED"
+      },
+      "limits": {
+        "max_on_time_ms": 5000,
+        "cooldown_after_off_ms": 1000,
+        "min_on_time_ms": 50,
+        "_comment": "5000ms max continuous prevents coil overheating"
+      },
+      "hardware_requirements": {
+        "flyback_diode": true,
+        "flyback_diode_spec": "1N4007 or equivalent, across solenoid coil",
+        "polyfuse": true,
+        "polyfuse_spec": "PTC fuse rated at 1.5x solenoid hold current"
+      },
+      "rate_limiting": {
+        "max_activations_per_10s": 5,
+        "description": "Limits cycling frequency to prevent thermal damage"
+      },
+      "startup_behavior": {
+        "initial_output": "safe_state",
+        "require_explicit_enable": true
+      },
+      "monitoring": {
+        "current_monitoring": true,
+        "undercurrent_detection": true,
+        "undercurrent_threshold_ma": 100,
+        "undercurrent_description": "Detects open-circuit (disconnected coil)"
+      }
+    },
+    "led": {
+      "type": "led",
+      "description": "Indicator LED (no safety-critical actuation)",
+      "safe_state": {
+        "state": "OFF",
+        "description": "LED off"
+      },
+      "default_value": {
+        "state": "OFF"
+      },
+      "limits": {
+        "max_on_time_ms": null,
+        "_comment": "No time limit for LEDs"
+      },
+      "rate_limiting": {
+        "enabled": false,
+        "_comment": "LEDs do not require rate limiting for safety"
+      },
+      "startup_behavior": {
+        "initial_output": "safe_state",
+        "require_explicit_enable": false,
+        "_comment": "LEDs are status indicators, not actuators. Enable gating not required."
+      },
+      "monitoring": {
+        "current_monitoring": false
+      },
+      "safety_class": "non_critical"
+    },
+    "buzzer": {
+      "type": "buzzer",
+      "description": "Audible alarm buzzer (hearing protection required)",
+      "safe_state": {
+        "state": "OFF",
+        "description": "Buzzer silent"
+      },
+      "default_value": {
+        "state": "OFF"
+      },
+      "limits": {
+        "max_on_time_ms": 30000,
+        "cooldown_after_off_ms": 5000,
+        "_comment": "30-second maximum continuous activation for hearing protection per IEC 60945",
+        "max_on_time_description": "Continuous alarm must not exceed 30 seconds to prevent hearing damage. Pattern must include silent intervals."
+      },
+      "rate_limiting": {
+        "enabled": true,
+        "max_duty_cycle_percent": 50,
+        "description": "Buzzer must have at least 50% off-time in any alarm pattern"
+      },
+      "startup_behavior": {
+        "initial_output": "safe_state",
+        "require_explicit_enable": false,
+        "_comment": "Buzzer enable gating handled by alarm system, not per-actuator enable"
+      },
+      "monitoring": {
+        "current_monitoring": false
+      },
+      "safety_class": "indicator"
+    }
+  },
+
+  "domain_specific_safety_rules": {
+    "_comment": "Domain-specific safety thresholds that override actuator defaults when a domain is configured. These are the MAXIMUM permissible values. Node configs may set MORE restrictive values but never less restrictive. Values can be overridden per-domain config with a safety_engineer sign-off.",
+    "marine": {
+      "domain_id": "marine",
+      "description": "Marine/autonomous surface vessel operations",
+      "compliance_refs": ["IEC 60945", "ABYC A-33", "ISO 16315"],
+      "overrides": {
+        "max_rudder_deflection_deg": {
+          "value": 45,
+          "unit": "degrees",
+          "description": "Maximum rudder angle from center. Mechanical hard stops must be at or beyond this value.",
+          "rationale": "Beyond 45 degrees provides minimal additional turning moment while greatly increasing drag and risk of mechanical binding."
+        },
+        "max_throttle_percent": {
+          "value": 80,
+          "unit": "percent",
+          "description": "Maximum throttle in autonomous mode. Manual override allowed up to 100%.",
+          "rationale": "80% cap provides reserve for emergency maneuvers and reduces risk of collision at high speed."
+        },
+        "depth_min_for_autopilot_m": {
+          "value": 3.0,
+          "unit": "meters",
+          "description": "Minimum water depth to engage autopilot. Below this depth, autopilot must disengage.",
+          "rationale": "Shallow water requires human judgment for obstacle avoidance. GPS accuracy may be insufficient."
+        },
+        "max_speed_autonomous_kmh": {
+          "value": 15.0,
+          "unit": "km/h",
+          "description": "Maximum speed in full autonomous mode."
+        },
+        "max_wind_speed_autonomous_kmh": {
+          "value": 40.0,
+          "unit": "km/h",
+          "description": "Maximum wind speed for autonomous operation. Disengage above this."
+        },
+        "heartbeat_timeout_degraded_ms": {
+          "value": 500,
+          "unit": "milliseconds"
+        },
+        "heartbeat_timeout_safe_ms": {
+          "value": 1000,
+          "unit": "milliseconds"
+        }
+      }
+    },
+    "agriculture": {
+      "domain_id": "agriculture",
+      "description": "Agricultural automation (spraying, seeding, harvesting)",
+      "compliance_refs": ["ISO 4254-1", "EN ISO 3691-4"],
+      "overrides": {
+        "max_spray_pressure_psi": {
+          "value": 80,
+          "unit": "psi",
+          "description": "Maximum spray system pressure. Higher pressures create fine droplets that drift.",
+          "rationale": "OSHA and EPA drift mitigation. >80 psi significantly increases drift risk."
+        },
+        "max_vehicle_speed_kmh": {
+          "value": 15,
+          "unit": "km/h",
+          "description": "Maximum autonomous vehicle speed in field operations.",
+          "rationale": "15 km/h is the maximum safe speed for obstacle detection at typical sensor ranges in agricultural environments."
+        },
+        "max_spray_flow_rate_lpm": {
+          "value": 20,
+          "unit": "liters per minute"
+        },
+        "proximity_stop_distance_m": {
+          "value": 2.0,
+          "unit": "meters",
+          "description": "Stop distance for proximity detection of humans/animals."
+        },
+        "max_implement_width_m": {
+          "value": 30.0,
+          "unit": "meters",
+          "description": "Maximum implement width for geofence calculations."
+        },
+        "heartbeat_timeout_degraded_ms": {
+          "value": 500,
+          "unit": "milliseconds"
+        },
+        "heartbeat_timeout_safe_ms": {
+          "value": 1000,
+          "unit": "milliseconds"
+        }
+      }
+    },
+    "hvac": {
+      "domain_id": "hvac",
+      "description": "HVAC (Heating, Ventilation, Air Conditioning) control systems",
+      "compliance_refs": ["ASHRAE 135", "ISO 16484", "EN 15232"],
+      "overrides": {
+        "max_zone_temp_delta_c": {
+          "value": 5.0,
+          "unit": "degrees Celsius",
+          "description": "Maximum allowed temperature delta between zones. Prevents thermal stress in buildings.",
+          "rationale": "ASPHRAE recommends no more than 3C difference between adjacent zones for comfort. 5C is absolute maximum."
+        },
+        "min_zone_temp_c": {
+          "value": 5.0,
+          "unit": "degrees Celsius",
+          "description": "Minimum allowable zone temperature. Below this, freeze protection activates.",
+          "rationale": "Pipe freeze protection. Below 5C, water pipes are at risk."
+        },
+        "max_zone_temp_c": {
+          "value": 40.0,
+          "unit": "degrees Celsius",
+          "description": "Maximum allowable zone temperature. Above this, overheat protection activates.",
+          "rationale": "Occupant safety and equipment protection. Above 40C is unsafe for sustained occupancy."
+        },
+        "max_humidity_percent": {
+          "value": 70,
+          "unit": "percent RH",
+          "description": "Maximum humidity before mold prevention activates."
+        },
+        "min_humidity_percent": {
+          "value": 20,
+          "unit": "percent RH",
+          "description": "Minimum humidity before humidification activates. Below 20% causes discomfort."
+        },
+        "max_fan_speed_percent": {
+          "value": 100,
+          "unit": "percent"
+        },
+        "heartbeat_timeout_degraded_ms": {
+          "value": 2000,
+          "unit": "milliseconds",
+          "_comment": "HVAC systems can tolerate longer communication delays due to thermal inertia"
+        },
+        "heartbeat_timeout_safe_ms": {
+          "value": 5000,
+          "unit": "milliseconds"
+        }
+      }
+    },
+    "factory": {
+      "domain_id": "factory",
+      "description": "Factory/industrial automation and robotics",
+      "compliance_refs": ["ISO 10218-1", "ISO/TS 15066", "IEC 62443"],
+      "overrides": {
+        "min_proximity_m": {
+          "value": 0.3,
+          "unit": "meters",
+          "description": "Minimum safe distance between robot/equipment and human operator. Below this, immediate stop.",
+          "rationale": "ISO 10218-1 collaborative robot minimum separation distance. Adjusted for typical industrial robot speeds and stopping distances."
+        },
+        "max_robot_speed_m_s": {
+          "value": 1.0,
+          "unit": "meters per second",
+          "description": "Maximum robot end-effector speed in autonomous mode. Reduced speed for human-shared workspaces.",
+          "rationale": "ISO/TS 15066 collaborative operation speed limit for transient contact scenarios."
+        },
+        "max_robot_force_n": {
+          "value": 150,
+          "unit": "Newtons",
+          "description": "Maximum allowable contact force before emergency stop triggers."
+        },
+        "safety_zone_violation_action": {
+          "value": "immediate_stop_and_alarm",
+          "description": "Action when safety zone boundary is violated"
+        },
+        "max_conveyor_speed_m_s": {
+          "value": 2.0,
+          "unit": "meters per second"
+        },
+        "heartbeat_timeout_degraded_ms": {
+          "value": 200,
+          "unit": "milliseconds",
+          "_comment": "Factory requires fast heartbeat due to personnel safety"
+        },
+        "heartbeat_timeout_safe_ms": {
+          "value": 500,
+          "unit": "milliseconds"
+        }
+      }
+    },
+    "mining": {
+      "domain_id": "mining",
+      "description": "Mining operations (underground and surface)",
+      "compliance_refs": ["ISO 19296", "IEC Ex", "AS/NZS 2290.3"],
+      "overrides": {
+        "max_ventilation_co_ppm": {
+          "value": 30,
+          "unit": "ppm",
+          "description": "Maximum CO concentration for continued autonomous operation. Above this, trigger evacuation alarm.",
+          "rationale": "ACGIH TLV for CO is 25 ppm (8-hour TWA). 30 ppm provides safety margin for alerting and evacuation."
+        },
+        "max_temperature_c": {
+          "value": 35.0,
+          "unit": "degrees Celsius",
+          "description": "Maximum ambient temperature for equipment operation. Above this, initiate thermal shutdown.",
+          "rationale": "Mining regulations typically require shutdown at 35C wet bulb or 37C dry bulb. Using conservative dry-bulb limit."
+        },
+        "max_methane_ppm": {
+          "value": 10000,
+          "unit": "ppm",
+          "description": "Maximum methane concentration. 1% LEL. Above this, immediate power cutoff.",
+          "rationale": "Methane LEL is 5% (50,000 ppm). 1% LEL is standard alarm threshold per mining safety regulations."
+        },
+        "max_dust_concentration_mg_m3": {
+          "value": 3.0,
+          "unit": "mg/m3",
+          "description": "Maximum respirable dust concentration."
+        },
+        "proximity_stop_distance_m": {
+          "value": 5.0,
+          "unit": "meters",
+          "description": "Larger stop distance due to limited visibility and heavy equipment."
+        },
+        "heartbeat_timeout_degraded_ms": {
+          "value": 300,
+          "unit": "milliseconds"
+        },
+        "heartbeat_timeout_safe_ms": {
+          "value": 700,
+          "unit": "milliseconds"
+        }
+      }
+    }
+  },
+
+  "safety_check_pipeline": {
+    "_comment": "Ordered list of safety checks that run on every generated code artifact. Checks are sequential - each must pass before the next runs. The pipeline is part of the CI/CD system and cannot be skipped.",
+    "pipeline_id": "nexus-safety-v2",
+    "artifact_types": ["esp32_firmware", "jetson_node", "reflex_script", "config_file"],
+    "checks": [
+      {
+        "order": 1,
+        "name": "syntax_check",
+        "description": "Validate that the generated artifact has correct syntax and can be parsed.",
+        "tool": "language-specific compiler/parser",
+        "tool_details": {
+          "c_cpp": "gcc -fsyntax-only -Wall -Wextra -std=c11",
+          "python": "python3 -m py_compile",
+          "json": "python3 -c 'import json; json.load(open(args[0]))'",
+          "yaml": "python3 -c 'import yaml; yaml.safe_load(open(args[0]))'"
+        },
+        "timeout_seconds": 30,
+        "pass_criteria": "Exit code 0, no syntax errors, all includes resolvable",
+        "fail_action": "block",
+        "fail_action_description": "Artifact is rejected. Developer must fix syntax errors and resubmit. No partial compilation allowed.",
+        "severity_if_failed": "blocker"
+      },
+      {
+        "order": 2,
+        "name": "static_analysis",
+        "description": "Run static analysis tools to detect safety violations, memory issues, and undefined behavior.",
+        "tool": "clang-tidy + cppcheck + custom safety AST checker",
+        "tool_details": {
+          "clang_tidy": "clang-tidy -checks='*-*,bugprone-*,cert-*,clang-analyzer-*,misc-*' -warnings-as-errors='*'",
+          "cppcheck": "cppcheck --enable=all --inconclusive --error-exitcode=1 --suppress=unusedFunction",
+          "custom_checker": "nexus_safety_ast_check --policy=safety_policy.json --artifact=<file>"
+        },
+        "timeout_seconds": 120,
+        "pass_criteria": "Zero CRITICAL findings, zero HIGH findings. MEDIUM findings allowed with documented justification in code comments. All custom safety rule checks (SR-001 through SR-010) must pass.",
+        "fail_action": "block",
+        "fail_action_description": "Any CRITICAL or HIGH finding blocks deployment. MEDIUM findings generate a warning ticket but do not block. Safety rule violations (SR-*) always block regardless of severity.",
+        "severity_if_failed": "blocker"
+      },
+      {
+        "order": 3,
+        "name": "memory_budget",
+        "description": "Verify that the generated code fits within the target platform's memory constraints.",
+        "tool": "size analysis + stack depth analysis",
+        "tool_details": {
+          "firmware_size": "size -A <elf_file> | python3 memory_budget_check.py --limit=<platform_limits>",
+          "stack_analysis": "StackAnalyzer --input=<map_file> --max-stack=<platform_max_stack>",
+          "heap_analysis": "linker script analysis for static heap allocation",
+          "platform_limits": {
+            "esp32": {
+              "max_flash_kb": 4096,
+              "max_iram_kb": 176,
+              "max_dram_kb": 320,
+              "max_stack_per_task_bytes": 4096,
+              "max_total_stack_bytes": 32768,
+              "min_free_heap_bytes": 32768
+            },
+            "jetson": {
+              "max_ram_mb": 4096,
+              "max_gpu_mb": 2048,
+              "max_stack_per_thread_bytes": 8388608
+            }
+          }
+        },
+        "timeout_seconds": 60,
+        "pass_criteria": "Flash usage < 80% of max. IRAM usage < 90% of max. Total static stack allocation < 80% of max. Minimum 32KB free heap on ESP32. No individual task stack > 4KB on ESP32.",
+        "fail_action": "regenerate",
+        "fail_action_description": "If memory budget exceeded, the code generator is re-invoked with stricter optimization flags and reduced feature set. If still exceeds after 3 attempts, block and alert safety engineer.",
+        "severity_if_failed": "blocker"
+      },
+      {
+        "order": 4,
+        "name": "safety_rules",
+        "description": "Run all safety rule checks (SR-001 through SR-010) plus domain-specific and actuator-specific checks against the generated artifact.",
+        "tool": "nexus_safety_validator",
+        "tool_details": {
+          "executable": "nexus_safety_validator",
+          "arguments": "--policy=safety_policy.json --artifact=<file> --domain=<domain> --config=<node_config>",
+          "checks_performed": [
+            "SR-001: Enable signal verification",
+            "SR-002: Control loop timeout watchdog",
+            "SR-003: Safe-state definition check",
+            "SR-004: Sensor failure independence",
+            "SR-005: Rate limiting enforcement",
+            "SR-006: Watchdog disable prohibition",
+            "SR-007: E-Stop priority verification",
+            "SR-008: Boot safe-state initialization",
+            "SR-009: Division-by-zero protection",
+            "SR-010: Bounded reflex iterations",
+            "ACT-PROFILE: Actuator profile compliance",
+            "DOMAIN-RULES: Domain-specific threshold compliance",
+            "CONFIG-COMPAT: Config-to-code compatibility"
+          ]
+        },
+        "timeout_seconds": 90,
+        "pass_criteria": "ALL safety rules pass. Zero violations. Any rule violation is a hard failure regardless of severity.",
+        "fail_action": "block",
+        "fail_action_description": "Safety rule violations ALWAYS block deployment. No exceptions. The developer must fix the violation, document the fix, and resubmit. Critical rule violations (SR-001, SR-006, SR-007, SR-008) also trigger an alert to the safety engineering team.",
+        "severity_if_failed": "blocker"
+      },
+      {
+        "order": 5,
+        "name": "simulation",
+        "description": "Run hardware-in-the-loop (HIL) or software-in-the-loop (SIL) simulation to verify the generated code behaves safely under fault injection scenarios.",
+        "tool": "NEXUS Safety Simulator",
+        "tool_details": {
+          "executable": "nexus_safety_simulator",
+          "arguments": "--policy=safety_policy.json --firmware=<elf_file> --scenarios=<scenario_set> --duration=60s",
+          "scenario_categories": [
+            "normal_operation",
+            "sensor_failure",
+            "communication_loss",
+            "watchdog_timeout",
+            "estop_activation",
+            "power_glitch",
+            "actuator_overload",
+            "concurrent_faults"
+          ],
+          "fault_injection_types": [
+            "sensor_stuck_at_zero",
+            "sensor_stuck_at_max",
+            "sensor_noise_10x",
+            "heartbeat_loss",
+            "watchdog_starve",
+            "memory_corruption",
+            "gpio_short_to_vcc",
+            "gpio_short_to_gnd"
+          ],
+          "pass_criteria": {
+            "max_fault_response_time_ms": 100,
+            "no_unsafe_actuation_under_fault": true,
+            "all_actuators_reach_safe_state": true,
+            "no_memory_corruption_detected": true,
+            "watchdog_recoverable": true
+          }
+        },
+        "timeout_seconds": 300,
+        "pass_criteria": "All fault scenarios pass. No unsafe actuation under any injected fault. All actuators reach safe state within 100ms of fault detection. Watchdog recovery succeeds. Zero memory safety violations.",
+        "fail_action": "block",
+        "fail_action_description": "Any simulation failure blocks deployment. The specific failing scenario and fault type are logged. Developer must fix the underlying issue (often a missing safety check or incorrect safe-state logic) and resubmit.",
+        "severity_if_failed": "blocker"
+      },
+      {
+        "order": 6,
+        "name": "automated_tests",
+        "description": "Run the full automated test suite on target hardware (or HIL equivalent) to verify functional correctness and safety compliance.",
+        "tool": "pytest + Unity test framework (embedded)",
+        "tool_details": {
+          "unit_tests": "Unity framework - all safety-critical functions must have unit tests with >95% branch coverage",
+          "integration_tests": "pytest-based integration tests on HIL platform",
+          "safety_tests": "Dedicated safety test cases covering all safety rules",
+          "regression_tests": "Full regression suite to catch unintended safety regressions",
+          "coverage_requirement": {
+            "safety_critical_functions": "100% line coverage, 95% branch coverage",
+            "safety_related_functions": "90% line coverage, 85% branch coverage",
+            "non_safety_functions": "80% line coverage"
+          },
+          "test_hardware": "ESP32-WROOM-32D HIL test fixture or equivalent"
+        },
+        "timeout_seconds": 600,
+        "pass_criteria": "All tests pass. Safety-critical function coverage meets 100% line / 95% branch requirement. No test failures. No skipped safety tests (skipping a safety test is a failure).",
+        "fail_action": "block",
+        "fail_action_description": "Any test failure blocks deployment. Skipped safety tests are treated as failures. Coverage gaps below threshold generate a warning but do not block (unless safety-critical function coverage is below 95%, which blocks).",
+        "severity_if_failed": "blocker"
+      }
+    ],
+    "global_pipeline_settings": {
+      "fail_fast": false,
+      "continue_on_warn": true,
+      "all_checks_must_pass": true,
+      "max_retries": {
+        "memory_budget_regenerate": 3,
+        "other_checks": 0
+      },
+      "notification_on_failure": {
+        "channels": ["safety_team_slack", "jira_ticket", "email"],
+        "critical_rules_triggered": true
+      },
+      "audit_log": {
+        "enabled": true,
+        "retention_days": 365,
+        "storage": "persistent_volume"
+      }
+    }
+  },
+
+  "safety_event_severity_levels": {
+    "CRITICAL": {
+      "description": "Immediate danger to personnel, equipment, or environment. Requires immediate system shutdown to safe state.",
+      "response_time_budget_ms": 10,
+      "notification": "immediate to all channels",
+      "requires_acknowledgment": true,
+      "auto_resume_allowed": false
+    },
+    "HIGH": {
+      "description": "Potential danger if not addressed. Requires safe-state transition for affected subsystem.",
+      "response_time_budget_ms": 100,
+      "notification": "immediate to Jetson, logged locally",
+      "requires_acknowledgment": true,
+      "auto_resume_allowed": false
+    },
+    "MEDIUM": {
+      "description": "Degraded operation. System continues but with reduced capability.",
+      "response_time_budget_ms": 1000,
+      "notification": "logged locally, sent to Jetson on next heartbeat",
+      "requires_acknowledgment": false,
+      "auto_resume_allowed": true,
+      "auto_resume_after_ms": 5000
+    },
+    "LOW": {
+      "description": "Informational. No safety impact.",
+      "response_time_budget_ms": null,
+      "notification": "logged locally only",
+      "requires_acknowledgment": false,
+      "auto_resume_allowed": true
+    }
+  }
+}

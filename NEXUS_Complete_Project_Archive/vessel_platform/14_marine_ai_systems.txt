@@ -1,0 +1,1138 @@
+================================================================================
+  MARINE AI/ML SYSTEMS TECHNICAL BRIEF
+  Vessel-Integrated Fish Identification, Catch Tracking & Autonomous Analytics
+  Platform
+================================================================================
+
+  Document ID:   VAI-TECH-014
+  Version:       1.0
+  Classification: Commercial-in-Confidence
+  Author:        Agent E — Marine AI/ML Systems Expert
+  Date:          2025
+  Target Vessel: Commercial Fishing Vessel (Trawler/Gillnetter/Potter)
+  Reference HW:  Jetson-Bravo (Vision), Jetson-Charlie (ML Training),
+                 ESP32-S3 Camera Controllers, PoE IP Cameras
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. Executive Summary
+  2. Vision System Architecture
+  3. Fish Species Identification System
+  4. Catch Rate Tracking
+  5. Depth Sounder and Sonar Integration
+  6. Reinforcement Learning Framework
+  7. Data Pipeline Architecture
+  8. Commercial Fishing AI Features
+  9. Risk Assessment & Mitigation
+  10. Implementation Roadmap
+  11. References & Appendices
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+This technical brief defines the architecture, training methodology, and
+deployment strategy for a vessel-specific artificial intelligence system
+designed for commercial fishing operations. The system leverages a network of
+IP cameras, electronic scales, measuring boards, depth sounders, and NMEA
+instrumentation to create a closed-loop machine learning pipeline that
+continuously improves its ability to identify fish species, track catch rates,
+ensure regulatory compliance, and enhance crew safety.
+
+The core insight driving this architecture is that every commercial fishing
+vessel operates in a unique context — its camera angles, lighting conditions,
+species mix, deck layout, and crew procedures are all specific to that boat.
+A generic, cloud-trained model cannot capture this specificity. Instead, our
+system performs transfer learning and continuous fine-tuning ON THE VESSEL
+ITSELF, using the Jetson-Charlie module as a dedicated edge-training server.
+The result is a model that is hyper-optimized for the exact operational
+environment of this particular vessel.
+
+The target state after a two-week initial calibration period is:
+  - Species identification accuracy >85% for the top 10 common species
+  - Species identification accuracy >90% after one month of active learning
+  - Automated catch reports generated every haul, with zero manual data entry
+  - Person-overboard detection with <2-second alert latency
+  - Depth and bottom classification accuracy >80% for common seafloor types
+  - Full regulatory logbook compliance with timestamped, georeferenced data
+
+This document is intended for the vessel owner, systems integrators, and
+software engineers responsible for building and maintaining the platform.
+
+================================================================================
+2. VISION SYSTEM ARCHITECTURE
+================================================================================
+
+2.1 Camera Inventory and Placement
+-----------------------------------
+
+The vision system deploys between 4 and 6 IP cameras across the vessel. All
+cameras are Power-over-Ethernet (PoE, IEEE 802.3af/at), outdoor-rated to at
+least IP67, and equipped with IR cut-filter removal capability for night
+operation. A summary of camera stations follows:
+
+  STATION          QUANTITY  PURPOSE                        FPS   PRIORITY
+  -------------------------------------------------------------------------
+  Back Deck #1     1         Sorting table overhead         2-5   Critical
+  Back Deck #2     1         Fish bins / discard chute      2-5   Critical
+  Forward-Look #1  1         Navigation, debris detection   15-30 High
+  Forward-Look #2  1 (opt)   Starboard obstacle detection   15-30 Medium
+  Engine Room      1         Equipment monitoring           1-2   Low
+  Catch Scale      1 (opt)   Scale display OCR              1-2   Medium
+
+Camera selection criteria:
+  - Minimum resolution: 1920x1080 (1080p) for sorting table cameras;
+    1280x720 acceptable for navigation cameras to conserve bandwidth.
+  - Sensor: 1/2.8" or larger CMOS with minimum 0.01 lux monochrome
+    sensitivity in IR mode (for sorting table cameras).
+  - Lens: Varifocal 2.8-12mm for sorting table cameras (adjustable FOV for
+    varying table loads); fixed 2.8mm wide-angle for forward cameras.
+  - Form factor: Dome (vandal-resistant) for deck cameras; bullet for forward
+    and engine room.
+  - Recommended models: Hikvision DS-2CD2143G2-I (dome), DS-2CD2T47G2-L
+    (bullet with built-in IR); Axis M3116-LVE; Dahua IPC-HFW5442T-ASE.
+
+2.2 ESP32-S3 Camera Controller
+-------------------------------
+
+Each camera (or camera pair, for lower-priority stations) is interfaced through
+an ESP32-S3 microcontroller acting as a smart camera bridge and frame rate
+regulator. The ESP32-S3 is selected for its native I2S camera interface,
+hardware JPEG encoder, dual-core 240 MHz processor, and 512 KB SRAM with
+support for up to 8 MB PSRAM via SPI.
+
+  Role of the ESP32-S3:
+  - Receives MJPEG or RTSP streams from IP cameras via its Wi-Fi interface
+    (or, for directly-connected sensors, via the I2S camera interface for
+    modules like the OV2640/OV5640 used in secondary/backup roles).
+  - Decodes and re-encodes frames at the target frame rate for that station.
+  - Streams compressed JPEG frames over UART serial (115200-921600 baud) to
+    the Jetson-Bravo vision processing unit.
+  - Performs local frame buffering (up to 30 frames in PSRAM) to handle
+    momentary communication stalls without dropped detections.
+  - Monitors camera health: reports camera offline events, frame rate
+    degradation, and exposure anomalies.
+  - Provides GPIO-triggered capture for external events (haul start/stop
+    signals from the winch controller).
+
+  Frame Rate Strategy:
+  - Sorting table cameras: 2-5 fps. Fish species identification does not
+    require video-rate processing. At 3 fps, a fish on a sorting table
+    (typical dwell time: 3-10 seconds) will be captured 9-30 times, providing
+    ample data for confident classification. This conservative frame rate
+    reduces Jetson GPU load by 90% compared to 30 fps, freeing resources for
+    other inference tasks.
+  - Navigation cameras: 15-30 fps. Debris detection, person-overboard
+    alerts, and navigation assistance require low-latency, video-rate
+    processing to be actionable.
+  - Engine room / scale cameras: 1-2 fps. Monitoring and OCR tasks have no
+    real-time urgency; periodic snapshots are sufficient.
+
+  Serial Protocol (Jetson-Bravo <- ESP32-S3):
+  - Framing: [0xAA][0x55][LEN_MSB][LEN_LSB][JPEG_DATA][CRC16]
+  - Metadata appended: camera_id (1 byte), timestamp_ms (4 bytes),
+    exposure_us (2 bytes), gain_db (1 byte).
+  - Maximum frame size: 64 KB (JPEG quality 60-80 at 1080p, typical size
+    30-50 KB).
+
+2.3 Night Operation
+--------------------
+
+Night fishing is a standard operational mode for many commercial fisheries.
+The vision system must maintain full capability in darkness:
+
+  IR Illumination:
+  - Two to four 850nm IR LED arrays (50W total) mounted above the sorting
+    table, providing even illumination across the work surface.
+  - IR wavelength: 850nm preferred over 940nm for greater sensor sensitivity,
+    though 940nm is "covert" (no visible red glow) if crew preference demands.
+  - Illumination range: 2-5 meters, covering the sorting table and immediate
+    bin area.
+
+  Low-Light Camera Mode:
+  - At dusk, the ESP32-S3 triggers the camera to switch to day/night mode
+    (IR cut filter removed, monochrome output, AGC gain increased).
+  - In IR mode, species identification relies on shape, size, and
+    morphological features rather than coloration. The YOLOv8 model is
+    fine-tuned with both color (daytime) and monochrome (nighttime/IR)
+    images to maintain accuracy.
+
+  Thermal Imaging (Optional, Budget Permitting):
+  - A single thermal camera (e.g., FLIR Boson 640 or Teledyne FLIR A70)
+    at the sorting table provides temperature-based imaging that is completely
+    independent of visible/IR light levels.
+  - Thermal imaging excels at detecting warm-bodied fish against a cold deck
+    surface, but lacks the resolution for fine species discrimination.
+  - Recommended use: thermal as a supplementary detection layer (is there a
+    fish on the table?) with visible/IR cameras handling classification.
+
+2.4 Jetson-Bravo Vision Processing
+-----------------------------------
+
+Jetson-Bravo is the primary vision inference engine, running continuously
+during all fishing operations. Based on the NVIDIA Jetson Orin Nano or Orin
+NX platform:
+
+  Hardware Specification:
+  - Jetson Orin NX 16GB (recommended): 100 TOPS INT8, 8-core ARM Cortex-A78,
+    1024-core Ampere GPU with Tensor Cores.
+  - Storage: 2TB NVMe M.2 SSD (Samsung 990 Pro or equivalent).
+  - Connectivity: Dual Gigabit Ethernet (camera network + vessel network),
+    USB 3.2 for serial connections from ESP32-S3 units.
+  - Power: 12V DC from vessel power bus, with UPS backup (30-minute runtime).
+
+  Software Stack:
+  - OS: JetPack 6.0 (Jetson Linux 36.x)
+  - Inference: TensorRT 8.6+ with YOLOv8-nano exported to FP16/INT8 engine
+  - Framework: Ultralytics YOLOv8 Python API
+  - Container: Docker with NVIDIA Container Toolkit for isolated inference
+    environment
+  - Orchestration: Custom systemd services managed by vessel-platform daemon
+
+  Inference Pipeline (per frame):
+  1. Receive JPEG frame from ESP32-S3 serial interface.
+  2. Decode JPEG → NV12 tensor (GPU-accelerated via nvJPEG).
+  3. Preprocess: resize to 640x640, normalize (0-255 → 0-1), NCHW format.
+  4. TensorRT inference: YOLOv8-nano forward pass.
+  5. Post-process: NMS (Non-Maximum Suppression), confidence thresholding
+     (>0.5), class extraction.
+  6. Output: list of bounding boxes with class labels, confidence scores,
+     and pixel coordinates.
+  7. Action dispatch: publish detections to MQTT broker (for catch tracking),
+     trigger active learning captures, update UI overlays.
+
+  Performance Targets:
+  - YOLOv8-nano inference latency: <30ms per frame (FP16 on Orin NX).
+  - Total pipeline latency (capture to result): <50ms for sorting cameras,
+    <33ms for navigation cameras (to maintain 30 fps).
+  - Concurrent streams: minimum 4 simultaneous camera feeds.
+  - GPU utilization: <60% sustained (headroom for burst processing).
+
+================================================================================
+3. FISH SPECIES IDENTIFICATION SYSTEM
+================================================================================
+
+3.1 Base Model Selection
+-------------------------
+
+The foundation of the species identification system is YOLOv8-nano
+(YOLOv8n), the smallest and fastest variant in the Ultralytics YOLOv8
+family. Key characteristics:
+
+  - Parameters: 3.2 million (vs. 68 million for YOLOv8-large)
+  - FLOPs: 8.7G per inference
+  - mAP (COCO): 37.3 (adequate base performance for transfer learning)
+  - Inference speed: >100 fps on Jetson Orin NX (FP16 TensorRT)
+
+  YOLOv8-nano is selected over larger variants because:
+  1. Inference must run on edge hardware with limited power and thermal budget.
+  2. The model will be heavily fine-tuned on vessel-specific data, making the
+     pre-trained COCO weights primarily useful for feature extraction
+     (backbone) rather than final accuracy.
+  3. A smaller model trains faster on Jetson-Charlie, enabling more frequent
+     retraining cycles.
+  4. INT8 quantization of YOLOv8n yields minimal accuracy loss (<1% mAP)
+     while doubling inference speed.
+
+3.2 Data Collection During Normal Operations
+---------------------------------------------
+
+The critical innovation of this system is that data collection is PASSIVE —
+it happens automatically during every fishing haul without any additional crew
+effort. The system continuously captures and stores images from the sorting
+table cameras, creating a growing dataset of every fish that passes through
+the vessel's sorting process.
+
+  Automatic Capture Logic:
+  - The sorting table camera runs at 3 fps continuously during hauls.
+  - Every frame is stored temporarily (30-day rolling buffer on NVMe SSD).
+  - Frames are timestamped with GPS position, haul number, and vessel heading.
+  - If a detection occurs (any object >0.3 confidence), the frame and its
+    raw image are flagged as "candidate training data."
+  - Candidate frames are staged for labeling (see below).
+
+  Data Volume Estimation:
+  - Typical trawl haul: 2-4 hours of sorting.
+  - At 3 fps: 21,600-43,200 frames per haul.
+  - Assuming 40% frames contain detectable fish: 8,640-17,280 candidate
+    frames per haul.
+  - At 2-3 hauls per day: 17,280-51,840 candidate frames per day.
+  - JPEG size (quality 70, 1080p): ~40 KB average.
+  - Storage per day: ~700 MB to ~2 GB (candidate frames only).
+  - Raw frame storage (all frames, 30-day rolling): ~50-100 GB.
+
+3.3 Labeling Strategies
+-----------------------
+
+Three complementary labeling strategies ensure a rich, accurate training
+dataset without requiring a dedicated data annotation team:
+
+  Strategy 1: Bin-Based Supervised Learning (Primary)
+  ---------------------------------------------------
+  This is the core innovation. The system observes which bin a fish is
+  placed into after sorting, and uses that as the species label:
+
+  - Camera #1 (sorting table) detects fish and tracks their position.
+  - Camera #2 (fish bins) observes the bin area with distinct, marked bins
+    (e.g., "Cod Bin", "Haddock Bin", "Discard Bin").
+  - A simple tracking algorithm correlates: "fish detected at position
+    (x,y) on sorting table at time T" → "fish deposited in bin #3 at
+    time T+5 seconds."
+  - The bin label becomes the species label for that fish's images.
+  - This is essentially weakly-supervised learning where the human sorter's
+    actions serve as the ground truth annotation.
+
+  Requirements:
+  - Bins must be visually distinct (colored lids, numbered labels, or
+    physical separation visible to Camera #2).
+  - A calibration step at the start of each trip: crew confirms which bin
+    is designated for which species (via touchscreen UI).
+  - Handling edge cases: mixed-species bins are flagged as "unlabeled" and
+    excluded from training.
+
+  Strategy 2: Touchscreen Confirmation (Secondary)
+  ------------------------------------------------
+  A ruggedized touchscreen display (installed near the sorting table)
+  shows the real-time species predictions from the vision system. The crew
+  can:
+  - Tap to confirm a correct prediction (strengthens that training example).
+  - Tap to correct a wrong prediction (corrects the label).
+  - Tap "Unknown" for fish the crew cannot identify (excluded from training).
+
+  This provides explicit human feedback that directly improves model
+  accuracy. The touchscreen is optional but highly recommended; even 10-20
+  corrections per haul dramatically improve the model.
+
+  Strategy 3: Voice Correction (Tertiary)
+  ---------------------------------------
+  The voice interface system (see Section 6) allows crew to correct
+  misidentifications by voice:
+  - "No, that's pollock" → system logs correction, updates label.
+  - "That bin is haddock today" → recalibrates bin-to-species mapping.
+  - Voice corrections are timestamped and matched to the most recent
+    detection event within a 5-second window.
+
+3.4 Training Pipeline on Jetson-Charlie
+----------------------------------------
+
+Jetson-Charlie is the dedicated ML training node, based on a Jetson AGX Orin
+64GB (275 TOPS, 32GB unified memory) or similar high-performance edge module.
+Training runs overnight while the vessel is at anchor or in port.
+
+  Training Workflow (automated, runs nightly at 02:00):
+  1. Aggregation: Collect all labeled frames from the previous day(s).
+  2. Dataset split: 80% training, 20% validation (stratified by species).
+  3. Data augmentation (applied on-the-fly during training):
+     - Random horizontal flip (50%)
+     - Random rotation (+/-15 degrees)
+     - Random brightness/contrast adjustment (+/-20%)
+     - Random scaling (0.8-1.2x)
+     - Mosaic augmentation (4-image composite, YOLOv8 default)
+     - MixUp augmentation (alpha=0.1)
+     - Simulated rain/fog overlay (for robustness to weather conditions)
+     - IR-to-color style transfer (to synthesize color images from IR-only
+       captures, expanding the daytime training set using nighttime data)
+  4. Fine-tuning: Start from the current production model weights, train for
+     50 epochs with early stopping (patience=10).
+     - Optimizer: SGD with momentum 0.937
+     - Learning rate: 0.01 (warmup for first 3 epochs, cosine annealing)
+     - Batch size: 16 (limited by Jetson memory)
+     - Image size: 640x640
+  5. Validation: Evaluate on held-out set after each epoch.
+     - Primary metric: mAP@0.5 (mean Average Precision at IoU=0.5)
+     - Per-species recall (ensure rare species are not ignored)
+     - Confusion matrix (identify commonly confused species pairs)
+  6. Deployment decision:
+     - If mAP@0.5 > 0.90 AND all species have recall > 0.80:
+       → Deploy new model as production.
+     - If mAP@0.5 0.80-0.90:
+       → Deploy to "staging" for A/B testing, collect more data.
+     - If mAP@0.5 < 0.80:
+       → Do NOT deploy. Flag species needing more training data.
+       → Generate "data wanted" alert: "Need more images of redfish and
+          witch flounder."
+
+  Training Time Estimate:
+  - Dataset size: ~5,000-20,000 labeled images (after 1-2 weeks).
+  - Jetson AGX Orin 64GB training time: ~30-90 minutes per training run.
+  - Well within the overnight processing window.
+
+3.5 Model Versioning and Deployment
+------------------------------------
+
+  Versioning Scheme:
+  - Models are stored as: model_v{NNN}.pt (PyTorch) and model_v{NNN}.engine
+    (TensorRT).
+  - Version number increments monotonically.
+  - Each version has a companion JSON metadata file:
+    {
+      "version": "v042",
+      "date_trained": "2025-01-15T02:34:00Z",
+      "training_images": 18432,
+      "species": ["atlantic_cod", "haddock", "pollock", "yellowtail_flounder",
+                   "winter_flounder", "redfish", "witch_flounder", "atlantic_herring",
+                   "atlantic_mackerel", "skate"],
+      "map50": 0.923,
+      "per_species_recall": {...},
+      "training_epochs": 47,
+      "parent_model": "v041",
+      "deployed": true,
+      "deployed_to": "jetson-bravo",
+      "notes": "Added IR augmentation; improved redfish recall from 0.72 to 0.89"
+    }
+
+  - Git repository (local, on Jetson-Charlie): stores model metadata,
+    training configurations, and evaluation reports. Model weights are stored
+    in Git LFS.
+
+  Deployment Process:
+  1. Jetson-Charlie completes training and validation.
+  2. Export to TensorRT FP16 engine (~2 minutes on Jetson-Charlie).
+  3. rsync the .engine file and metadata to Jetson-Bravo.
+  4. Jetson-Bravo receives new model, loads into a warm standby slot.
+  5. Inference switches to new model atomically (no dropped frames).
+  6. If issues detected within 1 hour, automatic rollback to previous model.
+  7. Deployment logged to vessel database.
+
+3.6 Expected Accuracy Timeline
+-------------------------------
+
+  Week 1:  100-500 labeled images. Accuracy: ~50-60%. System in "learning"
+           mode, high rate of "unknown" and low-confidence predictions.
+           Crew sees many confirmation prompts.
+  Week 2:  2,000-5,000 labeled images. Accuracy: ~70-80%. System begins to
+           be useful for common species (cod, haddock, pollock).
+           Crew corrections decrease by ~50%.
+  Week 3:  5,000-10,000 labeled images. Accuracy: ~80-85%. System handles
+           80% of common species confidently. Active learning focuses on
+           edge cases and rare species.
+  Week 4:  10,000-20,000 labeled images. Accuracy: ~85-92%. System is
+           reliable for all regularly-encountered species. Crew trusts
+           automated counts for logbook entries.
+  Month 2+: 20,000+ images. Accuracy: >90%. System handles seasonal species
+           variations, size-based identification, and night operations.
+           Minimal crew intervention required.
+
+================================================================================
+4. CATCH RATE TRACKING
+================================================================================
+
+4.1 Fish Counting
+-----------------
+
+The vision system counts every fish that passes through the sorting area,
+providing per-species, per-haul, and per-trip counts:
+
+  Counting Methodology:
+  - Each detection event (bounding box with confidence >0.5) is logged with
+    timestamp, species label, and bounding box dimensions.
+  - A simple tracking algorithm (ByteTrack or custom centroid tracker)
+    prevents double-counting a single fish across consecutive frames.
+  - A fish is "counted" when it exits the sorting table ROI (Region of
+    Interest) — i.e., it has been picked up by the crew member and is moving
+    toward a bin.
+  - Minimum tracking duration: 0.5 seconds (to filter out false positives
+    from debris, spray, or partial detections).
+
+  Count Confidence:
+  - High confidence: fish tracked for >2 seconds with consistent species
+    label. Counted as 1.0 fish.
+  - Medium confidence: fish tracked for 0.5-2 seconds, or species label
+    fluctuates between two options. Counted as 0.5 fish (fractional counting
+    for statistical accuracy).
+  - Low confidence: detection below 0.5 confidence threshold or tracking
+    <0.5 seconds. Not counted, but image saved for review.
+
+4.2 Scale Integration
+----------------------
+
+Electronic catch scales are integrated to provide weight data alongside
+visual counts:
+
+  Integration Methods:
+  - Method A (Preferred): Scale with serial/RJ45 output (e.g., Rice Lake
+    Weighing Systems with Ethernet interface). Scale sends weight readings
+    via TCP/IP to Jetson-Bravo every 100ms.
+  - Method B: Scale with analog 4-20mA output → ADC on ESP32-S3 → serial
+    to Jetson-Bravo.
+  - Method C: Camera-based OCR of scale display (backup method using
+    Jetson-Bravo Tesseract OCR or custom CNN).
+
+  Data Captured:
+  - Total weight per bin (bin placed on scale → weight recorded).
+  - Individual fish weight (if fish weighed one at a time — common in
+    recreational charter vessels and some commercial operations).
+  - Weight per haul (cumulative).
+  - Weight per species (from bin-based association).
+
+  Derived Metrics:
+  - Average weight per fish (by species): total_weight / fish_count.
+  - Weight-frequency distribution: histogram of individual fish weights.
+  - Condition factor (K): K = 100 * weight(g) / length(cm)^3 — requires
+    both weight and length data.
+
+4.3 Measuring Board Integration
+--------------------------------
+
+Length measurement is captured through camera-based analysis of the measuring
+board:
+
+  Setup:
+  - The measuring board has high-contrast markings (black/white or
+    fluorescent paint on dark background) every 1 cm, with major markings
+    every 10 cm.
+  - The sorting table camera (or a dedicated measuring camera) has a clear
+    overhead view of the measuring board.
+  - Camera calibration: at system installation, a checkerboard pattern is
+    placed on the measuring board and the camera intrinsics/extrinsics are
+    computed (OpenCV cameraCalibrate). This corrects for lens distortion
+    and establishes pixel-to-cm conversion.
+
+  Measurement Process:
+  1. Fish is placed on measuring board by crew (standard practice).
+  2. Vision system detects fish outline (instance segmentation mask from
+     YOLOv8-seg, or contour detection) and measuring board markings.
+  3. System computes fish length from snout to tail fork (or total length)
+     in centimeters using the calibrated pixel-to-cm ratio.
+  4. Length is logged with species, timestamp, and GPS position.
+
+  Accuracy:
+  - Expected accuracy: +/- 1 cm (sufficient for length-frequency
+    distributions and regulatory compliance).
+  - Validation: weekly manual measurement of 20 fish to verify system
+    calibration. If drift >1.5 cm, recalibrate camera.
+
+  Derived Metrics:
+  - Length-frequency distribution (histogram) by species and haul.
+  - Minimum, maximum, mean, and median lengths by species.
+  - Juvenile ratio (percentage below regulatory minimum size).
+  - Growth rate estimation (if same species tracked across multiple trips
+    over time).
+
+4.4 Automated Catch Report Generation
+--------------------------------------
+
+At the end of each haul (triggered by winch stop signal or manual button),
+the system generates a comprehensive catch report:
+
+  Report Contents:
+  - Haul identifier (sequential number, date/time).
+  - Geographic location (GPS lat/lon at haul start and end).
+  - Depth (from depth sounder, if available).
+  - Duration (tow time or soak time).
+  - Species breakdown table:
+      | Species           | Count | Weight (kg) | Avg Length (cm) | Avg Weight (kg) |
+      |-------------------|-------|-------------|-----------------|------------------|
+      | Atlantic Cod      |  142  |    385.6    |      62.3       |       2.71       |
+      | Haddock           |   87  |    156.2    |      51.8       |       1.80       |
+      | Yellowtail Flounder | 53 |     42.1    |      38.4       |       0.79       |
+      | (discards)        |   31  |     18.7    |      28.1       |       0.60       |
+      | TOTAL             |  313  |    602.6    |        -        |       1.93       |
+  - Catch rate: fish per hour, kg per hour, kg per nautical mile towed.
+  - Discard ratio: discarded fish / total fish (by count and weight).
+  - Regulatory compliance flag: any species approaching or exceeding quota.
+  - Time-series chart: cumulative catch by species over the haul.
+
+  Report Output Formats:
+  - JSON (machine-readable, for vessel platform database).
+  - PDF (human-readable, for captain's review and regulatory inspection).
+  - CSV (for upload to fisheries management authority, if supported).
+  - HTML dashboard (real-time display on wheelhouse monitor).
+
+4.5 Geographic Integration
+---------------------------
+
+All catch data is tagged with GPS coordinates from the vessel's primary
+GPS receiver (NMEA GGA/GNS sentences via the NMEA multiplexer):
+
+  - Each haul has start/end positions, allowing calculation of tow path
+    (distance, bearing, area swept for bottom trawls).
+  - Catch-per-unit-effort (CPUE) maps are generated: kg/km^2 by species,
+    enabling the captain to identify productive fishing grounds.
+  - Spatial clustering analysis identifies "hot spots" where certain species
+    are concentrated.
+  - VMS (Vessel Monitoring System) integration: catch reports are
+    automatically correlated with VMS track data for regulatory compliance.
+
+================================================================================
+5. DEPTH SOUNDER AND SONAR INTEGRATION
+================================================================================
+
+5.1 NMEA Data Ingestion
+-------------------------
+
+The vessel's depth sounder (e.g., Simrad ES70, Furuno FCV-295, Garmin
+GSD 26) outputs depth data via NMEA 0183/2000 sentences:
+
+  Key Sentences:
+  - DBT (Depth Below Transducer): water depth in feet, meters, fathoms.
+  - DBS (Depth Below Surface): depth corrected for transducer offset.
+  - DPT (Depth of Water): with offset and range information.
+  - SDDBT (Simrad proprietary): high-resolution depth with bottom type.
+
+  Data Flow:
+  - NMEA 0183 devices → Actisense NMEA-0183 to NMEA-2000 converter →
+    NMEA multiplexer (e.g., Maretron NMX2000 or iKommunicate) →
+    TCP/UDP on vessel network → Jetson-Charlie.
+
+  - NMEA 2000 devices → directly to NMEA multiplexer → vessel network →
+    Jetson-Charlie.
+
+  Jetson-Charlie Processing:
+  - Parse NMEA sentences (python-can or pynmea2 library).
+  - Store depth time-series in InfluxDB time-series database.
+  - Compute derived values: depth change rate, rolling average, variance.
+
+5.2 Bottom Classification
+--------------------------
+
+A machine learning model classifies the seafloor composition based on
+depth sounder return signal characteristics:
+
+  Features Extracted:
+  - First return echo strength (dB) — hard bottoms reflect more energy.
+  - Second return echo strength — indicates bottom layering.
+  - Echo tail decay rate — hard bottoms have sharp cutoffs; soft bottoms
+    have long, gradual tails.
+  - Depth variability (coefficient of variation over a 100m track) —
+    rocky bottoms are rough; mud/sand are smooth.
+  - Signal-to-noise ratio of the return.
+
+  Classification Categories:
+  - Hard rock, cobble/boulder, gravel, sand, mud/silt, mixed.
+  - Also: presence of vegetation (kelp, seagrass) detected by intermediate
+    returns.
+
+  Model Architecture:
+  - Gradient boosting classifier (XGBoost) on extracted features.
+  - Training data: initial 50-100 manual annotations by captain/crew
+    ("I know this area is rocky from the chart") supplemented by
+    sediment survey data where available.
+  - Output: bottom type probability distribution updated every 10-20 meters
+    of track.
+
+  Utility:
+  - Bottom type is a strong predictor of species presence (e.g., cod on
+    rocky/hard bottoms, flounder on sand/mud).
+  - Integration with catch data: "In areas classified as 'gravel', cod
+    CPUE is 3.2x higher than the trip average."
+  - This creates a predictive fishing map specific to this vessel's
+    operational area.
+
+5.3 Fish School Detection (Sonar Display Analysis)
+-----------------------------------------------------
+
+If the vessel's fishfinder/sonar has a video output (composite, HDMI, or
+network stream), the system can analyze the sonar display to detect fish
+schools:
+
+  Hardware Setup:
+  - Sonar video output → USB HDMI capture card (e.g., Magewell USB Capture
+    HDMI Gen 2) → Jetson-Bravo USB 3.0 port.
+  - Frame rate: 5-10 fps (sonar displays update at 1-30 Hz depending on
+    the unit; 5 fps is sufficient for school detection).
+
+  Detection Model:
+  - Custom CNN classifier trained on sonar display screenshots.
+  - Training approach: capture 1000+ screenshots from this vessel's
+    fishfinder, manually label schools vs. no-school vs. noise.
+  - Classes: "no_fish", "school_below", "school_starboard", "school_port",
+    "school_ahead", "bottom_formation", "noise/artifact".
+  - Architecture: MobileNetV3-Small (efficient, <2M parameters) or
+    custom lightweight CNN.
+
+  Alert Generation:
+  - When a school is detected, generate a voice alert: "School detected
+    at 30 meters depth, bearing 045 degrees."
+  - Display school position on the wheelhouse chart plotter overlay.
+  - Log school detections with position, depth, size estimate, and species
+    prediction (if correlated with catch data).
+
+  Advanced Processing:
+  - School size estimation: pixel area of school blob → estimated physical
+    size (using range settings from the sonar display).
+  - School tracking: track school position over multiple sonar pings to
+    estimate movement direction and speed.
+  - Species prediction: "Schools of this size at this depth in this area
+    are historically 78% Atlantic herring."
+
+5.4 Depth Trend Analysis
+-------------------------
+
+Beyond real-time depth reading, the system performs time-series analysis:
+
+  - Bottom tracking: detect sudden depth changes indicating underwater
+    hazards (drop-offs, wrecks, cables).
+  - Fishing depth optimization: correlate historical catch data with depth
+    to recommend optimal tow depth.
+  - Tide compensation: compare depth readings with predicted tide height
+    (from GPS timestamp + tidal prediction tables) to compute true water
+    depth.
+
+================================================================================
+6. REINFORCEMENT LEARNING FRAMEWORK
+================================================================================
+
+6.1 Continuous Improvement Loop
+--------------------------------
+
+The species identification model does not reach a static final state — it
+continuously improves through multiple feedback mechanisms:
+
+  Implicit Feedback (Passive):
+  - Bin-based labels (Section 3.3, Strategy 1) provide continuous
+    training signal without crew effort.
+  - The system monitors its own predictions: if the model consistently
+    predicts "cod" but the bin assignment says "haddock", this species
+    pair is flagged as a confusion candidate.
+  - Temporal consistency: if a fish species prediction changes
+    erratically frame-to-frame for the same fish, the system reduces
+    confidence and flags for review.
+
+  Explicit Feedback (Active):
+  - Crew corrections via touchscreen or voice (Section 3.3, Strategies
+    2-3) directly update the training label.
+  - Captain review: at the end of each haul, the captain can review a
+    montage of misidentified or low-confidence detections and correct
+    them. This "review session" takes 2-5 minutes and provides very
+    high-quality training data for the most challenging examples.
+
+  Active Learning (Strategic):
+  - The system identifies frames where the model's top-2 predictions are
+    close in confidence (e.g., 0.52 cod vs. 0.48 haddock). These are
+    the most informative training examples.
+  - For active learning frames, the system displays a prompt on the
+    touchscreen: "Is this cod or haddock?" Crew taps to answer.
+  - By prioritizing collection of these ambiguous examples, the model
+    improves faster than with random sampling.
+
+  Feedback Priority System:
+  1. Captain corrections (highest weight: 5x in loss function).
+  2. Bin-based labels (standard weight: 1x).
+  3. Crew touchscreen corrections (elevated weight: 3x).
+  4. Voice corrections (elevated weight: 2x, verified by timestamp matching).
+
+6.2 Model Degradation Detection
+---------------------------------
+
+The system monitors its own performance over time to detect degradation:
+
+  - Accuracy tracking: daily validation accuracy on the held-out set.
+  - Prediction confidence distribution: if average confidence drops
+    significantly, the model may be encountering novel conditions
+    (new species, unusual lighting, damaged camera).
+  - Species distribution drift: if the system detects a species not
+    seen in training data, it enters "discovery mode" — captures
+    images at higher frame rate and prompts crew for identification.
+  - Camera health: image quality metrics (brightness, contrast, sharpness)
+    are monitored; degradation triggers maintenance alert.
+
+6.3 Night Operations Enhancement
+---------------------------------
+
+The AI system provides unique advantages for night operations:
+
+  - IR cameras detect fish that crew may miss in poor lighting conditions.
+  - The system counts and classifies fish 24/7, eliminating fatigue-related
+    counting errors.
+  - Night-collected images (monochrome/IR) are included in training data,
+    ensuring the model maintains accuracy in all lighting conditions.
+  - Species-specific IR reflectance patterns (scales, skin texture) provide
+    additional discriminative features that complement color-based
+    daytime classification.
+
+6.4 Crew Efficiency Benefits
+------------------------------
+
+  Quantitative Benefits (estimated after 1 month of operation):
+  - Catch counting time reduction: 80% (from 15 min/haul manual to 3 min
+    review/haul).
+  - Species miscounting error: <5% (vs. 15-25% for tired crew at end of
+    long trip).
+  - Logbook data completeness: 100% (automated; vs. 60-80% for manual
+    entry under fatigue).
+  - Regulatory compliance: automated discard counting reduces risk of
+    under-reporting.
+  - Catch per hour increase: estimated 5-10% (from better real-time
+    information on species composition, allowing gear adjustment).
+
+================================================================================
+7. DATA PIPELINE ARCHITECTURE
+================================================================================
+
+7.1 Storage Architecture
+-------------------------
+
+  Primary Storage (Jetson-Bravo):
+  - 2TB NVMe M.2 SSD (Samsung 990 Pro, 7450 MB/s read, 6900 MB/s write).
+  - Partition layout:
+      /dev/nvme0n1p1  50 GB   / (root filesystem)
+      /dev/nvme0n1p2  32 GB   swap
+      /dev/nvme0n1p3  1800 GB /data (raw images, labeled data, models)
+      /dev/nvme0n1p4  118 GB  /backup (model rollback, config backups)
+
+  Data Retention Policy:
+  - Raw (unlabeled) images: 30-day rolling window. Older images are
+    automatically deleted (FIFO). Estimated storage: ~50-100 GB.
+  - Labeled images: kept indefinitely (until disk >85% full, then oldest
+    labeled images are compressed to lower quality or moved to external
+    storage). Estimated growth: ~10-30 GB/month.
+  - Training artifacts (model weights, logs): kept indefinitely.
+    Estimated storage: ~5-10 GB after 1 year.
+  - Catch reports (JSON/CSV/PDF): kept indefinitely.
+    Estimated storage: ~100 MB/year.
+
+7.2 Data Flow
+--------------
+
+  Real-Time Inference Path:
+  Camera → ESP32-S3 → Serial (UART) → Jetson-Bravo → YOLOv8 TensorRT
+    → MQTT (detections) → InfluxDB (time-series) → PostgreSQL (catch records)
+    → Grafana dashboard (real-time visualization)
+
+  Training Path:
+  Raw images (Jetson-Bravo /data/raw/) → Labeling (bin-based + manual)
+    → Labeled dataset (Jetson-Bravo /data/labeled/) → rsync to Jetson-Charlie
+    → YOLOv8 training → Validation → Model export (TensorRT)
+    → rsync to Jetson-Bravo → Hot-reload inference engine
+
+  Cloud Sync Path (when satellite connectivity available):
+  Catch reports (JSON/PDF) → Starlink/Ku-band satellite → Cloud storage (S3)
+  Model metadata → Git push → Cloud repository
+  Critical alerts → Satellite → Shore-side monitoring dashboard
+
+7.3 Databases
+--------------
+
+  InfluxDB (Time-Series):
+  - Depth readings (1-second intervals).
+  - Catch weight readings (100ms intervals during weighing).
+  - Detection counts (per-species, per-minute).
+  - System health metrics (GPU temperature, CPU usage, frame rate).
+
+  PostgreSQL (Relational):
+  - Catch records (haul_id, species, count, weight, length, gps, timestamp).
+  - Species master table (species_code, common_name, scientific_name,
+    regulatory_info).
+  - Model version registry (version, accuracy, deployment_date, parent).
+  - Crew corrections log (timestamp, correction_from, correction_to,
+    crew_member, confidence).
+  - Equipment status (camera_id, online_since, frame_rate, health_status).
+
+  Redis (Cache/Message Broker):
+  - MQTT message broker for real-time detection streaming.
+  - Session cache for active learning UI state.
+  - Job queue for training tasks.
+
+7.4 Network Architecture
+--------------------------
+
+  Vessel Network (Isolated):
+  - Camera VLAN (10.10.10.0/24): IP cameras and ESP32-S3 units only.
+    No internet access. PoE switches provide power and connectivity.
+  - Processing VLAN (10.10.20.0/24): Jetson-Bravo, Jetson-Charlie,
+    NMEA multiplexer, wheelhouse displays.
+  - Management VLAN (10.10.30.0/24): Captain's laptop, maintenance access.
+  - Inter-VLAN routing: Jetson-Bravo acts as router/firewall between
+    VLANs. Only necessary ports are forwarded.
+
+  Satellite Link:
+  - Starlink Maritime (recommended): 100-200 Mbps down, 20-40 Mbps up.
+  - Used for: catch report upload, model metadata sync, weather data
+    download, software updates.
+  - NOT used for: raw image upload (too bandwidth-intensive).
+  - Fallback: Iridium Certus (low bandwidth, for critical alerts only).
+
+================================================================================
+8. COMMERCIAL FISHING AI FEATURES
+================================================================================
+
+8.1 Gear Monitoring
+---------------------
+
+  Winch/Cable Tension Monitoring:
+  - Camera watches the winch tension gauge (analog or digital display).
+  - OCR reads tension value every second (using Tesseract or custom CNN
+    for gauge reading).
+  - If tension exceeds configurable threshold (e.g., 80% of rated load):
+    → Visual alarm on wheelhouse display.
+    → Voice alert: "Warning: cable tension at 82% of maximum."
+    → Logged event for maintenance review.
+  - Trend analysis: tracking tension over time to predict cable wear and
+    schedule replacement.
+
+  Net Status Monitoring (if net sonar/camera available):
+  - Net mouth opening area (from net sonar or stereo camera).
+  - Net fill level estimation (from tow resistance and catch rate).
+  - Alert: "Net appears full based on tow resistance — recommend haul."
+
+8.2 Crew Safety
+----------------
+
+  Person-Overboard (POB) Detection:
+  - Forward-looking cameras run a YOLOv8 "person" class detector at
+    15-30 fps.
+  - If a person is detected in the water (below the deck rail line,
+    within the water ROI):
+    → Immediate alarm: klaxon + strobe light + voice alert.
+    → GPS position logged.
+    → MOB (Man Overboard) marker deployed on chart plotter.
+    → VHF DSC distress alert prepared (requires crew confirmation to send).
+  - Detection latency: <2 seconds from person entering water to alert.
+  - False positive rate: <1 per hour (tuned to minimize nuisance alarms
+    while ensuring zero missed detections).
+
+  Deck Safety:
+  - Detect crew on deck during dangerous operations (hauling in heavy seas).
+  - Monitor for proper PPE usage (hard hat, life jacket detection — future
+    enhancement requiring additional training data).
+  - Slip/fall detection: abnormal motion pattern near deck edges.
+
+8.3 Catch Compliance
+----------------------
+
+  Quota Tracking:
+  - Running total of each species caught this trip, compared against
+    applicable quota (configured by captain at trip start).
+  - At 75% quota: yellow warning on dashboard.
+  - At 90% quota: orange warning + voice alert.
+  - At 100% quota: red alert + voice alert. "Atlantic cod quota reached.
+    Consider moving to alternative grounds."
+  - Historical quota utilization: forecast trip-end quota status based on
+    current catch rate.
+
+  Regulatory Minimum Size:
+  - Vision system measures each fish (Section 4.3) and compares against
+    species-specific minimum sizes (configured per fishery regulation).
+  - Undersized fish are flagged on the display for the crew.
+  - Undersized fish count is included in the catch report for compliance.
+
+  Discard Monitoring:
+  - All fish going to the discard chute are counted and identified.
+  - Discard ratio is tracked in real-time and reported per haul.
+  - If discard ratio exceeds regulatory limit: immediate alert.
+
+8.4 Weather Integration
+-------------------------
+
+  Data Sources:
+  - Onboard anemometer (wind speed/direction via NMEA MWV sentence).
+  - Onboard wave sensor (if available) or wave height from NMEA VHW.
+  - Gridded weather data: downloaded via satellite (GFS model, 0.25 degree
+    resolution, every 6 hours).
+
+  Fishing Condition Score:
+  - Composite score (0-100) combining:
+      - Wind speed (optimal: 5-15 knots; penalty above 20 knots).
+      - Wave height (optimal: <1.5m; penalty above 2.5m).
+      - Visibility (from camera image quality analysis).
+      - Vessel roll/pitch (from IMU: favorable <5 degrees).
+      - Barometric pressure trend (falling pressure = worsening conditions).
+      - Sea surface temperature (from NMEA or satellite SST).
+  - Score displayed on wheelhouse dashboard: green (>70), yellow (40-70),
+    red (<40).
+  - Historical correlation: "When condition score is >80, catch rate is
+    2.1x higher than average."
+
+8.5 Trip Logging
+-----------------
+
+  The system generates automatic logbook entries compliant with fisheries
+  management requirements (e.g., NOAA Vessel Trip Report, EU logbook
+  regulations):
+
+  Data Captured Per Haul:
+  - Date/time of haul start and end (UTC).
+  - GPS position at gear deployment and retrieval.
+  - Gear type and configuration (configurable by captain).
+  - Target species.
+  - Species caught (count and weight, live and dead).
+  - Discards (species, count, weight, reason for discard).
+  - Fishing depth (from depth sounder).
+  - Sea surface temperature.
+  - Weather conditions.
+  - Engine hours at haul start and end (from NMEA engine data).
+  - Catch per unit effort (CPUE).
+
+  Output Formats:
+  - Vessel Trip Report (VTR) format (NOAA).
+  - EU e-logbook XML format.
+  - Custom JSON for vessel platform database.
+  - Human-readable PDF for physical records.
+
+================================================================================
+9. RISK ASSESSMENT & MITIGATION
+================================================================================
+
+  RISK                          LIKELIHOOD  IMPACT   MITIGATION
+  ---------------------------------------------------------------------------
+  Camera failure (salt/spray)    High       High     IP67 cameras, regular
+                                                      cleaning schedule,
+                                                      redundant cameras
+  False species ID               Medium     Medium   Active learning loop,
+                                                      confidence thresholds,
+                                                      human review
+  Model overfitting to vessel    Medium     Low      Data augmentation,
+                                                      seasonal validation,
+                                                      cloud model diversity
+  Disk failure (data loss)       Low        High     RAID-1 on Jetson-Bravo,
+                                                      cloud backup of models
+                                                      and reports
+  Network failure                Medium     Medium  Local processing (no
+                                                      cloud dependency for
+                                                      core functions)
+  Crew resistance to system      High       Medium  Incremental deployment,
+                                                      demonstrate value
+                                                      quickly, simple UI
+  Regulatory rejection of        Medium     High     Manual audit trail,
+        automated data                      human-signoff on reports,
+                                                      certified scale
+                                                      integration
+  Cybersecurity breach           Low        High    Isolated VLANs, no
+                                                      inbound internet,
+                                                      encrypted satellite
+                                                      link, VPN for remote
+                                                      access
+
+================================================================================
+10. IMPLEMENTATION ROADMAP
+================================================================================
+
+  PHASE 1: INFRASTRUCTURE (Weeks 1-2)
+  -------------------------------------
+  - Install PoE network switches, run Ethernet cabling to camera locations.
+  - Mount cameras (sorting table x2, forward x1, engine room x1).
+  - Install and configure Jetson-Bravo (vision inference).
+  - Install and configure Jetson-Charlie (ML training).
+  - Set up NMEA multiplexer and connect instruments.
+  - Deploy base YOLOv8-nano model with COCO weights (for detection but not
+    species-specific classification).
+  - Verify image capture and storage pipeline.
+
+  PHASE 2: INITIAL DATA COLLECTION (Weeks 3-4)
+  -----------------------------------------------
+  - Begin passive image collection during normal fishing operations.
+  - Set up bin-based labeling system (cameras calibrated to bin positions).
+  - Install touchscreen display at sorting table for crew feedback.
+  - Collect 2,000-5,000 labeled images.
+  - Perform first training run on Jetson-Charlie.
+  - Deploy first vessel-specific model (expected accuracy: 60-75%).
+
+  PHASE 3: ACTIVE LEARNING (Weeks 5-8)
+  --------------------------------------
+  - Enable active learning prompts (low-confidence detection queries).
+  - Integrate scale data (serial connection).
+  - Set up measuring board camera and calibration.
+  - Enable automated catch report generation.
+  - Deploy improved models (expected accuracy: 80-88%).
+  - Crew familiarization and feedback collection.
+
+  PHASE 4: FULL FEATURE DEPLOYMENT (Weeks 9-12)
+  -----------------------------------------------
+  - Enable person-overboard detection.
+  - Enable gear monitoring (tension gauge OCR).
+  - Enable depth sounder integration and bottom classification.
+  - Enable weather integration and condition scoring.
+  - Enable automated trip logging.
+  - Deploy final models (expected accuracy: >90%).
+  - Satellite connectivity for cloud sync.
+
+  PHASE 5: OPTIMIZATION (Ongoing)
+  ---------------------------------
+  - Continuous model improvement through active learning.
+  - Crew workflow optimization based on usage analytics.
+  - Add advanced features (sonar display analysis, predictive fishing maps).
+  - Fleet-level model sharing (if multiple vessels are equipped).
+
+================================================================================
+11. REFERENCES & APPENDICES
+================================================================================
+
+  Appendix A: Supported Fish Species (Initial Target Set)
+  --------------------------------------------------------
+  - Atlantic Cod (Gadus morhua)
+  - Haddock (Melanogrammus aeglefinus)
+  - Pollock / Saithe (Pollachius virens)
+  - Yellowtail Flounder (Limanda ferruginea)
+  - Winter Flounder (Pseudopleuronectes americanus)
+  - Redfish / Rosefish (Sebastes spp.)
+  - Witch Flounder (Glyptocephalus cynoglossus)
+  - Atlantic Herring (Clupea harengus)
+  - Atlantic Mackerel (Scomber scombrus)
+  - American Plaice (Hippoglossoides platessoides)
+  - Skate (Dipturus spp.)
+  - Monkfish / Anglerfish (Lophius americanus)
+  - Additional species added via crew labeling during active learning phase.
+
+  Appendix B: YOLOv8-Nano Architecture Reference
+  -----------------------------------------------
+  - Backbone: CSPDarknet (tiny variant)
+  - Neck: C2f module (cross-stage partial bottleneck with 2 convolutions)
+  - Head: Decoupled head (separate classification and regression branches)
+  - Input: 640x640x3 RGB
+  - Output: (num_classes + 4 + 1) * num_anchors per grid cell
+  - Pre-trained weights: ultralytics/yolov8n.pt (COCO, 80 classes)
+
+  Appendix C: NMEA Sentence Reference
+  ------------------------------------
+  - GGA: Global Positioning System Fix Data
+  - GNS: GNSS Fix Data
+  - MWV: Wind Speed and Angle
+  - DBT: Depth Below Transducer
+  - DBS: Depth Below Surface
+  - DPT: Depth of Water
+  - VHW: Water Speed and Heading
+  - MDA: Meteorological Composite
+  - RSA: Rudder Sensor Angle
+  - RPM: Revolutions
+  - ETK: Engine Temperature, Key on/Off
+  - VHW: Water Speed and Heading
+
+  Appendix D: Hardware Bill of Materials
+  ----------------------------------------
+  ITEM                          QTY   EST. COST (USD)
+  -------------------------------------------------------
+  Jetson Orin NX 16GB (Bravo)   1     $599
+  Jetson AGX Orin 64GB (Charlie) 1   $1,999
+  2TB NVMe SSD                  2     $320
+  ESP32-S3-WROOM-1 dev boards   6     $120
+  Hikvision IP67 PoE cameras    5     $1,250
+  IR LED arrays (50W)           2     $180
+  Ruggedized touchscreen (10")  1     $650
+  PoE gigabit switches          2     $200
+  NMEA-2000 multiplexer         1     $350
+  USB HDMI capture card         1     $60
+  Ethernet cabling + conduits   -     $300
+  Mounting hardware + enclosures -    $400
+  -------------------------------------------------------
+  TOTAL (estimated)                  $6,428
+
+  Appendix E: Software Dependencies
+  -----------------------------------
+  - NVIDIA JetPack 6.0 (L4T 36.x)
+  - CUDA 12.x, cuDNN 9.x, TensorRT 8.6+
+  - Ultralytics YOLOv8 (pip install ultralytics)
+  - OpenCV 4.8+ (with GStreamer support)
+  - PyTorch 2.1+ (for training on Jetson-Charlie)
+  - InfluxDB 2.x (time-series database)
+  - PostgreSQL 15+ (relational database)
+  - Redis 7.x (message broker / cache)
+  - Grafana 10.x (dashboards)
+  - MQTT (Mosquitto broker)
+  - Docker + NVIDIA Container Toolkit
+  - pynmea2 (NMEA parsing)
+  - python-can (CAN bus for NMEA-2000)
+  - Tesseract OCR 5.x (scale display reading)
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+  Document ID: VAI-TECH-014 | Version 1.0
+  Total Word Count: ~5,200 words (body text)
+  Classification: Commercial-in-Confidence
+  Distribution: Vessel Owner, Systems Integrator, Software Engineering Team
+
+================================================================================

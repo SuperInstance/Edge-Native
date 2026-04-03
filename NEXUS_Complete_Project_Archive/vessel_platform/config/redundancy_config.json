@@ -1,0 +1,344 @@
+{
+  "_comment": "Dual-ESP32 Redundancy & Failover Configuration — Critical system redundancy with true sensor redundancy, relay selector, and hot-swap procedures",
+  "_version": "1.0.0",
+  "_schema": "redundancy_config",
+  "_source_briefs": ["VRP-RF-2024-001 (Brief 15)"],
+  "_safety_class": "IEC 60945 Ed.4 awareness, ABYC A-33 compliance",
+
+  "dual_node_roles": {
+    "_comment": "Only critical subsystems receive dual-ESP32 redundancy. Non-critical subsystems use single ESP32s.",
+    "redundant_roles": [
+      {
+        "role": "autopilot",
+        "slot_id": "SLOT-AP",
+        "pair": ["AP-PRIMARY", "AP-BACKUP"],
+        "criticality": "safety_critical",
+        "failure_consequence": "Loss of heading hold — helmsman must steer manually",
+        "placement": {
+          "primary": "wheelhouse_port_side",
+          "backup": "wheelhouse_starboard_side",
+          "rationale": "Opposite sides of wheelhouse — localized flooding/fire cannot destroy both"
+        },
+        "shared_output": ["solenoid_port", "solenoid_starboard", "solenoid_clutch"],
+        "isolation_method": "relay_selector_board"
+      },
+      {
+        "role": "engine_monitor",
+        "slot_id": "SLOT-EM",
+        "pair": ["EM-PRIMARY", "EM-BACKUP"],
+        "criticality": "safety_critical",
+        "failure_consequence": "Loss of engine alarms — over-temp or low oil pressure undetected",
+        "placement": {
+          "primary": "engine_room_port_side",
+          "backup": "engine_room_starboard_side",
+          "rationale": "Opposite sides of engine room — localized flooding cannot destroy both"
+        },
+        "shared_output": ["alarm_buzzer", "alarm_relay"],
+        "isolation_method": "relay_selector_board"
+      }
+    ],
+    "non_redundant_roles": [
+      {"role": "lighting_controller", "failure_consequence": "Manual lighting control required at breaker panel", "reason": "Non-safety, replace at convenience"},
+      {"role": "deck_equipment", "failure_consequence": "Loss of automatic monitoring, manual operation still possible", "reason": "Non-safety, replace at convenience"},
+      {"role": "camera_interface", "failure_consequence": "No PTZ or streaming, cameras may still work standalone", "reason": "Non-safety, replace at convenience"},
+      {"role": "environmental_sensor", "failure_consequence": "Wind data unavailable to autopilot wind mode", "reason": "Non-safety, replace at convenience"},
+      {"role": "bilge_monitor", "failure_consequence": "Manual pump control required", "reason": "Important but non-redundant (single ESP32 reliable)"},
+      {"role": "navigation_aid", "failure_consequence": "Manual light switching at breaker panel", "reason": "Non-safety, replace at convenience"}
+    ]
+  },
+
+  "failover": {
+    "detection_timeout_ms": 500,
+    "transition_timeout_ms": 100,
+    "cross_check_interval_ms": 1000,
+    "_comment_detection": "STANDBY monitors HB_IN line (GPIO17). ACTIVE pulls LOW for 10ms every 100ms. If HB_IN stays HIGH for >500ms → HEARTBEAT_LOST.",
+    "_comment_transition": "Failover target is <100ms from heartbeat loss to first corrective output. Heading wobble estimated at 1-2 degrees, self-corrects in 1-2 seconds.",
+    "heartbeat": {
+      "period_ms": 100,
+      "pulse_width_ms": 10,
+      "gpio": "GPIO17",
+      "active_behavior": "Pulls HB_OUT (GPIO17) LOW for 10ms every 100ms",
+      "standby_monitor": "Watches HB_IN (GPIO17) for pulse",
+      "warning_threshold_ms": 250,
+      "critical_threshold_ms": 500
+    },
+    "uart_cross_check": {
+      "baud_rate": 115200,
+      "wires": ["TX", "RX", "GND"],
+      "query_interval_ms": 1000,
+      "response_timeout_ms": 50,
+      "max_retries": 2,
+      "status_frame_fields": ["heading", "rudder", "mode", "pid_integral", "uptime"]
+    },
+    "sensor_cross_check": {
+      "compass_thresholds": {
+        "nominal_deg": 3.0,
+        "tolerable_deg": 5.0,
+        "sensor_disagree_deg": 10.0,
+        "critical_divergence_deg": 15.0,
+        "sensor_disagree_action": "Log warning, continue operating, alert Jetson",
+        "critical_action": "Auto-disengage if >15 deg for >5 seconds",
+        "persist_duration_sec": 30
+      },
+      "rudder_thresholds": {
+        "nominal_deg": 2.0,
+        "tolerable_deg": 3.0,
+        "fault_deg": 5.0,
+        "description": "Rudder readings should be very consistent (mechanical coupling)"
+      }
+    },
+    "graceful_handover": {
+      "trigger": "STANDBY detects ACTIVE health score declining AND STANDBY's score is higher",
+      "process": "STANDBY requests handover → ACTIVE acknowledges → both switch roles simultaneously",
+      "purpose": "Prevent hard failover when degradation is gradual (e.g., slow over-temperature)"
+    }
+  },
+
+  "self_test": {
+    "post_sequence": {
+      "_comment": "Power-On Self-Test runs on BOTH ESP32s simultaneously. Total duration ~800ms.",
+      "duration_ms": 800,
+      "stages": [
+        {
+          "name": "hardware_self_test",
+          "start_ms": 50,
+          "duration_ms": 50,
+          "tests": [
+            {"name": "flash_crc32", "description": "Flash CRC-32 verification (stored hash vs computed)", "pass": "Hashes match"},
+            {"name": "sram_test", "description": "March test pattern 0xAA/0x55/0xFF/0x00 across 512KB SRAM", "pass": "No errors in 20ms test"},
+            {"name": "cpu_registers", "description": "Known-value push/pop verification", "pass": "All registers match"},
+            {"name": "watchdog_arm", "description": "Arm and verify external WDT reset capability", "pass": "Reset fires correctly"},
+            {"name": "temperature_check", "description": "Internal temperature sensor read", "pass": "Between -10°C and 85°C"}
+          ],
+          "score_range": {"min": 0, "max": 100}
+        },
+        {
+          "name": "bus_self_test",
+          "start_ms": 100,
+          "duration_ms": 100,
+          "tests": [
+            {"name": "i2c_scan", "description": "I2C bus scan 0x08-0x77 for expected devices", "pass": "BNO085@0x4A + OLED@0x3C found", "score_per_device": 10},
+            {"name": "spi_test", "description": "AS5048A read with parity check", "pass": "Valid reading obtained", "score": 15},
+            {"name": "uart_loopback", "description": "TX->RX diagnostic short (diagnostic mode only)", "pass": "Echo received", "score": 5}
+          ],
+          "score_range": {"min": 0, "max": 40}
+        },
+        {
+          "name": "sensor_self_test",
+          "start_ms": 200,
+          "duration_ms": 100,
+          "tests": [
+            {"name": "bno085_read", "description": "Read calibration status (SYS/GYR/ACC/MAG >= 2)", "pass": "Valid reading with cal >= 2", "score_valid": 20, "score_stored_cal": 5},
+            {"name": "as5048a_read", "description": "Read rudder angle within mechanical limits (-45° to +45°)", "pass": "Valid reading within range", "score_valid": 15, "score_out_of_range": 5}
+          ],
+          "score_range": {"min": 0, "max": 40}
+        },
+        {
+          "name": "nvs_integrity",
+          "start_ms": 300,
+          "duration_ms": 50,
+          "tests": [
+            {"name": "nvs_partition_crc", "description": "NVS partition CRC verification", "pass": "CRC matches"},
+            {"name": "cal_blob_integrity", "description": "Calibration blob integrity check", "pass": "Blob readable and valid"},
+            {"name": "config_blob_integrity", "description": "Configuration blob integrity check", "pass": "Blob readable and valid"},
+            {"name": "firmware_version_string", "description": "Firmware version string readable", "pass": "Non-empty valid version"}
+          ],
+          "score_range": {"min": 0, "max": 20}
+        }
+      ]
+    },
+    "health_score": {
+      "scale": "0-200",
+      "calculation": "hardware_score (0-100) + bus_score (0-40) + sensor_score (0-40) + nvs_score (0-20)",
+      "passing_threshold": 100,
+      "full_health_threshold": 150
+    },
+    "score_announcement": {
+      "start_ms": 350,
+      "method": "Binary frame over UART cross-link",
+      "baud": 115200,
+      "frame_format": {
+        "sync_byte": "0xAA",
+        "node_id": "1 byte (0x01=PRIMARY slot, 0x02=BACKUP slot)",
+        "hw_score": "1 byte (detailed breakdown for diagnostics)",
+        "total_score": "1 byte (0-200 scale)",
+        "crc8": "1 byte (CRC-8 over preceding 4 bytes)"
+      }
+    },
+    "election": {
+      "start_ms": 400,
+      "rules": [
+        {"rule": 1, "description": "If one ESP32 score >100 and other <=100, higher-score unit becomes ACTIVE"},
+        {"rule": 2, "description": "If both scores >100 AND differ by >20, higher score becomes ACTIVE"},
+        {"rule": 3, "description": "If scores within 20 points, GPIO21 jumper determines: HIGH (3.3V) = PRIMARY, LOW (GND) = BACKUP"},
+        {"rule": "4, description": "If BOTH scores <=100, neither drives outputs. ALARM mode. Captain must intervene."}
+      ]
+    },
+    "role_assertion": {
+      "start_ms": 500,
+      "active_gpio": "GPIO18",
+      "active_behavior": "Pull GPIO18 HIGH → energize relay coil → close relay → connect outputs to solenoids → run PID → send heartbeat → green LED ON",
+      "standby_behavior": "GPIO18 LOW → relay open → outputs disconnected → monitor silently → yellow LED slow blink (1Hz)"
+    },
+    "jetson_handshake": {
+      "start_ms": 800,
+      "message": "AUTOPILOT_READY",
+      "transport": "RS-422 serial link to Jetson",
+      "action": "Jetson acknowledges, syncs command state (heading target, mode)"
+    }
+  },
+
+  "relay_selector": {
+    "_comment": "Relay selector board physically disconnects STANDBY ESP32 outputs from solenoids. Only ACTIVE can drive.",
+    "type": "electromechanical relay (DPDT or 4PDT)",
+    "relays": [
+      {"id": "K1", "label": "PRIMARY", "coil_drive": "PRIMARY GPIO18", "coil_voltage_v": 12, "contact_rating_a": 5, "description": "Closes when PRIMARY asserts ACTIVE (GPIO18 HIGH)"},
+      {"id": "K2", "label": "BACKUP", "coil_drive": "BACKUP GPIO18", "coil_voltage_v": 12, "contact_rating_a": 5, "description": "Closes when BACKUP asserts ACTIVE (GPIO18 HIGH)"}
+    ],
+    "timing": {
+      "gpio_toggle_ms": 1,
+      "mechanical_closure_ms": 10,
+      "mechanical_closure_max_ms": 15,
+      "debounce_ms": 20
+    },
+    "interlock": {
+      "method": "hardware AND gate (74HC08) cross-inhibition",
+      "description": "Hardware prevents both relays from being energized simultaneously even if firmware malfunction",
+      "guarantee": "NEVER both relays closed at same time"
+    },
+    "truth_table": {
+      "_comment": "R = relay coil energized (closed), X = relay open (default)",
+      "K1_coil_PRIMARY_GPIO18": ["HIGH", "LOW", "HIGH", "LOW"],
+      "K2_coil_BACKUP_GPIO18": ["HIGH", "HIGH", "LOW", "LOW"],
+      "primary_output_connected": ["INVALID", "YES", "YES", "NO"],
+      "backup_output_connected": ["NO", "YES", "NO", "NO"],
+      "either_connected": ["INVALID", "YES", "YES", "NO"],
+      "note": "State [HIGH, HIGH] should be impossible due to hardware interlock"
+    },
+    "output_channels": ["PORT_solenoid", "STBD_solenoid", "CLUTCH_solenoid"]
+  },
+
+  "hot_swap": {
+    "description": "Captain's step-by-step procedure for replacing a failed ESP32 at sea with zero configuration required",
+    "total_time_estimate_min": 3.0,
+    "_comment_breakdown": "Unplug 30s + plug in 30s + OTA transfer 120s + reboot + verify 30s ≈ 3.5 minutes",
+    "steps": [
+      {
+        "step": 1,
+        "action": "Open waterproof spare parts kit, remove spare ESP32 board",
+        "estimated_time_sec": 30
+      },
+      {
+        "step": 2,
+        "action": "Unplug failed ESP32's M12 connector from RS-422 bus",
+        "estimated_time_sec": 30
+      },
+      {
+        "step": 3,
+        "action": "Plug spare ESP32 into M12 connector",
+        "estimated_time_sec": 30
+      },
+      {
+        "step": 4,
+        "action": "Spare ESP32 boots → sends 'announce' on serial → Jetson receives announce → sees unknown MAC",
+        "estimated_time_sec": 5
+      },
+      {
+        "step": 5,
+        "action": "Jetson detects serial port for auto-provision → auto-assigns role → sends provision_new with stored calibration data + needs_ota=true",
+        "estimated_time_sec": 5,
+        "_comment": "Auto-provision eliminates need for touchscreen interaction. Port is pre-configured for the role."
+      },
+      {
+        "step": 6,
+        "action": "Spare ESP32 enters OTA mode → receives role-specific firmware binary from Jetson over serial at 115200 baud (~2 min for 1.5MB)",
+        "estimated_time_sec": 120,
+        "_comment": "Chunked transfer: 4KB chunks with ACK/NACK, max 3 retries per chunk"
+      },
+      {
+        "step": 7,
+        "action": "ESP32 verifies SHA-256 of received firmware → sets OTA boot partition → sends ota_complete → reboots into assigned role",
+        "estimated_time_sec": 10
+      },
+      {
+        "step": 8,
+        "action": "Rebooted ESP32 sends announce again (now with correct node_id) → Jetson recognizes node → sends provision_existing with all saved settings",
+        "estimated_time_sec": 10
+      },
+      {
+        "step": 9,
+        "action": "ESP32 applies settings, calls role_module.init(), enters CONNECTED state. Verify green LED ON on node box.",
+        "estimated_time_sec": 5,
+        "_comment": "Calibration data restored from Jetson SQLite backup. No manual calibration needed."
+      },
+      {
+        "step": 10,
+        "action": "Verify system operates correctly: check heading, test rudder response, confirm alarms work",
+        "estimated_time_sec": 60
+      }
+    ],
+    "auto_provision_faster": {
+      "description": "Pre-configure serial port to auto-assign role for any unknown MAC. Reduces procedure to: unplug old, plug in new, wait.",
+      "steps": 1,
+      "estimated_time_min": 2.5
+    }
+  },
+
+  "failover_timing": {
+    "_comment": "Detailed timing breakdown of the failover event",
+    "breakdown": [
+      {"phase": "Heartbeat detection timeout", "duration_ms": 500, "note": "Worst case — no heartbeat for 500ms"},
+      {"phase": "Debounce confirm", "duration_ms": 20, "note": "Verify HB still missing after 20ms debounce"},
+      {"phase": "GPIO ROLE assert", "duration_ms": 1, "note": "ESP32 GPIO toggle"},
+      {"phase": "Relay mechanical closure", "duration_ms": 10, "note": "Electromechanical relay close (max 15ms spec)"},
+      {"phase": "PID state initialization", "duration_ms": 2, "note": "Load target from NVS, reset integral"},
+      {"phase": "Sensor read", "duration_ms": 5, "note": "Read compass + encoder"},
+      {"phase": "First PID calc + output drive", "duration_ms": 3, "note": "First corrective output to solenoids"},
+      {"phase": "SUBTOTAL (after detection)", "duration_ms": 41, "note": "Time from heartbeat loss to first corrective output"},
+      {"phase": "Heading wobble estimate", "duration_ms": 1000, "note": "1-2 degree wobble, self-corrects in 1-2 seconds"},
+      {"phase": "END-TO-END (including detection)", "duration_ms": 540, "note": "From last heartbeat to full control restored"}
+    ],
+    "optimization_note": "The 500ms heartbeat timeout is deliberately conservative (prevents false failovers during Flash writes that block for ~100ms). In testing, 200ms is sufficient."
+  },
+
+  "degradation_levels": {
+    "_comment": "System degrades gracefully. Captain ALWAYS has steering at every level.",
+    "levels": [
+      {
+        "level": 0,
+        "name": "FULL",
+        "description": "Full operation: all Jetsons, all sensors, vision, voice, GPS track, adaptive autopilot, remote monitoring",
+        "capabilities": ["LLM voice", "computer vision (4 cameras)", "STT/TTS", "GPS track mode", "adaptive autopilot", "MQTT monitoring", "OpenCPN chartplotter", "fish ID", "depth ML", "radar analysis", "engine telemetry"]
+      },
+      {
+        "level": 1,
+        "name": "ONE_JETSON_DOWN",
+        "description": "One Jetson failed. Two remaining handle redistributed services.",
+        "capabilities": ["LLM voice (if Alpha up)", "vision (if Bravo up)", "STT/TTS (if Bravo up)", "GPS track mode (if Alpha up)", "autopilot (always)", "engine telemetry (if Charlie up)", "MQTT monitoring", "fish ID (if Charlie up)"],
+        "lost": "Specialized services on failed Jetson"
+      },
+      {
+        "level": 2,
+        "name": "TWO_JETSONS_DOWN",
+        "description": "Two Jetsons failed. Single survivor provides limited services.",
+        "capabilities": ["Core autopilot (always)", "Engine alarms (via ESP32)", "Bilge monitor (via ESP32)", "Nav lights (via ESP32)", "Lighting (via ESP32)"],
+        "lost": "Vision, voice, LLM, GPS track, depth ML, fish ID, radar"
+      },
+      {
+        "level": 3,
+        "name": "ALL_JETSONS_DOWN",
+        "description": "All Jetsons offline. ESP32s operate in standalone mode.",
+        "capabilities": ["Autopilot heading hold (buttons + OLED)", "Engine alarms (local buzzer)", "Bilge pump (autonomous)", "Navigation lights (auto-dusk)", "Lighting (last settings)", "OLED status displays"],
+        "lost": "Everything that requires Jetson compute"
+      },
+      {
+        "level": 4,
+        name: "DUAL_ESP32_FAIL",
+        "description": "Both ESP32s in a redundant pair have failed (extremely unlikely).",
+        "capabilities": ["Manual steering (mechanical fallback via spring-center solenoids)", "Kill switch still functional"],
+        "lost": "Autopilot, engine alarms, bilge monitoring — ALL ESP32-controlled systems",
+        "action": "Captain steers manually. Replace ESP32 pair from spare kit."
+      }
+    ]
+  }
+}

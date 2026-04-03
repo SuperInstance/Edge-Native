@@ -1,0 +1,336 @@
+{
+  "_comment": "Jetson Orin Nano Super Cluster Configuration — 3-node cluster with leader election, failover, and AI model allocation",
+  "_version": "1.0.0",
+  "_schema": "cluster_config",
+  "_source_briefs": ["VESSEL-ARCH-2024-011 (Brief 11)", "VRP-RF-2024-001 (Brief 15)"],
+
+  "nodes": [
+    {
+      "hostname": "alpha",
+      "display_name": "Jetson-Alpha",
+      "ip_address": "10.0.0.1",
+      "location": "Navigation Station (Wheelhouse)",
+      "compartment": "wheelhouse",
+      "role": "navigation",
+      "is_leader_default": true,
+      "model": "Jetson Orin Nano Super",
+      "memory": {"total_gb": 8, "allocated_mb": 6850, "headroom_mb": 1342},
+      "storage": {"type": "NVMe SSD", "model": "Samsung 980 Pro", "capacity_gb": 256},
+      "power": {"input_v": 19, "converter": "Traco Power TBL 50-2419WI", "max_w": 25},
+      "clock_mode": "MAXN (60W)",
+      "services": [
+        {"name": "redis", "type": "systemd", "description": "Shared state store for cluster", "port": 6379, "enabled": "leader_only"},
+        {"name": "mosquitto", "type": "systemd", "description": "MQTT telemetry message bus", "port": 1883, "enabled": "leader_only"},
+        {"name": "nmea_mux", "type": "systemd", "description": "C-based NMEA multiplexer daemon", "executable": "/opt/vessel/bin/nmea_mux", "enabled": "leader_only", "tcp_port": 10110},
+        {"name": "opencpn", "type": "application", "description": "Chartplotter with NMEA input and route planning"},
+        {"name": "mcp_server", "type": "systemd", "description": "MCP server exposing vessel control tools to LLM", "enabled": "leader_only"},
+        {"name": "ollama", "type": "systemd", "description": "LLM inference server for Qwen2.5-7B", "endpoint": "http://127.0.0.1:11434", "enabled": "leader_only"},
+        {"name": "grpc_server", "type": "systemd", "description": "gRPC endpoint for cluster RPC", "port": 50051, "enabled": true},
+        {"name": "prometheus_node_exporter", "type": "systemd", "description": "System metrics exporter", "port": 9100, "enabled": true},
+        {"name": "esp32_provisioner", "type": "systemd", "description": "ESP32 firmware provisioning server", "http_port": 8080, "enabled": true},
+        {"name": "cluster_health", "type": "systemd", "description": "Health monitoring and leader election loop", "enabled": true, "publish_interval_seconds": 5}
+      ],
+      "models": [
+        {"name": "qwen2.5-7b", "backend": "ollama", "quantization": "Q4_K_M", "size_mb": 4700, "vram_mb": 5200, "kv_cache_mb": 500, "tokens_per_sec": 40, "boot_time_sec": 8, "ctx_size": 4096}
+      ],
+      "usb_peripherals": [
+        {"port": "USB0", "device": "u-blox GPS NMEA", "baud": 4800, "type": "nmea_source"},
+        {"port": "USB1", "device": "Magnetic Compass", "baud": 4800, "type": "nmea_source"},
+        {"port": "USB2", "device": "Focusrite Scarlett Solo (audio)", "type": "audio", "description": "Helm microphone + cockpit speakers"},
+        {"port": "USB3", "device": "AIS Receiver (optional)", "baud": 38400, "type": "nmea_source"},
+        {"port": "USB4-7", "device": "FTDI FT4232H x2 (RS-422)", "type": "rs422_hub", "total_ports": 8}
+      ]
+    },
+    {
+      "hostname": "bravo",
+      "display_name": "Jetson-Bravo",
+      "ip_address": "10.0.0.2",
+      "location": "Wheelhouse / Back Deck Aft Bulkhead",
+      "compartment": "back_deck",
+      "role": "vision_speech",
+      "is_leader_default": false,
+      "model": "Jetson Orin Nano Super",
+      "memory": {"total_gb": 8, "allocated_mb": 3200, "headroom_mb": 4992},
+      "storage": {"type": "NVMe SSD", "model": "Samsung 980 Pro", "capacity_gb": 256},
+      "power": {"input_v": 19, "converter": "Traco Power TBL 50-2419WI", "max_w": 25},
+      "clock_mode": "MAXN (60W)",
+      "services": [
+        {"name": "deepstream", "type": "systemd", "description": "DeepStream video pipeline for 4 USB3 cameras", "cameras": 4, "model_path": "/opt/vessel/models/yolov8n.trt", "fps": 30, "enabled": true},
+        {"name": "whisper_stt", "type": "systemd", "description": "Speech-to-text via faster-whisper", "language": "en", "vad": "Silero VAD", "enabled": true},
+        {"name": "piper_tts", "type": "systemd", "description": "Text-to-speech engine", "voice": "en_US-lessac-medium", "sample_rate_hz": 22000, "enabled": true},
+        {"name": "deck_safety_monitor", "type": "systemd", "description": "Analyzes camera feeds for unsafe conditions", "enabled": true},
+        {"name": "grpc_server", "type": "systemd", "description": "gRPC endpoint for vision queries", "port": 50051, "enabled": true},
+        {"name": "esp32_provisioner", "type": "systemd", "description": "ESP32 provisioning server (secondary)", "http_port": 8080, "enabled": true},
+        {"name": "cluster_health", "type": "systemd", "description": "Health monitoring loop", "enabled": true, "publish_interval_seconds": 5}
+      ],
+      "models": [
+        {"name": "yolov8n", "backend": "deepstream_tensorrt", "quantization": "FP16", "model_size_mb": 6.3, "vram_mb": 600, "detection_fps_per_camera": 30, "total_detections_per_sec": 120},
+        {"name": "whisper-small", "backend": "faster-whisper_ctranslate2", "quantization": "FP16", "size_mb": 244, "vram_mb": 500, "realtime_factor": 3.0},
+        {"name": "piper-tts", "backend": "piper-tts-py", "quantization": "CPU-only", "voice_size_mb": 35, "vram_mb": 50, "latency_1sec_audio_ms": 200}
+      ],
+      "usb_peripherals": [
+        {"port": "USB0-3", "device": "Arducam IMX477 (4x cameras)", "type": "camera", "description": "Deck overview, trawl monitor, floodlight IR, stern"},
+        {"port": "USB4", "device": "ReSpeaker Mic Array v2.0", "type": "audio", "description": "Stereo microphone array for STT"},
+        {"port": "USB5", "device": "3.5mm audio to external amp", "type": "audio", "description": "Backup deck speaker output"},
+        {"port": "USB6-7", "device": "FTDI FT4232H (RS-422)", "type": "rs422_hub", "total_ports": 4}
+      ],
+      "detection_classes": [
+        {"id": 0, "name": "person", "description": "Deck crew"},
+        {"id": 1, "name": "person_PPE_vest", "description": "Safety compliance"},
+        {"id": 2, "name": "person_no_PPE", "description": "Safety violation — alert"},
+        {"id": 3, "name": "fishing_net", "description": "Net detected"},
+        {"id": 4, "name": "trawl_door", "description": "Trawl door"},
+        {"id": 5, "name": "crane_hoist", "description": "Crane/hoist equipment"},
+        {"id": 6, "name": "marine_mammal", "description": "Dolphin/whale — regulatory alert"},
+        {"id": 7, "name": "fire", "description": "Fire detected"},
+        {"id": 8, "name": "obstacle", "description": "Deck obstacle"}
+      ]
+    },
+    {
+      "hostname": "charlie",
+      "display_name": "Jetson-Charlie",
+      "ip_address": "10.0.0.3",
+      "location": "Engine Room / Electronics Bay",
+      "compartment": "engine_room",
+      "role": "sensors_provisioning",
+      "is_leader_default": false,
+      "model": "Jetson Orin Nano Super",
+      "memory": {"total_gb": 8, "allocated_mb": 1880, "headroom_mb": 6312},
+      "storage": {"type": "NVMe SSD", "model": "Samsung 980 Pro", "capacity_gb": 256},
+      "power": {"input_v": 19, "converter": "Traco Power TBL 50-2419WI", "max_w": 25},
+      "clock_mode": "MAXN (60W)",
+      "services": [
+        {"name": "nmea_listener", "type": "systemd", "description": "NMEA listener daemon for depth/radar serial devices", "enabled": true},
+        {"name": "depth_processor", "type": "systemd", "description": "ML bathymetric analysis for bottom type and fish schools", "enabled": true},
+        {"name": "fish_id", "type": "systemd", "description": "Fish species identification model", "model_path": "/opt/vessel/models/fish_id.trt", "enabled": true},
+        {"name": "radar_analyzer", "type": "systemd", "description": "Radar target analysis for collision avoidance", "enabled": true},
+        {"name": "engine_telemetry", "type": "systemd", "description": "CAN bus engine ECU telemetry processor", "can_adapter": "CANable USB-CAN", "enabled": true},
+        {"name": "esp32_provisioner", "type": "systemd", "description": "ESP32 provisioning server (primary — engine room proximity)", "http_port": 8080, "enabled": true},
+        {"name": "grpc_server", "type": "systemd", "description": "gRPC endpoint for sensor data queries", "port": 50051, "enabled": true},
+        {"name": "cluster_health", "type": "systemd", "description": "Health monitoring loop", "enabled": true, "publish_interval_seconds": 5}
+      ],
+      "models": [
+        {"name": "fish_species_id", "backend": "tensorrt", "quantization": "FP16", "model_size_mb": 50, "vram_mb": 200, "fps": 15, "classes": "20+ target species + bycatch + unknown"},
+        {"name": "depth_sounder_ml", "backend": "tensorrt", "quantization": "FP16", "model_size_mb": 10, "vram_mb": 50, "type": "1D CNN", "input_window": "200 readings"},
+        {"name": "radar_analyzer", "backend": "rule_based_ml", "vram_mb": 30, "description": "CPA/TCPA calculations with small ML classifier"}
+      ],
+      "usb_peripherals": [
+        {"port": "USB0", "device": "Garmin/Simrad Depth Sounder", "baud": 4800, "type": "nmea_source"},
+        {"port": "USB1", "device": "Radar NMEA output", "baud": 4800, "type": "nmea_source"},
+        {"port": "USB2", "device": "CANable USB-CAN adapter", "type": "can_bus", "description": "Engine ECU CAN bus"},
+        {"port": "USB3", "device": "Water temperature sensor", "type": "serial"},
+        {"port": "USB4-5", "device": "FTDI FT4232H (RS-422)", "type": "rs422_hub", "total_ports": 4}
+      ]
+    }
+  ],
+
+  "leader_election": {
+    "method": "redis_set_nx_with_expiry",
+    "description": "Redis-based leader election using SET key NX (set-if-not-exists) with PX (expiry) option",
+    "leader_key": "cluster:leader",
+    "expiry_seconds": 5,
+    "renew_interval_seconds": 3,
+    "tiebreaker": "lowest_ip_wins",
+    "election_rules": [
+      "1. Current leader renews key every 3 seconds",
+      "2. If key expires (5s timeout), all Jetsons race to SET it",
+      "3. Lowest IP address wins tie (Alpha 10.0.0.1, Bravo 10.0.0.2, Charlie 10.0.0.3)",
+      "4. New leader starts leader-only services (Redis, Mosquitto, NMEA mux, MCP server, Ollama)",
+      "5. Old leader stops leader-only services after graceful handover",
+      "6. MCP server only runs on leader — prevents conflicting autopilot commands"
+    ],
+    "failover_notification": {
+      "method": "MQTT publish + gRPC broadcast",
+      "topic": "vessel/cluster/failover",
+      "payload": "{\"from\":\"OLD_LEADER\",\"to\":\"NEW_LEADER\",\"reason\":\"timeout|manual|health_degrade\",\"timestamp\":\"ISO8601\"}"
+    }
+  },
+
+  "failover": {
+    "_comment": "Failover rules for each Jetson failure scenario",
+    "scenarios": [
+      {
+        "name": "alpha_fails",
+        "description": "Jetson-Alpha (navigation station) loses power or crashes",
+        "detection": "5 consecutive ping failures (5s) or Redis key expiry (5s)",
+        "new_leader": "bravo (10.0.0.2 — lowest IP of remaining)",
+        "services_migrated": ["redis", "mosquitto", "nmea_mux", "mcp_server", "ollama"],
+        "services_lost": ["opencpn (helm display)", "LLM voice assistant"],
+        "esp32_provisioner": "Charlie takes over (engine room has physical access)",
+        "degraded_capabilities": [
+          "Vision and STT/TTS continue on Bravo",
+          "Sensor data continues from Charlie",
+          "Autopilot ESP32s operate standalone (Iron Mike mode)",
+          "LLM voice assistant OFF until Alpha recovers",
+          "Chart plotter display OFF (requires Alpha HDMI)"
+        ],
+        "recovery": "On Alpha reboot, it rejoins cluster as follower. If preferred leader, request leadership transfer."
+      },
+      {
+        "name": "bravo_fails",
+        "description": "Jetson-Bravo (back deck) loses power or crashes",
+        "detection": "5 consecutive ping failures or Redis LWT trigger",
+        "new_leader": "alpha remains leader (no leadership change needed)",
+        "services_lost": ["deepstream vision pipeline", "whisper STT", "piper TTS", "deck safety monitoring"],
+        "degraded_capabilities": [
+          "Navigation and autopilot fully operational",
+          "No computer vision (deck blind)",
+          "No voice assistant (STT/TTS on Bravo only)",
+          "No deck safety monitoring",
+          "Environmental sensors continue via ESP32"
+        ],
+        "recovery": "On Bravo reboot, restarts vision pipeline. Models reload in ~10 seconds."
+      },
+      {
+        "name": "charlie_fails",
+        "description": "Jetson-Charlie (engine room) loses power or crashes",
+        "detection": "5 consecutive ping failures or Redis LWT trigger",
+        "new_leader": "alpha remains leader",
+        "services_migrated": ["esp32_provisioner (to Alpha)"],
+        "services_lost": ["depth sounder ML", "fish species ID", "radar analyzer", "engine telemetry CAN", "primary ESP32 provisioning"],
+        "degraded_capabilities": [
+          "Navigation and autopilot fully operational",
+          "Vision and voice fully operational",
+          "No depth ML analysis (raw depth still via NMEA mux)",
+          "No fish ID, no radar analysis",
+          "Engine monitor ESP32s operate standalone with local alarms",
+          "ESP32 provisioning via Alpha secondary server"
+        ],
+        "recovery": "On Charlie reboot, reconnects NMEA serial devices, restarts ML models."
+      },
+      {
+        "name": "two_jetsons_fail",
+        "description": "Two of three Jetsons fail simultaneously",
+        "survivor": "Remaining Jetson becomes leader automatically",
+        "capabilities": "Single Jetson provides limited services based on its role. All ESP32s operate standalone with local intelligence.",
+        "critical_note": "Autopilot, engine monitor, and bilge monitor ESP32s all operate independently — no Jetson needed for core safety functions."
+      },
+      {
+        "name": "all_jetsons_fail",
+        "description": "All three Jetsons fail or cluster network is severed",
+        "detection": "No Redis PING from any peer + all ESP32s declare LINK_LOST",
+        "esp32_behavior": "All ESP32s enter STANDALONE mode. Last-known settings from NVS.",
+        "capabilities_remaining": [
+          "Autopilot: heading hold via buttons and OLED, PID runs independently",
+          "Engine monitor: local alarms for over-temp, low oil pressure",
+          "Bilge monitor: autonomous pump control and flood alarm",
+          "Navigation lights: dusk-to-dawn automatic switching",
+          "Lighting: last-known settings maintained"
+        ],
+        "capabilities_lost": ["vision", "voice", "GPS track mode", "adaptive autopilot", "remote monitoring", "LLM assistant"]
+      }
+    ]
+  },
+
+  "provisioning": {
+    "firmware_vault_path": "/opt/vessel/firmware_vault",
+    "node_database_path": "/opt/vessel/firmware_vault/node_database.json",
+    "settings_db_path": "/opt/vessel/data/nodes.db",
+    "settings_db_schema_version": 1
+  },
+
+  "backup": {
+    "rsync": {
+      "schedule": "Every 6 hours via cron",
+      "source": "/opt/vessel/config/",
+      "targets": ["10.0.0.2:/opt/vessel/config/", "10.0.0.3:/opt/vessel/config/"],
+      "options": "-avz --delete",
+      "git_integration": "Config files version-controlled in /opt/vessel/config/ Git repository"
+    },
+    "database_replication": {
+      "method": "SQLite WAL mode with periodic rsync",
+      "source": "/opt/vessel/data/",
+      "targets": ["10.0.0.2:/opt/vessel/data/", "10.0.0.3:/opt/vessel/data/"],
+      "interval_seconds": 300
+    },
+    "redis_replication": {
+      "method": "Redis Sentinel",
+      "master": "10.0.0.1:6379",
+      "sentinels": ["10.0.0.1:26379", "10.0.0.2:26379", "10.0.0.3:26379"],
+      "failover_time_seconds": 10,
+      "quorum": 2
+    }
+  },
+
+  "stt_tts": {
+    "whisper": {
+      "backend": "faster-whisper",
+      "runtime": "CTranslate2",
+      "model": "whisper-small",
+      "size_mb": 244,
+      "language": "en",
+      "quantization": "FP16",
+      "vram_mb": 500,
+      "realtime_factor": 3.0,
+      "description": "3x real-time on Jetson GPU — 9 seconds of audio processed in 3 seconds",
+      "vad": {
+        "engine": "Silero VAD",
+        "purpose": "Voice activity detection — ignores engine noise"
+      },
+      "installation": "pip install faster-whisper"
+    },
+    "piper": {
+      "backend": "piper-tts-py",
+      "voice": "en_US-lessac-medium",
+      "description": "Clear, professional male voice",
+      "runtime": "CPU-only (ARM Cortex-A78AE cores)",
+      "vram_mb": 50,
+      "voice_size_mb": 35,
+      "latency_1sec_audio_ms": 200,
+      "audio_format": "22kHz 16-bit PCM via ALSA/PulseAudio",
+      "installation": "pip install piper-tts-py",
+      "alternative_voice": "Custom marine voice trained on vessel-appropriate recordings"
+    },
+    "audio_routing": {
+      "microphone": "Focusrite Scarlett Solo USB audio interface (helm station)",
+      "speakers": "Cockpit speakers via headphone amp",
+      "deck_output": "3.5mm to external amplifier for deck speakers (backup on Bravo)",
+      "sample_rate_hz": 22000,
+      "channels": 1
+    },
+    "wake_word": {
+      "engine": "Porcupine (picovoice Python SDK)",
+      "keyword": "Hey Helm",
+      "description": "Wake word detection for hands-free voice control",
+      "installation": "pip install porcupine"
+    },
+    "conversation_loop": {
+      "description": "Full voice conversation: wake word → STT → LLM → TTS → speaker",
+      "target_e2e_latency_ms": 3000,
+      "steps": [
+        {"step": 1, "name": "wake_detect", "latency_ms": 100, "description": "Porcupine wake word detection"},
+        {"step": 2, "name": "stt_record", "latency_ms": 1500, "description": "Record until silence (1-3s typical)"},
+        {"step": 3, "name": "stt_transcribe", "latency_ms": 500, "description": "Whisper transcription"},
+        {"step": 4, "name": "llm_process", "latency_ms": 500, "description": "Qwen2.5-7B inference (~20 tokens)"},
+        {"step": 5, "name": "tts_generate", "latency_ms": 200, "description": "Piper TTS audio generation"},
+        {"step": 6, "name": "audio_output", "latency_ms": 50, "description": "ALSA playback start"}
+      ]
+    },
+    "latency_budget": {
+      "wake_to_audio_ms": 3000,
+      "stt_only_ms": 2000,
+      "tts_only_ms": 250,
+      "llm_first_token_ms": 80
+    }
+  },
+
+  "boot_sequence": {
+    "target_total_seconds": 45,
+    "services_order": [
+      {"name": "jetson-boot-init", "priority": "boot", "description": "Mount NVMe, set MAXN power mode, set GPU clocks"},
+      {"name": "network", "priority": "basic", "description": "Configure static IP, verify Ethernet link, start chrony NTP"},
+      {"name": "redis", "priority": "networking", "description": "Start Redis, load persisted state, on Alpha only"},
+      {"name": "mosquitto", "priority": "networking", "description": "Start MQTT broker, load ACL, on Alpha only"},
+      {"name": "nmea_mux", "priority": "networking", "description": "Start NMEA multiplexer daemon, on Alpha leader only"},
+      {"name": "ollama", "priority": "after_redis", "description": "Start Ollama, load Qwen2.5-7B (~8s), leader only"},
+      {"name": "deepstream", "priority": "after_network", "description": "Init DeepStream + YOLOv8n TensorRT, on Bravo only"},
+      {"name": "whisper", "priority": "after_deepstream", "description": "Load Whisper-small, init audio, on Bravo only"},
+      {"name": "piper", "priority": "after_whisper", "description": "Load voice model, init ALSA, on Bravo only"},
+      {"name": "fish_id", "priority": "after_network", "description": "Load fish species ID TensorRT engine, on Charlie only"},
+      {"name": "depth_processor", "priority": "after_network", "description": "Load depth sounder ML model, on Charlie only"},
+      {"name": "esp32_provisioner", "priority": "after_network", "description": "Start provisioning server on port 8080, all Jetsons"},
+      {"name": "mcp_server", "priority": "after_ollama_nmea_mux", "description": "Start MCP server with vessel control tools, leader only"},
+      {"name": "cluster_health", "priority": "last", "description": "Start health monitoring, publish status every 5s, participate in election"}
+    ]
+  }
+}

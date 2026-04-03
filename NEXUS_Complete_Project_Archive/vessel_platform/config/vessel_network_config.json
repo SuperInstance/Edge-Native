@@ -1,0 +1,325 @@
+{
+  "_comment": "Vessel Network Configuration — Complete network topology, node assignments, protocols, and communication definitions",
+  "_version": "1.0.0",
+  "_schema": "vessel_network_config",
+  "_source_briefs": ["VRP-NET-2024-001 (Brief 12)", "VESSEL-ARCH-2024-011 (Brief 11)"],
+
+  "jetson_cluster": {
+    "_comment": "Three Jetson Orin Nano Super units in physically separated compartments",
+    "nodes": [
+      {
+        "hostname": "alpha",
+        "fqdn": "alpha.vessel.local",
+        "ip_address": "10.0.0.1",
+        "mac_address": "AA:BB:CC:DD:00:01",
+        "location": "wheelhouse",
+        "compartment": "Navigation Station",
+        "role": "navigation",
+        "is_leader_default": true,
+        "model": "Jetson Orin Nano Super",
+        "memory_gb": 8,
+        "storage": "256GB NVMe SSD",
+        "serial_ports": {
+          "rs422": {
+            "adapter": "FTDI FT4232H x2",
+            "total_ports": 8,
+            "assignments": [
+              {"port": "/dev/ttyUSB0", "node_id": "AP-001", "node_role": "autopilot", "baud": 115200, "description": "Autopilot ESP32 primary"},
+              {"port": "/dev/ttyUSB1", "node_id": "AP-002", "node_role": "autopilot", "baud": 115200, "description": "Autopilot ESP32 backup"},
+              {"port": "/dev/ttyUSB2", "node_id": "SYS-001", "node_role": "environmental_sensor", "baud": 115200, "description": "Wheelhouse environmental sensor"},
+              {"port": "/dev/ttyUSB3", "node_id": "NA-001", "node_role": "navigation_aid", "baud": 115200, "description": "Navigation aid controller"},
+              {"port": "/dev/ttyUSB4", "baud": 115200, "description": "Spare port 1"},
+              {"port": "/dev/ttyUSB5", "baud": 115200, "description": "Spare port 2"},
+              {"port": "/dev/ttyUSB6", "baud": 115200, "description": "Spare port 3"},
+              {"port": "/dev/ttyUSB7", "baud": 115200, "description": "Spare port 4"}
+            ]
+          },
+          "nmea_usb": {
+            "assignments": [
+              {"port": "/dev/ttyACM0", "device": "u-blox GPS", "baud": 4800, "source": "gps", "description": "GPS receiver NMEA output"},
+              {"port": "/dev/ttyACM1", "device": "Compass", "baud": 4800, "source": "compass", "description": "Magnetic compass NMEA output"}
+            ]
+          }
+        },
+        "services": ["redis", "mosquitto", "nmea_mux", "opencpn", "mcp_server", "ollama", "gRPC_server", "prometheus", "esp32_provisioner"],
+        "models": [{"name": "qwen2.5-7b", "quantization": "Q4_K_M", "vram_mb": 5200, "backend": "ollama"}]
+      },
+      {
+        "hostname": "bravo",
+        "fqdn": "bravo.vessel.local",
+        "ip_address": "10.0.0.2",
+        "mac_address": "AA:BB:CC:DD:00:02",
+        "location": "back_deck",
+        "compartment": "Wheelhouse / Aft Bulkhead",
+        "role": "vision_speech",
+        "is_leader_default": false,
+        "model": "Jetson Orin Nano Super",
+        "memory_gb": 8,
+        "storage": "256GB NVMe SSD",
+        "serial_ports": {
+          "rs422": {
+            "adapter": "FTDI FT4232H x1",
+            "total_ports": 4,
+            "assignments": [
+              {"port": "/dev/ttyUSB0", "node_id": "DE-001", "node_role": "deck_equipment", "baud": 115200, "description": "Deck equipment monitor"},
+              {"port": "/dev/ttyUSB1", "node_id": "CAM-001", "node_role": "camera_interface", "baud": 115200, "description": "Camera PTZ controller"},
+              {"port": "/dev/ttyUSB2", "node_id": "LT-001", "node_role": "lighting_controller", "baud": 115200, "description": "Deck lighting controller"},
+              {"port": "/dev/ttyUSB3", "baud": 115200, "description": "Spare port 1"}
+            ]
+          }
+        },
+        "services": ["deepstream", "whisper_stt", "piper_tts", "gRPC_server", "deck_safety_monitor"],
+        "models": [
+          {"name": "yolov8n", "quantization": "FP16 TensorRT", "vram_mb": 600, "backend": "deepstream"},
+          {"name": "whisper-small", "quantization": "FP16", "vram_mb": 500, "backend": "faster-whisper"},
+          {"name": "piper-tts", "quantization": "CPU-only", "vram_mb": 50, "backend": "piper-tts-py"}
+        ]
+      },
+      {
+        "hostname": "charlie",
+        "fqdn": "charlie.vessel.local",
+        "ip_address": "10.0.0.3",
+        "mac_address": "AA:BB:CC:DD:00:03",
+        "location": "engine_room",
+        "compartment": "Electronics Bay",
+        "role": "sensors_provisioning",
+        "is_leader_default": false,
+        "model": "Jetson Orin Nano Super",
+        "memory_gb": 8,
+        "storage": "256GB NVMe SSD",
+        "serial_ports": {
+          "rs422": {
+            "adapter": "FTDI FT4232H x1",
+            "total_ports": 4,
+            "assignments": [
+              {"port": "/dev/ttyUSB0", "node_id": "EM-001", "node_role": "engine_monitor", "baud": 115200, "description": "Engine monitor ESP32 primary"},
+              {"port": "/dev/ttyUSB1", "node_id": "EM-002", "node_role": "engine_monitor", "baud": 115200, "description": "Engine monitor ESP32 backup"},
+              {"port": "/dev/ttyUSB2", "node_id": "BL-001", "node_role": "bilge_monitor", "baud": 115200, "description": "Bilge monitor"},
+              {"port": "/dev/ttyUSB3", "baud": 115200, "description": "Spare port 1"}
+            ]
+          },
+          "nmea_usb": {
+            "assignments": [
+              {"port": "/dev/ttyACM0", "device": "Depth Sounder", "baud": 4800, "source": "depth", "description": "Garmin/Simrad depth sounder"},
+              {"port": "/dev/ttyACM1", "device": "Radar NMEA", "baud": 4800, "source": "radar", "description": "Radar NMEA output (TLL/TTM)"}
+            ]
+          }
+        },
+        "services": ["nmea_listener", "depth_processor", "fish_id", "radar_analyzer", "esp32_provisioner", "gRPC_server", "engine_telemetry"],
+        "models": [
+          {"name": "fish_species_id", "quantization": "FP16 TensorRT", "vram_mb": 200, "backend": "custom"},
+          {"name": "depth_sounder_ml", "quantization": "FP16 TensorRT", "vram_mb": 50, "backend": "custom"},
+          {"name": "radar_analyzer", "quantization": "rule-based + ML", "vram_mb": 30, "backend": "custom"}
+        ]
+      }
+    ]
+  },
+
+  "esp32_nodes": {
+    "_comment": "All ESP32 sensor nodes with role assignments and physical wiring",
+    "nodes": [
+      {"node_id": "AP-001", "role": "autopilot", "instance": "primary", "slot": "SLOT-AP-A", "location": "wheelhouse_port", "jetson": "alpha", "serial_port": "/dev/ttyUSB0", "baud": 115200, "redundancy_pair": "AP-002", "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "AP-002", "role": "autopilot", "instance": "backup", "slot": "SLOT-AP-B", "location": "wheelhouse_stbd", "jetson": "alpha", "serial_port": "/dev/ttyUSB1", "baud": 115200, "redundancy_pair": "AP-001", "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "EM-001", "role": "engine_monitor", "instance": "primary", "slot": "SLOT-EM-A", "location": "engine_room_port", "jetson": "charlie", "serial_port": "/dev/ttyUSB0", "baud": 115200, "redundancy_pair": "EM-002", "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "EM-002", "role": "engine_monitor", "instance": "backup", "slot": "SLOT-EM-B", "location": "engine_room_stbd", "jetson": "charlie", "serial_port": "/dev/ttyUSB1", "baud": 115200, "redundancy_pair": "EM-001", "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "DE-001", "role": "deck_equipment", "instance": "primary", "slot": "none", "location": "back_deck", "jetson": "bravo", "serial_port": "/dev/ttyUSB0", "baud": 115200, "redundancy_pair": null, "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "CAM-001", "role": "camera_interface", "instance": "primary", "slot": "none", "location": "back_deck_mast", "jetson": "bravo", "serial_port": "/dev/ttyUSB1", "baud": 115200, "redundancy_pair": null, "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "LT-001", "role": "lighting_controller", "instance": "primary", "slot": "none", "location": "back_deck", "jetson": "bravo", "serial_port": "/dev/ttyUSB2", "baud": 115200, "redundancy_pair": null, "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "SYS-001", "role": "environmental_sensor", "instance": "primary", "slot": "none", "location": "wheelhouse_mast", "jetson": "alpha", "serial_port": "/dev/ttyUSB3", "baud": 115200, "redundancy_pair": null, "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "BL-001", "role": "bilge_monitor", "instance": "primary", "slot": "none", "location": "engine_room_bilge", "jetson": "charlie", "serial_port": "/dev/ttyUSB2", "baud": 115200, "redundancy_pair": null, "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0},
+      {"node_id": "NA-001", "role": "navigation_aid", "instance": "primary", "slot": "none", "location": "masthead", "jetson": "alpha", "serial_port": "/dev/ttyUSB4", "baud": 115200, "redundancy_pair": null, "galvanic_isolation": "ADuM1201", "connector": "M12-8pin", "power_fuse_a": 5.0}
+    ],
+    "_comment_serial": "RS-422 frame: 8N1, JSON text + newline + CRC-16 hex. Star topology from RS-422 hub via USB adapter."
+  },
+
+  "network_tiers": {
+    "_comment": "Three-tier network architecture with clear separation of concerns",
+    "tier1_ethernet": {
+      "name": "Jetson Cluster LAN",
+      "protocol": "Gigabit Ethernet (IEEE 802.3ab)",
+      "subnet": "10.0.0.0/24",
+      "speed_mbps": 1000,
+      "medium": "Cat6 STP marine-grade",
+      "topology": "Star via managed switch",
+      "switch": {
+        "model": "Netgear GS308T or Moxa EDS-205A",
+        "ip_address": "10.0.0.254",
+        "mounting": "DIN-rail, IP54 enclosure, navigation station",
+        "power": "12V DC from vessel bus"
+      },
+      "cable_specs": {
+        "type": "Shielded Cat6 (STP/FTP)",
+        "rating": "IP67-rated RJ45 connectors",
+        "routing": "Sealed cable glands at compartment boundaries",
+        "max_run_m": 100,
+        "typical_run_m": 50,
+        "redundancy": "Optional LACP link aggregation between Alpha and Bravo"
+      },
+      "dns_hosts": {
+        "10.0.0.1": "alpha.vessel.local alpha",
+        "10.0.0.2": "bravo.vessel.local bravo",
+        "10.0.0.3": "charlie.vessel.local charlie",
+        "10.0.0.200": "wifi_ap.vessel.local wifi_ap"
+      },
+      "protocols": ["gRPC", "MQTT", "ROS2_DDS", "SSH", "VNC", "Redis"],
+      "latency_baseline_ms": 0.5,
+      "ipv6_enabled": false
+    },
+    "tier2_rs422": {
+      "name": "ESP32 Node Bus",
+      "protocol": "RS-422 differential serial (EIA-422)",
+      "baud_rate": 115200,
+      "frame": "8N1",
+      "payload": "JSON text frames, newline-delimited, CRC-16 suffix",
+      "max_cable_m": 300,
+      "topology": "Star from central RS-422 hub per Jetson",
+      "transceiver": "SN75176BP",
+      "isolation": "ADuM1201 (3kV galvanic)",
+      "connector": "M12 8-pin (A-coded, IP67)",
+      "bandwidth_per_node_bps": 48000,
+      "effective_bandwidth_bps": 93750,
+      "headroom_ratio": 2.5
+    },
+    "tier3_nmea": {
+      "name": "NMEA 0183 Instrument Bus",
+      "protocol": "NMEA 0183 (EIA-422 single-talker, multi-listener)",
+      "bus_segments": [
+        {"id": 1, "talker": "GPS Receiver", "baud": 4800, "sentences": ["GGA","GSA","GSV","GLL","RMC","VTG","ZDA"], "listeners": ["Compass","Chart Plotter","Autopilot ESP32","Jetson-Alpha"]},
+        {"id": 2, "talker": "Magnetic Compass", "baud": 4800, "sentences": ["HDG","HDM","HDT","VHW"], "listeners": ["Chart Plotter","Autopilot ESP32","Jetson-Alpha"]},
+        {"id": 3, "talker": "Depth Sounder", "baud": 4800, "sentences": ["DBT","DBK","DBS"], "listeners": ["Chart Plotter","Jetson-Alpha"]},
+        {"id": 4, "talker": "Wind Sensor", "baud": 4800, "sentences": ["MWV","MWD"], "listeners": ["Chart Plotter","Jetson-Alpha"]},
+        {"id": 5, "talker": "AIS Receiver", "baud": 38400, "sentences": ["VDM","VDO"], "listeners": ["Chart Plotter","Jetson-Alpha"], "note": "Separate bus — do NOT mix with 4800 baud devices"},
+        {"id": 6, "talker": "Autopilot ESP32", "baud": 4800, "sentences": ["APHDM","APRSA","APAPB"], "listeners": ["Chart Plotter ONLY"], "note": "Dedicated output bus — autopilot NEVER talks on instrument bus segments 1-5"}
+      ],
+      "termination": "120-ohm at each bus segment end"
+    },
+    "tier_wifi": {
+      "name": "WiFi Monitoring Only",
+      "purpose": "MQTT telemetry to tablet dashboards — NO control commands",
+      "access_point": {
+        "ip_address": "10.0.0.200",
+        "ssid": "VESSEL_ROBOTICS_MONITOR",
+        "security": "WPA3-Enterprise (preferred) or WPA2-AES",
+        "frequency": "5 GHz preferred",
+        "channel": "Fixed (not auto-select)"
+      },
+      "allowed_traffic": ["MQTT telemetry JSON", "Dashboard web UI (read-only)", "Low-res camera preview (H.264 ~2 Mbps)"],
+      "forbidden_traffic": ["Autopilot commands", "Winch control", "Pump control", "ANY actuator commands"],
+      "qos_notes": "WiFi packet loss 5-20% is acceptable for telemetry — all control is wired"
+    }
+  },
+
+  "mqtt_topics": {
+    "_comment": "Structured MQTT topic hierarchy. Broker on Jetson-Alpha (Mosquitto)",
+    "broker": {
+      "host": "10.0.0.1",
+      "port": 1883,
+      "max_connections": 100
+    },
+    "qos_levels": {
+      "qos0_at_most_once": ["GPS at 10Hz", "high-frequency sensor telemetry"],
+      "qos1_at_least_once": ["Detections", "alerts", "commands"],
+      "qos2_exactly_once": ["Configuration changes", "firmware update status"]
+    },
+    "topics": [
+      {"path": "vessel/nav/gps/{source}", "description": "GPS position updates", "qos": 0, "retain": false},
+      {"path": "vessel/nav/heading/{source}", "description": "Compass heading updates", "qos": 0, "retain": false},
+      {"path": "vessel/nav/depth/{source}", "description": "Depth sounder readings", "qos": 1, "retain": false},
+      {"path": "vessel/nav/wind/{source}", "description": "Wind speed and direction", "qos": 0, "retain": false},
+      {"path": "vessel/nav/ais/{source}", "description": "AIS target data", "qos": 1, "retain": false},
+      {"path": "vessel/vision/detection/{cam}", "description": "YOLO detection events", "qos": 1, "retain": false},
+      {"path": "vessel/vision/safety/{event}", "description": "Deck safety alerts (MOB, fire, etc.)", "qos": 2, "retain": false},
+      {"path": "vessel/engine/{parameter}", "description": "Engine telemetry (RPM, temp, pressure)", "qos": 1, "retain": false},
+      {"path": "vessel/bilge/{compartment}", "description": "Bilge level and pump status", "qos": 1, "retain": false},
+      {"path": "vessel/lights/{channel}", "description": "Lighting status updates", "qos": 0, "retain": false},
+      {"path": "vessel/cluster/health/{node}", "description": "Jetson node health status (published every 5s)", "qos": 1, "retain": true},
+      {"path": "vessel/cluster/leader", "description": "Current cluster leader announcement", "qos": 2, "retain": true},
+      {"path": "vessel/cluster/failover", "description": "Failover events and notifications", "qos": 2, "retain": true},
+      {"path": "vessel/esp32/{node_id}/{event}", "description": "ESP32 node events (telemetry, alarm, status)", "qos": 1, "retain": false},
+      {"path": "vessel/esp32/{node_id}/command", "description": "Commands to ESP32 nodes from Jetson", "qos": 2, "retain": false},
+      {"path": "vessel/nmea/{source}/{sentence_type}", "description": "NMEA sentence forwarding from multiplexer", "qos": 0, "retain": false},
+      {"path": "vessel/firmware/{node_id}/ota_status", "description": "OTA firmware update progress", "qos": 2, "retain": false},
+      {"path": "vessel/autopilot/{node_id}/telemetry", "description": "Autopilot heading, rudder, PID state (10Hz)", "qos": 1, "retain": false},
+      {"path": "vessel/autopilot/{node_id}/alarm", "description": "Autopilot alarm events", "qos": 2, "retain": false}
+    ],
+    "last_will": {
+      "topic": "vessel/cluster/health/{node}",
+      "payload": "{\"status\":\"offline\",\"timestamp\":\"TBD\"}",
+      "qos": 1
+    }
+  },
+
+  "grpc_services": {
+    "_comment": "gRPC service definitions for inter-Jetson communication over Gigabit Ethernet",
+    "default_port": 50051,
+    "max_message_size_mb": 50,
+    "services": [
+      {
+        "name": "ClusterService",
+        "proto_file": "vessel_cluster.proto",
+        "package": "vessel",
+        "methods": [
+          {"name": "Ping", "description": "Health check between nodes", "input": "PingRequest", "output": "PingResponse", "streaming": false},
+          {"name": "GetLeaderStatus", "description": "Request leader status from peer", "input": "Empty", "output": "LeaderStatus", "streaming": false},
+          {"name": "TransferLeadership", "description": "Request leader handover", "input": "TransferRequest", "output": "TransferResponse", "streaming": false},
+          {"name": "GetNodeCapabilities", "description": "Query available services on a node", "input": "Empty", "output": "NodeCapabilities", "streaming": false}
+        ]
+      },
+      {
+        "name": "VisionService",
+        "proto_file": "vessel_vision.proto",
+        "package": "vessel",
+        "methods": [
+          {"name": "GetDetections", "description": "Get current detections from all cameras", "input": "DetectionRequest", "output": "DetectionResponse", "streaming": false},
+          {"name": "StreamCamera", "description": "Stream video frames from specific camera", "input": "CameraRequest", "output": "VideoFrame", "streaming": true},
+          {"name": "DetectROI", "description": "Request detection for specific region of interest", "input": "ROIRequest", "output": "DetectionResponse", "streaming": false}
+        ]
+      },
+      {
+        "name": "SensorService",
+        "proto_file": "vessel_sensor.proto",
+        "package": "vessel",
+        "methods": [
+          {"name": "GetDepth", "description": "Get current depth reading", "input": "Empty", "output": "DepthReading", "streaming": false},
+          {"name": "GetRadarTargets", "description": "Get radar target list", "input": "Empty", "output": "RadarTargets", "streaming": false},
+          {"name": "GetEngineTelemetry", "description": "Get engine parameters", "input": "Empty", "output": "EngineData", "streaming": false},
+          {"name": "SubscribeDepthAlerts", "description": "Stream depth alerts", "input": "Empty", "output": "DepthAlert", "streaming": true}
+        ]
+      },
+      {
+        "name": "NavService",
+        "proto_file": "vessel_nav.proto",
+        "package": "vessel",
+        "methods": [
+          {"name": "SetWaypoint", "description": "Set navigation waypoint", "input": "WaypointRequest", "output": "WaypointResponse", "streaming": false},
+          {"name": "GetRoute", "description": "Get current route from OpenCPN", "input": "Empty", "output": "RouteData", "streaming": false},
+          {"name": "ActivateMOB", "description": "Activate Man Overboard emergency", "input": "MOBRequest", "output": "MOBResponse", "streaming": false}
+        ]
+      }
+    ]
+  },
+
+  "redis_config": {
+    "_comment": "Redis shared state store — runs on cluster leader (Jetson-Alpha by default)",
+    "port": 6379,
+    "persist": true,
+    "dump_interval_seconds": 300,
+    "sentinel_enabled": true,
+    "sentinel_monitors": ["10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379"],
+    "shared_state_keys": [
+      {"key": "cluster:leader", "type": "string", "description": "Current leader hostname", "expiry_seconds": 5, "renew_interval_seconds": 3},
+      {"key": "vessel:current_state", "type": "hash", "fields": ["lat","lon","heading","sog","cog","depth","timestamp"], "description": "Current vessel navigation state"},
+      {"key": "vessel:autopilot:target_heading", "type": "string", "description": "Current autopilot target heading"},
+      {"key": "vessel:autopilot:mode", "type": "string", "description": "Current autopilot mode (standby/auto/track/wind)"},
+      {"key": "vessel:engine:rpm", "type": "string", "description": "Current engine RPM"},
+      {"key": "vessel:engine:temp", "type": "string", "description": "Engine coolant temperature"},
+      {"key": "vessel:bilge:{compartment}:level", "type": "string", "description": "Bilge level per compartment"},
+      {"key": "vessel:weather:wind_speed", "type": "string", "description": "Wind speed in knots"},
+      {"key": "vessel:weather:wind_dir", "type": "string", "description": "Wind direction in degrees"},
+      {"key": "vessel:weather:baro", "type": "string", "description": "Barometric pressure in hPa"},
+      {"key": "vessel:health:{node}", "type": "hash", "fields": ["status","uptime","gpu_util","mem_used","temp"], "description": "Jetson node health (published every 5s)"},
+      {"key": "firmware:vault:version:{role}", "type": "string", "description": "Latest firmware version per role"},
+      {"key": "firmware:provisioning:pending", "type": "list", "description": "Queue of pending provisioning events"}
+    ]
+  }
+}

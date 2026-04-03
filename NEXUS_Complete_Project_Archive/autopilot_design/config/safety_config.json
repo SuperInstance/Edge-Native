@@ -1,0 +1,469 @@
+{
+  "_comment": "Safety Configuration \u2014 All safety thresholds, watchdog settings, alarm definitions, and fail-safe behaviors for the ESP32 marine autopilot",
+  "_version": "1.1.0",
+  "_safety_class": "IEC 60945 Ed.4 awareness",
+  "watchdog": {
+    "external_hardware": {
+      "ic_part": "MAX6818",
+      "timeout_ms": 1600,
+      "kick_pin": 1,
+      "output": "WDO",
+      "wdo_action": "pull_EN_low",
+      "reset_behavior": "full_chip_reset",
+      "kick_interval_ms": 100,
+      "required": true,
+      "_comment": "MANDATORY. Internal ESP32 WDT is a SPOF \u2014 if firmware enters infinite loop with interrupts disabled, internal WDT cannot fire. MAX6818 provides independent hardware reset path."
+    },
+    "application_pid": {
+      "check_interval_ms": 100,
+      "pid_heartbeat_timeout_ms": 50,
+      "on_timeout": "CRITICAL_ALARM -> auto_disengage -> buzzer_3beep -> red_LED"
+    },
+    "esp32_task_watchdog": {
+      "enabled": true,
+      "timeout_s": 10,
+      "panic_handler": "print_backtrace_and_reset"
+    },
+    "esp32_interrupt_watchdog": {
+      "timeout_ms": 5000,
+      "panic_handler": "abort"
+    }
+  },
+  "hardware_interlocks": {
+    "_comment": "Physical safety interlocks independent of ESP32 \u2014 mandatory for ABYC A-33 compliance",
+    "kill_switch": {
+      "type": "physical_NC_momentary",
+      "description": "Normally-closed emergency kill switch in series with +12V solenoid supply, BEFORE fuse. Accessible at helm station. Breaks solenoid power independently of ESP32. Latching or key-release type. Must be rated for solenoid bank current (15A min).",
+      "location": "helm_station",
+      "wiring": "series_in_12V_solenoid_supply_before_fuse",
+      "required": true,
+      "trigger_action": "de_energize_all_solenoids_mechanically"
+    },
+    "external_watchdog": {
+      "_comment": "MAX6818 external hardware WDT \u2014 mandatory, not optional. Internal ESP32 WDT is a SPOF.",
+      "ic_part": "MAX6818",
+      "required": true,
+      "rationale": "Independent hardware watchdog. Kicked by hardware timer ISR (not task). Provides reset path when ESP32 firmware is completely unresponsive, including GPIO latch-up scenarios where internal WDT cannot fire."
+    }
+  },
+  "solenoid": {
+    "drive": {
+      "max_on_time_ms": 15000,
+      "cooldown_time_ms": 500,
+      "min_pulse_ms": 100,
+      "min_off_time_ms": 200,
+      "max_current_ma": 4000,
+      "nominal_current_ma": 2000,
+      "inrush_current_ma": 3500,
+      "inrush_duration_ms": 100
+    },
+    "clutch": {
+      "max_on_time_ms": 300000,
+      "engage_settle_time_ms": 500,
+      "disengage_wait_ms": 100,
+      "min_engaged_current_ma": 500,
+      "nominal_current_ma": 1500,
+      "overcurrent_ma": 3000,
+      "undercurrent_fault_ma": 100,
+      "fault_action": "ALARM + prevent_drive_engage"
+    },
+    "interlock": {
+      "never_both_active": true,
+      "require_clutch_for_drive": true,
+      "clutch_loss_action": "immediate_drive_off",
+      "software_enforced": true,
+      "hardware_enforced": true,
+      "hardware_interlock_circuit": "74HC08 cross-inhibition AND gate (PORT AND NOT STBD, STBD AND NOT PORT) between ESP32 GPIO and MOSFET gates"
+    }
+  },
+  "rudder": {
+    "max_angle_deg": 33.0,
+    "mechanical_stop_deg": 35.0,
+    "software_margin_deg": 2.0,
+    "rate_limit_deg_per_sec": 6.0,
+    "rate_limit_deg_per_sec_min": 3.0,
+    "rate_limit_deg_per_sec_max": 12.0,
+    "end_stop_approach_warning_deg": 30.0,
+    "stall_detection": {
+      "enabled": true,
+      "current_threshold_ma": 3000,
+      "min_movement_deg_per_sec": 0.5,
+      "detection_window_ms": 2000,
+      "action": "ALARM + stop_drive + do_not_retry"
+    }
+  },
+  "heading": {
+    "max_error_before_warning_deg": 20.0,
+    "max_error_before_disengage_deg": 60.0,
+    "max_error_before_clamp_deg": 60.0,
+    "max_rate_of_change_deg_per_sec": 60.0,
+    "engagement_max_rate_deg_per_sec": 10.0,
+    "compass_stale_before_warning_ms": 300,
+    "compass_stale_before_alarm_ms": 500,
+    "compass_stale_before_disengage_ms": 500
+  },
+  "link": {
+    "jetson": {
+      "heartbeat_timeout_ms": 2000,
+      "reconnect_attempts": 0,
+      "fallback_mode": "hold_current_heading",
+      "on_loss": "CRITICAL: LINK LOST (TRACK mode: switch to AUTO holding current heading; AUTO mode: continue current heading, buttons still work)",
+      "on_restore": "INFO: LINK RESTORED",
+      "fallback_behavior": {
+        "_comment": "Fix M-03: TRACK mode Jetson failure must fall back to heading hold of CURRENT heading, not last commanded heading",
+        "in_track_mode": "switch_to_auto_hold_current_heading",
+        "in_auto_mode": "continue_current_heading",
+        "alarm_severity_in_track_mode": "critical",
+        "alarm_severity_in_auto_mode": "warning"
+      }
+    },
+    "nmea": {
+      "stale_compass_before_alarm_ms": 500,
+      "max_invalid_checksum_per_5sec": 10,
+      "on_checksum_burst": "WARNING: NMEA_BUS_ERROR"
+    }
+  },
+  "power": {
+    "input_voltage_range_v": {
+      "min": 10.0,
+      "nominal": 12.0,
+      "max": 16.0
+    },
+    "undervoltage_thresholds": [
+      {
+        "level": "warning",
+        "voltage_v": 11.0,
+        "action": "WARNING: LOW VOLTAGE. Amber LED. Reduce non-essential loads."
+      },
+      {
+        "level": "critical",
+        "voltage_v": 8.0,
+        "action": "CRITICAL: UNDERVOLTAGE. Auto-disengage. Buzzer. Red LED.",
+        "_comment": "Fix M-10: Lowered from 10.0V to 8.0V to prevent false disengage during engine crank (battery drops to 9-10V). 8.0V indicates genuine battery failure."
+      }
+    ],
+    "overvoltage_thresholds": [
+      {
+        "level": "warning",
+        "voltage_v": 15.0,
+        "action": "WARNING: HIGH VOLTAGE. Check alternator/regulator."
+      },
+      {
+        "level": "critical",
+        "voltage_v": 16.0,
+        "action": "CRITICAL: OVERVOLTAGE. Auto-disengage. May indicate load dump."
+      }
+    ],
+    "voltage_monitoring": {
+      "enabled": true,
+      "adc_channel": "ADS1115_CH3",
+      "update_rate_ms": 1000,
+      "voltage_divider_ratio_top_kohm": 100.0,
+      "voltage_divider_bottom_kohm": 33.0
+    },
+    "fuse_rating_a": 5.0,
+    "tvs_diode_part": "SM8S36A",
+    "tvs_clamping_v": 36.0,
+    "fuses": [
+      {
+        "name": "logic_fuse",
+        "rating_a": 5.0,
+        "description": "ESP32 + 3.3V electronics (through LM1117-3.3). Protects sensitive electronics from solenoid fault currents.",
+        "protects": [
+          "ESP32",
+          "BNO085",
+          "AS5048A",
+          "SSD1306",
+          "ADS1115",
+          "LM1117-3.3 LDO",
+          "logic rail"
+        ]
+      },
+      {
+        "name": "solenoid_fuse",
+        "rating_a": 15.0,
+        "description": "Solenoid bank (PORT + STBD + CLUTCH). Protects wiring from solenoid short-circuit. Must handle inrush + simultaneous drive scenarios.",
+        "protects": [
+          "PORT_solenoid",
+          "STBD_solenoid",
+          "CLUTCH_solenoid",
+          "solenoid_MOSFET_board"
+        ]
+      }
+    ],
+    "_comment_fuses": "Fix C-03: Split fuses \u2014 single fuse was brownout risk. Separate power paths for electronics vs solenoids."
+  },
+  "temperature": {
+    "esp32": {
+      "warning_celsius": 70.0,
+      "critical_celsius": 80.0,
+      "action_on_critical": "reduce_clock_to_160MHz_then_reset"
+    },
+    "mosfet": {
+      "max_case_temp_celsius": 85.0,
+      "notes": "IRLZ44N TO-220. At 2A/0.06ohm = 0.24W \u2014 no heatsink needed at 3.3V Vgs."
+    }
+  },
+  "alarms": {
+    "_comment": "Complete alarm definitions. Each alarm has a trigger condition, severity, and automatic action.",
+    "definitions": [
+      {
+        "id": "PID_MISSED_DEADLINE",
+        "type": "PID_MISSED_DEADLINE",
+        "severity": "critical",
+        "trigger": "task_pid_control heartbeat not updated within 50ms",
+        "action": "auto_disengage",
+        "buzzer": "3_beep_repeating",
+        "led": "red_solid",
+        "display": "ALARM: PID FAIL",
+        "jetson_message": true
+      },
+      {
+        "id": "COMPASS_FAIL",
+        "type": "COMPASS_DATA_STALE",
+        "severity": "critical",
+        "trigger": "No compass data update for 500ms while engaged",
+        "action": "auto_disengage",
+        "buzzer": "3_beep_repeating",
+        "led": "red_solid",
+        "display": "ALARM: COMPASS FAIL",
+        "jetson_message": true
+      },
+      {
+        "id": "OVERCURRENT_DRIVE",
+        "type": "OVERCURRENT",
+        "severity": "critical",
+        "trigger": "Drive current > 4000mA for >100ms",
+        "action": "stop_drive_immediately",
+        "buzzer": "3_beep_repeating",
+        "led": "red_solid",
+        "display": "ALARM: OVERCURRENT",
+        "jetson_message": true,
+        "notes": "Possible causes: solenoid short, wiring fault, hydraulic lockup"
+      },
+      {
+        "id": "OVERCURRENT_CLUTCH",
+        "type": "OVERCURRENT",
+        "severity": "critical",
+        "trigger": "Clutch current > 3000mA for >100ms",
+        "action": "de_energize_clutch",
+        "buzzer": "3_beep_repeating",
+        "led": "red_solid",
+        "display": "ALARM: CLUTCH OVERCURRENT",
+        "jetson_message": true
+      },
+      {
+        "id": "UNDERVOLTAGE",
+        "type": "UNDERVOLTAGE",
+        "severity": "critical",
+        "trigger": "Supply voltage < 8.0V for >500ms",
+        "action": "auto_disengage",
+        "buzzer": "3_beep_repeating",
+        "led": "red_solid",
+        "display": "ALARM: LOW VOLT",
+        "jetson_message": true
+      },
+      {
+        "id": "OVERVOLTAGE",
+        "type": "OVERVOLTAGE",
+        "severity": "critical",
+        "trigger": "Supply voltage > 16.0V for >100ms",
+        "action": "auto_disengage",
+        "buzzer": "3_beep_repeating",
+        "led": "red_solid",
+        "display": "ALARM: HIGH VOLT",
+        "jetson_message": true,
+        "notes": "Likely alternator load dump. Check TVS diode."
+      },
+      {
+        "id": "RUDDER_STALL",
+        "type": "RUDDER_STALL",
+        "severity": "critical",
+        "trigger": "Drive current > 3000mA AND rudder movement < 0.5\u00b0/sec for 2000ms",
+        "action": "stop_drive_do_not_retry",
+        "buzzer": "3_beep_repeating",
+        "led": "red_solid",
+        "display": "ALARM: RUDDER STALL",
+        "jetson_message": true,
+        "notes": "Rudder mechanically jammed. Manual intervention required."
+      },
+      {
+        "id": "CLUTCH_FAULT",
+        "type": "CLUTCH_ENGAGEMENT_FAIL",
+        "severity": "critical",
+        "trigger": "Clutch commanded ON but current < 100mA for >500ms",
+        "action": "prevent_drive_engage",
+        "buzzer": "2_beep_repeating",
+        "led": "red_blink",
+        "display": "ALARM: CLUTCH FAULT",
+        "jetson_message": true
+      },
+      {
+        "id": "LINK_LOST",
+        "type": "COMMUNICATION_LOSS",
+        "severity": "warning",
+        "trigger": "No Jetson heartbeat received for 2000ms",
+        "action": "display_warning_only",
+        "buzzer": "single_beep",
+        "led": "amber_solid",
+        "display": "WARN: LINK LOST",
+        "jetson_message": true,
+        "notes": "Autopilot CONTINUES on last heading. Buttons still functional."
+      },
+      {
+        "id": "COMPASS_STALE",
+        "type": "SENSOR_STALE",
+        "severity": "warning",
+        "trigger": "No compass data update for 300ms (not yet at alarm threshold)",
+        "action": "display_warning_only",
+        "led": "amber_blink",
+        "display": "WARN: COMPASS OLD",
+        "jetson_message": false
+      },
+      {
+        "id": "HEADING_ERROR_LARGE",
+        "type": "HEADING_ERROR",
+        "severity": "warning",
+        "trigger": "Heading error > 20\u00b0 while engaged for >5 seconds",
+        "action": "display_warning_only",
+        "led": "amber_blink",
+        "display": "WARN: LARGE ERROR",
+        "jetson_message": true
+      },
+      {
+        "id": "GPS_FIX_LOST",
+        "type": "GPS_LOSS",
+        "severity": "warning",
+        "trigger": "GPS fix invalid (GGA fix_quality = 0) while in TRACK mode",
+        "action": "switch_to_auto_mode",
+        "buzzer": "single_beep",
+        "led": "amber_solid",
+        "display": "WARN: GPS LOST (AUTO)",
+        "jetson_message": true
+      },
+      {
+        "id": "VOLTAGE_LOW",
+        "type": "VOLTAGE_WARNING",
+        "severity": "warning",
+        "trigger": "Supply voltage < 11.0V",
+        "action": "display_warning_only",
+        "led": "amber_solid",
+        "display": "WARN: LOW BATTERY",
+        "jetson_message": true
+      },
+      {
+        "id": "VOLTAGE_HIGH",
+        "type": "VOLTAGE_WARNING",
+        "severity": "warning",
+        "trigger": "Supply voltage > 15.0V",
+        "action": "display_warning_only",
+        "led": "amber_solid",
+        "display": "WARN: HIGH VOLTAGE",
+        "jetson_message": true
+      },
+      {
+        "id": "RUDDER_NEAR_ENDSTOP",
+        "type": "RUDDER_WARNING",
+        "severity": "warning",
+        "trigger": "Rudder angle > 30\u00b0 (within 3\u00b0 of software limit)",
+        "action": "display_warning_only",
+        "led": "amber_blink",
+        "display": "WARN: RUDDER LIMIT",
+        "jetson_message": false
+      },
+      {
+        "id": "NMEA_ERROR",
+        "type": "COMMUNICATION_ERROR",
+        "severity": "warning",
+        "trigger": ">10 invalid NMEA checksums in 5 seconds",
+        "action": "display_warning_only",
+        "led": "amber_blink",
+        "display": "WARN: NMEA ERR",
+        "jetson_message": false
+      },
+      {
+        "id": "WIFI_DISCONNECTED",
+        "type": "CONNECTIVITY",
+        "severity": "info",
+        "trigger": "WiFi connection lost (if MQTT enabled)",
+        "action": "retry_connection",
+        "buzzer": "none",
+        "led": "green_off",
+        "display": "INFO: WiFi retry",
+        "jetson_message": false,
+        "retry_interval_sec": 30
+      },
+      {
+        "id": "MODE_CHANGED",
+        "type": "SYSTEM",
+        "severity": "info",
+        "trigger": "Autopilot mode changed",
+        "action": "log_and_display",
+        "buzzer": "single_beep",
+        "led": "green_flash_200ms",
+        "display": "AUTO/TRACK/WIND/STANDBY",
+        "jetson_message": true
+      },
+      {
+        "id": "HEADING_ADJUSTED",
+        "type": "SYSTEM",
+        "severity": "info",
+        "trigger": "Heading target changed by \u00b11\u00b0 or \u00b110\u00b0",
+        "action": "log_and_display",
+        "buzzer": "none",
+        "led": "green_flash_50ms",
+        "display": "updated_heading",
+        "jetson_message": true
+      },
+      {
+        "id": "CALIBRATION_COMPLETE",
+        "type": "SYSTEM",
+        "severity": "info",
+        "trigger": "Sensor calibration procedure completed successfully",
+        "action": "save_to_nvs",
+        "buzzer": "double_beep",
+        "led": "green_flash_500ms",
+        "display": "CAL OK",
+        "jetson_message": true
+      }
+    ]
+  },
+  "fail_safe": {
+    "power_loss_sequence": [
+      "1. All GPIOs default to input/high-Z on ESP32 reset",
+      "2. MOSFET gate pull-down resistors (10K\u03a9) pull gates LOW",
+      "3. IRLZ44N MOSFETs turn OFF",
+      "4. PORT + STBD + CLUTCH solenoids de-energize",
+      "5. Spring-center solenoid valve returns to center (neutral)",
+      "6. Hydraulic lock holds rudder in current position",
+      "7. CLUTCH de-energizes -> hydraulic bypass opens",
+      "8. Helm is free for manual steering"
+    ],
+    "firmware_crash_sequence": [
+      "1. FreeRTOS detects fault (assert/panic or task watchdog)",
+      "2. Print backtrace to UART0 (debug)",
+      "3. External WDT (MAX6818) resets ESP32 within 1.6s",
+      "4. During reset: MOSFETs OFF by pull-downs -> solenoids OFF",
+      "5. After reset: firmware boots in STANDBY mode (never auto-engage)",
+      "6. Clutch remains de-energaged during and after reset"
+    ],
+    "alarm_disengage_sequence": [
+      "1. Set engaged = false immediately",
+      "2. Set GPIO_PORT = LOW, GPIO_STBD = LOW (solenoids OFF)",
+      "3. Wait 100ms for rudder to stabilize",
+      "4. Set GPIO_CLUTCH = LOW (de-energize clutch)",
+      "5. Reset PID integral accumulator to 0",
+      "6. Set autopilot mode to STANDBY",
+      "7. Start 3-beep alarm pattern (500ms on, 200ms off, repeat)",
+      "8. Set LED_RED = solid ON",
+      "9. Flash ALARM text on OLED",
+      "10. Send alarm telemetry to Jetson"
+    ],
+    "alarm_acknowledge": {
+      "method": "long_press_MODE_button_1000ms",
+      "effect": "Alarm cleared -> STANDBY state",
+      "buzzer": "stop",
+      "led": "red_off"
+    }
+  }
+}

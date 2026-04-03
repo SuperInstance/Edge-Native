@@ -1,0 +1,1444 @@
+================================================================================
+              NEXUS BULLETPROOF CODING METHODOLOGY
+       Safety-Critical Software Engineering for ESP32 Firmware
+================================================================================
+  Document:  NXS-004-2025
+  Status:    DESIGN SPECIFICATION
+  Author:    Agent D -- Safety-Critical Software Engineering Division
+  Date:      2025-07-12
+  Classification: Safety Architecture -- Integrity Level SIL-2 Equivalent
+  Applicable Standards: IEC 61508, MISRA C:2012, ISO 26262 (automotive ref)
+  Target Hardware: ESP32-S3 (Reflex Layer) + Jetson Orin Nano (Cortex Layer)
+  Words:     ~5800
+================================================================================
+
+  PREAMBLE -- WHY THIS DOCUMENT EXISTS
+  ────────────────────────────────────
+  Bad firmware kills. In NEXUS, an ESP32 Node may command hydraulic valves on
+  an excavator, control propulsion on an autonomous vessel, manage chemical
+  injection on a crop sprayer, or operate ventilation fans in an underground
+  mine. A single bad artifact -- a control loop with an unbounded integrator,
+  a state machine with a missing transition, a parser that overflows on a
+  malformed NEXUSLINK frame -- can damage multi-million-dollar equipment,
+  destroy crops, start fires, or injure personnel.
+
+  This document defines the engineering methodology that makes NEXUS firmware
+  "bullet-proof." Not theoretically correct on paper. Not passing unit tests
+  in a clean room. Bullet-proof in the field: in mud, heat, vibration,
+  electromagnetic interference, random firmware corruption, adversarial
+  network input, and operator error. The methodology is designed so that the
+  ONLY thing that can put the system in an unsafe state is simultaneous,
+  independent, multi-component hardware failure. Software alone, no matter
+  how buggy, MUST NOT be able to override safety.
+
+  This is not aspirational. This is the engineering requirement.
+
+
+================================================================================
+1. THREE-LAYER CODE ARCHITECTURE
+================================================================================
+
+1.1  LAYER OVERVIEW
+─────────────────────
+
+NEXUS firmware is divided into three layers with strictly decreasing privilege
+and increasing mutability. Each layer has a distinct role, distinct ownership,
+distinct testing requirements, and distinct modification restrictions.
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  LAYER 3: REASONING (Cortex Connection)                         │
+  │  ────────────────────────────────────────                        │
+  │  ~2000 lines C, mutable via artifact updates                     │
+  │  High-level commands, telemetry enrichment, Cortex interface      │
+  │  Reduced-mode fallback when Cortex disconnected                  │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  LAYER 2: REFLEX (Swappable Control Artifact)                   │
+  │  ────────────────────────────────────────                        │
+  │  ~3000 lines C, mutable via artifact updates                     │
+  │  Domain-specific control logic, sensor processing                │
+  │  The "hypothesis" that the Cortex improves                       │
+  │  STRICTLY prohibited from direct hardware access                 │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  LAYER 1: GENESIS (Factory Safety Core)                          │
+  │  ────────────────────────────────────────                        │
+  │  ~5000 lines C, NEVER modified after production                   │
+  │  Hardware init, watchdog, safe-state machine, communication       │
+  │  Artifact manager, ECDSA verification, API enforcement            │
+  │  eFuse protected partition -- immutable at runtime                │
+  └─────────────────────────────────────────────────────────────────┘
+
+The fundamental property: Layer 1 CAN override Layer 2 and Layer 3 at any
+time. Layer 2 CANNOT bypass Layer 1's safety checks. Layer 3 is advisory;
+its failure is invisible to real-time safety guarantees.
+
+
+1.2  LAYER 1 -- GENESIS (Factory Safety Core)
+──────────────────────────────────────────────
+
+Genesis is the immovable bedrock. It is approximately 5000 lines of C code,
+compiled into a read-only flash partition protected by the ESP32-S3's eFuse
+mechanism. No OTA update mechanism, no artifact swap, no Cortex command, and
+no software exploit can modify Genesis after it leaves the factory.
+
+Genesis contains every function that touches hardware registers, every safety
+check, every watchdog handler, and every cryptographic verification. If Genesis
+is correct, the system is safe. If Genesis has a bug, no amount of Layer 2 or
+Layer 3 correctness can compensate.
+
+Genesis responsibilities (exhaustive list):
+
+  (a) HARDWARE INITIALIZATION
+      - Clock tree configuration (PLL, dividers, validated against datasheet)
+      - GPIO mode configuration (input/output/alt-function with pull-up/down)
+      - ADC/DAC calibration at boot (factory calibration values from eFuse)
+      - I2C/SPI/UART peripheral initialization with timing validation
+      - PWM timer configuration with verified frequency and duty cycle limits
+      - External watchdog IC strobe (hardware watchdog independent of ESP32)
+      - Brown-out detector configuration (2.44V default, configurable)
+
+  (b) WATCHDOG MANAGEMENT
+      - ESP32 Task Watchdog Timer (TWDT): Each RTOS task that runs for more
+        than 5 seconds must feed the TWDT. Missed feed = task reset.
+      - ESP32 Interrupt Watchdog Timer (IWDT): Interrupt handlers must complete
+        within the configured window. Miss = system reset.
+      - External hardware watchdog: Genesis strobes a GPIO every 100ms. If the
+        strobe stops for 500ms (5 consecutive misses), the external watchdog IC
+        drives the ESP32 reset pin. This catches the case where the ESP32
+        software locks up so hard that even its internal watchdog freezes.
+      - Watchdog escalation: TWDT miss -> log warning. IWDT miss -> safe state.
+        External WD miss -> hard reset. Each escalation is independent.
+
+  (c) SAFE-STATE MACHINE
+      - Deterministic, priority-based state machine that can execute safe-state
+        sequences within 50ms of trigger (see Section 6 for full specification).
+      - Safe state is the DEFAULT state. The system starts in safe state on
+        every boot. Layer 2 must explicitly command to LEAVE safe state.
+      - Multiple trigger sources: safety violation, heartbeat timeout, operator
+        button, Cortex command, temperature threshold, current threshold.
+
+  (d) NEXUSLINK COMMUNICATION STACK
+      - Frame parser and serializer (binary, no dynamic allocation)
+      - CRC-32 validation on every received frame
+      - Priority-queued transmission (P0 safety > P1 control > P2 telemetry)
+      - Heartbeat generation and monitoring
+      - Store-and-forward buffer management
+      - Discovery and binding protocol
+      - Artifact chunk reception and assembly
+
+  (e) ARTIFACT MANAGER
+      - Dual-slot OTA management (Slot 0 current, Slot 1 previous)
+      - SHA-256 hash verification of received artifacts
+      - ECDSA P-256 signature verification (see Section 5)
+      - Atomic slot swap with rollback capability
+      - Anti-rollback counter enforcement via eFuse
+      - Genesis partition integrity check at every boot (read, hash, compare)
+
+  (f) API ENFORCEMENT LAYER
+      - Implements the four API functions that Layer 2 calls (see Section 2).
+      - Validates EVERY parameter of EVERY actuator command before execution.
+      - Logs every safety violation with timestamp, artifact ID, and parameters.
+      - Rate-limits actuator commands to prevent runaway.
+      - Enforces interlock conditions (e.g., cannot move actuator B unless
+        sensor C confirms position D).
+
+  (g) C FALLBACK ENGINE ("Reptile Brain")
+      - Minimal C implementation (~200 lines) of critical control functions.
+      - Activates automatically when Layer 2 artifact fails self-test or is
+        not present (see Section 8 for full specification).
+      - Bang-bang control instead of PID. Not optimal but PROVABLY SAFE.
+
+Genesis coding rules (absolute, no exceptions):
+  - MISRA C:2012 mandatory. Every line must pass static analysis.
+  - No dynamic memory allocation (malloc/free/new/delete). All buffers are
+    statically sized and bounds-checked.
+  - No recursion. Maximum call depth is statically analyzable.
+  - No floating-point in safety-critical paths. All safety checks use integer
+    arithmetic or fixed-point (Q16.16 format). Floating-point is permitted only
+    in non-safety telemetry processing.
+  - All interrupt handlers are ISR-safe: no blocking, no mutex, no I/O
+    beyond setting flags and triggering deferred processing from the main loop.
+  - Cyclomatic complexity of any function must not exceed 15.
+  - Every function must have a maximum execution time annotation (WCET upper
+    bound) that is verified by measurement (see Section 3).
+
+
+1.3  LAYER 2 -- REFLEX (Swappable Control Artifact)
+────────────────────────────────────────────────────
+
+Reflex is the domain-specific control layer. It is the "hypothesis" that the
+Cortex tests and improves. A marine autopilot's Reflex contains heading PID,
+course tracking, and waypoint navigation. An agricultural sprayer's Reflex
+contains flow rate PID, boom section control, and GPS guidance. A mining
+ventilation controller's Reflex contains gas threshold logic and fan speed
+profiling.
+
+Reflex is approximately 3000 lines of C code (per domain) and is the ONLY
+layer that is modified by the artifact evolution cycle. The Cortex generates
+new Reflex artifacts, they are A/B tested, and if approved, promoted.
+
+Reflex responsibilities:
+  - Domain-specific control algorithms (PID, state machines, Kalman filters)
+  - Sensor data processing and fusion
+  - Reference trajectory generation
+  - Mode management (auto/manual/standby)
+  - Telemetry enrichment (computing derived values from raw sensor data)
+  - Cortex command interpretation and acknowledgment
+
+Reflex coding rules:
+  - MISRA C:2012 mandatory for all safety-influencing code paths.
+  - NO direct hardware access. Reflex calls ONLY the four Genesis API
+    functions (see Section 2). Any attempt to access hardware registers,
+    call ESP-IDF peripheral functions directly, or bypass the Genesis API
+    will fail at link time because Genesis does not export those symbols
+    to the Reflex object.
+  - No dynamic memory allocation in control loops. Telemetry buffers may
+    use static pools with bounded size, but never heap allocation.
+  - All control algorithms must have bounded execution time. PID controllers
+    run in O(1). Kalman filters must use fixed-size state vectors.
+  - Reflex must call safety_get_state() at the start of every control cycle
+    and MUST NOT issue actuator commands if the system is in SAFE_STATE.
+  - Reflex must complete one control cycle within the allocated time budget
+    (e.g., 8ms for a 100Hz loop on a 240MHz core). Genesis will terminate
+    the cycle and enter safe state if the budget is exceeded.
+
+Reflex compilation isolation:
+  The Reflex artifact is compiled as a separate object with a well-defined
+  symbol table. Genesis provides exactly four API functions and three data
+  type definitions. Reflex has no access to any other Genesis internal
+  functions, data structures, or hardware abstraction layer. This is
+  enforced at link time:
+
+    // Genesis exports ONLY these symbols to Reflex:
+    sense_result_t   sense_read(sensor_id_t id);
+    safety_status_t  actuator_set(actuator_id_t id, actuator_cmd_t cmd);
+    safety_state_t   safety_get_state(void);
+    void             telemetry_log(channel_id_t ch, const void* data, uint8_t len);
+
+    // Genesis provides these type definitions to Reflex:
+    typedef struct { int32_t value; uint16_t quality; uint32_t timestamp_ms; } sense_result_t;
+    typedef struct { float target; float rate_limit; uint8_t priority; } actuator_cmd_t;
+    typedef enum { SAFE=0, ACTIVE=1, DEGRADED=2, FAULT=3 } safety_state_t;
+
+  Reflex cannot call gpio_set_level(), adc_read(), uart_write_bytes(), or
+  any other ESP-IDF function. The linker will reject undefined symbols.
+
+
+1.4  LAYER 3 -- REDUCED MODE
+─────────────────────────────
+
+When the Cortex (Jetson) is connected and healthy, it enriches the system
+with high-level commands, path planning, optimization suggestions, and
+artifact management. This is Layer 3: the Reasoning interface.
+
+When the Cortex is disconnected, Layer 3 is inactive. The system continues
+to operate on the Reflex layer with whatever commands were last received or
+with its default autonomous behavior. No safety function depends on Layer 3.
+
+Reduced mode behavior:
+  - Genesis detects Cortex heartbeat timeout (10 seconds, per NEXUSLINK spec).
+  - Genesis sets a cortex_connected flag to false.
+  - Reflex layer sees cortex_connected=false and switches to local autonomous
+    behavior (e.g., hold last heading, maintain last speed, continue waypoint
+    list from local storage).
+  - Telemetry continues to be logged locally (store-and-forward buffer).
+  - When the Cortex reconnects, buffered telemetry is replayed. The Cortex
+    receives the full gap history and resumes high-level command issuance.
+  - The transition between Cortex-connected and Cortex-disconnected modes
+    is seamless. No reset, no re-initialization, no actuator glitch.
+
+The key property: Layer 3 adds intelligence. It never adds safety risk.
+Its absence is handled gracefully by the system automatically.
+
+
+================================================================================
+2. API CONTRACT -- THE GENESIS MEMBRANE
+================================================================================
+
+2.1  THE FOUR API FUNCTIONS
+────────────────────────────
+
+Genesis exposes exactly four functions to the Reflex layer. These four
+functions form the "membrane" through which ALL control decisions must pass.
+Every sensor reading, every actuator command, every safety query, and every
+telemetry emission goes through these functions. This membrane is the single
+point where safety validation occurs.
+
+  ┌──────────────┐         API CONTRACT          ┌──────────────┐
+  │              │   sense_read()   actuator_set() │              │
+  │    REFLEX    │◀────────────────────────────────│   GENESIS    │
+  │  (Layer 2)   │   safety_get_state()            │  (Layer 1)   │
+  │              │   telemetry_log()               │              │
+  └──────────────┘                                 └──────────────┘
+
+Function 1: sense_read(sensor_id_t id)
+  Returns: sense_result_t { int32_t value, uint16_t quality, uint32_t timestamp_ms }
+
+  - Reads the requested sensor through the Genesis hardware abstraction layer.
+  - Returns the most recent reading from the sensor with its quality score
+    (0-15, where 15 is perfect and 0 means sensor fault).
+  - If the sensor is not available or has failed self-test, returns
+    quality=0, value=0, and sets a SENSOR_FAULT alarm.
+  - Genesis timestamps every sensor reading at the moment of ADC conversion,
+    not at the moment of the API call. This prevents stale data from being
+    disguised as fresh.
+  - Thread-safe: uses lock-free ring buffer for sensor data. No mutex in the
+    read path to ensure bounded latency.
+
+Function 2: actuator_set(actuator_id_t id, actuator_cmd_t cmd)
+  Returns: safety_status_t { SUCCESS, REJECTED_RANGE, REJECTED_RATE,
+                             REJECTED_INTERLOCK, REJECTED_CURRENT, FAULT }
+
+  - This is the CRITICAL function. Every actuator command passes through here.
+  - Genesis validates the command against SIX independent checks before
+    execution. ALL six must pass. Any single failure causes the command to
+    be REJECTED and a SAFETY_VIOLATION event to be logged.
+
+  Validation Check 1 -- RANGE CHECK:
+    Is cmd.target within the configured min/max for this actuator?
+    Example: hydraulic valve position must be 0-100%. If cmd.target = 105%,
+    REJECTED_RANGE is returned. No partial execution. The actuator does not
+    move at all.
+
+  Validation Check 2 -- RATE LIMIT:
+    Is the rate of change from the previous command within the configured
+    maximum slew rate?
+    Example: rudder actuator slew rate is 5%/100ms. If the previous command
+    was 30% and the new command requests 80% (50% change), but only 20ms
+    has elapsed (maximum allowed change = 1%), REJECTED_RATE is returned.
+    The actuator is commanded to move to 31% (the maximum allowed by the
+    rate limit), NOT rejected entirely. This prevents stalling while still
+    preventing dangerous sudden movements.
+
+  Validation Check 3 -- INTERLOCK CHECK:
+    Are all interlock conditions satisfied for this actuator?
+    Example: The boom lift actuator requires that the transport lock sensor
+    reads "locked" and the ground speed sensor reads zero. If either
+    condition is false, REJECTED_INTERLOCK is returned.
+
+  Validation Check 4 -- CURRENT LIMIT:
+    Is the actuator's measured current below the configured threshold?
+    Genesis continuously samples actuator current via ADC. If current exceeds
+    the threshold, the actuator is disabled and REJECTED_CURRENT is returned
+    for all subsequent commands until the fault is cleared (typically by
+    operator intervention and reset).
+
+  Validation Check 5 -- SAFETY STATE CHECK:
+    Is the safety state machine in ACTIVE or DEGRADED mode? If the system
+    is in SAFE_STATE or FAULT, ALL actuator commands are rejected with
+    REJECTED_SAFETY_STATE.
+
+  Validation Check 6 -- AUTHORIZATION CHECK:
+    Is the calling artifact authorized to command this actuator? Genesis
+    maintains an artifact-to-actuator permission table. An artifact that
+    only controls the spray system cannot command the steering system.
+    This prevents a malicious or buggy artifact from gaining unauthorized
+    control of unrelated actuators.
+
+  If ALL six checks pass, Genesis issues the command to the hardware and
+  returns SUCCESS. The command is logged to the telemetry buffer with a
+  microsecond-resolution timestamp.
+
+  Timing guarantee: actuator_set() executes in bounded time (measured WCET
+  < 50 microseconds on ESP32-S3 at 240MHz). This includes all six validation
+  checks, the hardware register write, and the telemetry log entry.
+
+Function 3: safety_get_state(void)
+  Returns: safety_state_t { SAFE, ACTIVE, DEGRADED, FAULT }
+
+  - Returns the current safety state of the system.
+  - SAFE: System is in safe state. No actuator commands are accepted.
+  - ACTIVE: System is fully operational. All actuator commands are accepted
+    (subject to individual validation).
+  - DEGRADED: System is partially operational. Some actuators or sensors are
+    disabled, but the system continues to function with reduced capability.
+    Which actuators/sensors are disabled is communicated via the telemetry
+    system. Reflex layer must handle DEGRADED mode gracefully.
+  - FAULT: System has detected a non-recoverable error. All actuators are
+    disabled. Manual intervention required. Genesis continues to log
+    telemetry and accept Cortex connections for diagnostics.
+
+  - This function is a simple register read. Execution time: < 1 microsecond.
+
+Function 4: telemetry_log(channel_id_t ch, const void* data, uint8_t len)
+  Returns: void
+
+  - Appends a telemetry data point to the local ring buffer.
+  - The channel ID identifies the data type (defined in the artifact manifest).
+  - The data is copied into the buffer (up to 8 bytes; larger data must be
+    chunked by the caller).
+  - If the buffer is full, the oldest entry is overwritten (circular buffer).
+    No allocation failure, no blocking, no error return.
+  - Thread-safe: uses atomic index manipulation. No mutex in the write path.
+  - Execution time: < 5 microseconds.
+
+
+2.2  SAFETY VIOLATION LOGGING
+──────────────────────────────
+
+Every time Genesis rejects an actuator command, it logs a SAFETY_VIOLATION
+event. This event is stored in a dedicated non-volatile log (separate from the
+telemetry ring buffer) that survives reboots and artifact swaps.
+
+  typedef struct {
+      uint32_t    timestamp_ms;       // Time of violation
+      uint32_t    artifact_hash;      // Which artifact issued the command
+      uint8_t     actuator_id;        // Target actuator
+      uint8_t     rejection_code;     // RANGE, RATE, INTERLOCK, etc.
+      float       requested_value;    // What the artifact asked for
+      float       allowed_value;      // What Genesis permitted (if any)
+      uint8_t     safety_state;       // System safety state at time of event
+      uint16_t    sequence;           // Monotonically increasing event counter
+  } safety_violation_t;
+
+The violation log holds the last 100 events in NVS (Non-Volatile Storage).
+When the Cortex connects, all unacknowledged violations are transmitted as
+ALARM messages (severity CRITICAL). The Cortex includes violation history in
+its artifact evaluation: an artifact that generates frequent safety violations
+will never be promoted from A/B test to production.
+
+If the violation rate exceeds a configurable threshold (default: 10 violations
+per second sustained for 5 seconds), Genesis immediately transitions to
+SAFE_STATE and logs a SAFETY_ALARM. This catches runaway artifacts that are
+generating valid-looking but unsafe commands at high rate.
+
+
+================================================================================
+3. FORMAL VERIFICATION
+================================================================================
+
+3.1  STATIC ANALYSIS PIPELINE
+──────────────────────────────
+
+Every line of NEXUS firmware (Genesis, Reflex, and Layer 3) passes through
+a mandatory static analysis pipeline before compilation. The pipeline is
+automated in the CI/CD system and blocks artifact promotion if any check fails.
+
+  Tool 1: clang-tidy (LLVM static analyzer)
+    Checks enabled: bugprone-*, cert-*, cppcoreguidelines-*, google-*,
+    misc-*, modernize-*, performance-*, readability-*
+    Extra checks: bugprone-assignment-in-if-condition,
+    bugprone-implicit-widening-of-multiplication-result,
+    cert-dcl03-c (nested scope of variable), cert-exp42-c (assignment in
+    boolean context), cert-flp30-c (loop induction)
+    Configuration: .clang-tidy file checked into version control. Any
+    suppression must include a TODO with a deadline and a rationale.
+
+  Tool 2: cppcheck (in-depth static analysis)
+    Checks enabled: all, inconclusive
+    Severity: error, warning, style, performance, portability, information
+    Suppression: NO suppressions allowed for error or warning severity.
+    Style suppressions require justification comment.
+    Key checks: nullPointer, arrayIndexOutOfBounds, bufferAccessOutOfBounds,
+    uninitvar, memoryLeak, resourceLeak, unusedVariable, shiftTooManyBits,
+    integerOverflow, floatOverflow, uninitStructMember
+
+  Tool 3: MISRA C:2012 (mandatory for Genesis, mandatory for Reflex safety paths)
+    Genesis: ALL rules mandatory. No deviations.
+    Reflex: All mandatory rules (required + advisory deemed mandatory by
+    project policy). Advisory rule deviations require written justification
+    reviewed by a second engineer.
+    MISRA rules of particular importance:
+      Rule 1.3: No undefined or unspecified behavior
+      Rule 2.1: No unreachable code
+      Rule 2.7: No unused parameters (use (void)param if intentionally unused)
+      Rule 11.3: Cast between pointer to object and pointer to different
+        object type -- FORBIDDEN. All pointer casts must be to void* or
+        between compatible types.
+      Rule 13.4: No assignment in boolean expression
+      Rule 14.4: Controlling expression of if/while shall be boolean
+      Rule 17.7: Return value of non-void function shall be used
+      Rule 21.3: malloc and free shall not be used -- ENFORCED
+      Rule 22.1: All code reachable from main shall be deterministic
+
+  Tool 4: Sparse (Linux kernel static checker, for type checking)
+    Validates that all Genesis API boundary types are used correctly.
+    Catches mismatched function signatures between Genesis and Reflex.
+    Flags any use of __user or __kernel annotations that would indicate
+    a layering violation.
+
+  Tool 5: Custom bounds checker (Python script over AST)
+    Parses the C abstract syntax tree and verifies that every array index
+    is provably within bounds. Uses symbolic range analysis. Flags any
+    index derived from external input (sensor readings, NEXUSLINK payload)
+    that is not explicitly bounds-checked before use.
+
+All five tools run on every commit. Build fails if any tool reports an error.
+Warnings generate a CI warning but do not block. However, a PR with more than
+5 warnings is rejected by the code review gate.
+
+
+3.2  RUNTIME ANALYSIS
+──────────────────────
+
+Static analysis catches many bugs but not all. Runtime analysis catches
+problems that emerge from timing, concurrency, and interaction.
+
+  STACK DEPTH ANALYSIS:
+  The ESP32-S3 has 512KB SRAM shared between two cores. Each FreeRTOS task
+  has a fixed stack size allocated at creation. Stack overflow is a critical
+  safety failure.
+
+  Genesis uses FreeRTOS stack overflow detection (configCHECK_FOR_STACK_OVERFLOW
+  = 2, method 2: canary values). Additionally, Genesis performs a static
+  stack depth analysis at startup:
+
+    1. Before entering the RTOS scheduler, Genesis walks the call graph from
+       each task entry point to its deepest leaf function.
+    2. For each function, Genesis sums the local variable sizes (with
+       alignment padding) plus the ABI-mandated stack frame overhead.
+    3. Genesis adds a 25% margin to the computed stack depth.
+    4. If the computed depth exceeds 90% of the task's allocated stack,
+       Genesis logs a WARNING during boot. If it exceeds 100%, Genesis
+       halts boot and enters SAFE_STATE.
+
+  The stack depth analysis is conservative: it over-estimates because it
+  assumes all conditional branches are taken simultaneously. This is
+  intentional -- we prefer false warnings over actual overflows.
+
+  WORST-CASE EXECUTION TIME (WCET) MEASUREMENT:
+  For every function in Genesis's critical path (the actuator_set() validation
+  chain, the safe-state sequence, the heartbeat handler), WCET is measured
+  using the ESP32-S3's hardware cycle counter.
+
+  Measurement methodology:
+    1. Instrument the function entry and exit with GPIO toggles.
+    2. Connect an oscilloscope or logic analyzer to the GPIO pins.
+    3. Run the function under worst-case conditions:
+       - Maximum interrupt preemption (all interrupt sources active)
+       - Maximum lock contention (all mutexes held by other tasks)
+       - Maximum cache miss rate (cold cache, alternating memory access)
+       - Maximum bus contention (DMA transfers active on SPI, I2C, UART)
+    4. Record the execution time over 10,000 iterations.
+    5. WCET = max(measured times) + 20% margin.
+
+  The measured WCET values are compiled into a table that is checked at boot:
+
+    genesis_wcet_table_t = {
+        { "actuator_set",        48 },   // microseconds, measured max: 40
+        { "safe_state_sequence", 45000 }, // microseconds, measured max: 37000
+        { "heartbeat_handler",   12 },   // microseconds, measured max: 10
+        { "nexuslink_parser",    35 },   // microseconds, measured max: 29
+    };
+
+  If any function exceeds its WCET budget during runtime, Genesis logs a
+  TIMING_VIOLATION and transitions to DEGRADED mode. If a critical function
+  (safe-state sequence) exceeds its budget, Genesis transitions directly to
+  FAULT and triggers the external hardware watchdog.
+
+  CONTROL FLOW ANALYSIS:
+  Genesis code is analyzed for unreachable code, missing return statements,
+  and unhandled enum cases using the LLVM control flow graph (CFG) analysis.
+
+  Specific checks:
+    - Every switch statement on a safety-critical enum has a default case.
+    - Every function with a non-void return type has exactly one return on
+      every execution path.
+    - No infinite loops without an explicit break condition (even while(1)
+      must have a break that is exercised in at least one test).
+    - No function calls itself recursively (enforced by the linker: Genesis
+      is compiled with -fno-optimize-sibling-calls and stack canary checking).
+
+
+3.3  FUZZ TESTING
+──────────────────
+
+The NEXUSLINK parser is the most security-sensitive component in Genesis. It
+processes raw bytes received from the network and must handle any possible
+input without crashing, hanging, or producing incorrect behavior.
+
+Fuzz testing is performed using AFL++ (American Fuzzy Lop) with the following
+configuration:
+
+  Target: nexuslink_parse_frame() function, compiled for host (x86-64) with
+  the same Genesis code, using mocked hardware access functions.
+
+  Harness:
+    // afl_harness.c
+    #include "nexuslink_parser.h"
+    int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+        nexuslink_frame_t frame;
+        nexuslink_parse_result_t result = nexuslink_parse_frame(data, size, &frame);
+        // If parse succeeds, exercise the dispatch logic
+        if (result == PARSE_OK) {
+            nexuslink_dispatch(&frame);
+        }
+        return 0;
+    }
+
+  Fuzzing corpus:
+    - Seed corpus: 500 valid NEXUSLINK frames covering all 13 message types.
+    - Mutation strategy: AFL++ default (bitflip, byte flip, arithmetic,
+      dictionary). Dictionary includes NEXUS-specific constants (0x4E sync
+      byte, message type codes, known node IDs, known CRC values).
+    - Target coverage: Every code path in the parser must be exercised at
+      least once during fuzzing. AFL++ coverage tracking is used.
+
+  Fuzzing duration:
+    - Initial campaign: 72 hours continuous on a 4-core machine.
+    - Regression: 4 hours on every commit that modifies the parser.
+    - Pre-release: 72 hours before any Genesis version is tagged for production.
+
+  Crash handling:
+    - Any crash (segfault, assertion failure, timeout, OOM) stops the campaign.
+    - The crashing input is saved and added to the regression test suite.
+    - The bug must be fixed before fuzzing resumes.
+    - ASan (AddressSanitizer) and UBSan (UndefinedBehaviorSanitizer) are
+      enabled during fuzzing to catch memory errors and undefined behavior.
+
+  Coverage targets (minimum):
+    - Line coverage: 98% of parser code
+    - Branch coverage: 95%
+    - Function coverage: 100% (every function must be called at least once)
+
+
+3.4  PROPERTY-BASED TESTING
+────────────────────────────
+
+Property-based testing complements fuzz testing by testing not just "does
+this crash" but "does this maintain its invariants." We use the Python
+Hypothesis framework with a C extension to test Genesis properties.
+
+Properties verified (examples):
+
+  Property 1: "For any actuator command, actuator_set() returns within 50us"
+    Hypothesis generates random actuator commands (random ID, random target
+    value, random timing). The C extension measures the execution time. The
+    property asserts that time < 50us for all generated inputs.
+
+  Property 2: "For any rejected command, the actuator does not move"
+    Hypothesis generates commands that should be rejected (out-of-range,
+    rate-limited, interlock-violating). The C extension records the actuator
+    state before and after. The property asserts that the state is unchanged.
+
+  Property 3: "For any sequence of sensor readings, the telemetry log does
+    not corrupt adjacent entries"
+    Hypothesis generates sequences of telemetry_log() calls with varying
+    channel IDs and data sizes. The C extension reads back the log and
+    verifies that each entry's data matches what was written.
+
+  Property 4: "The safe-state machine always reaches SAFE state within 50ms
+    of trigger, regardless of the system state at the time of trigger"
+    Hypothesis generates random initial states (random actuator positions,
+    random sensor readings, random Cortex connection status). The C extension
+    triggers safe-state and measures the time to completion. The property
+    asserts time < 50ms for all initial states.
+
+  Property 5: "SHA-256 of any artifact binary is deterministic"
+    Hypothesis generates random byte sequences as artifact inputs. The C
+    extension hashes each input twice and verifies the hashes are identical.
+    This catches non-deterministic hash implementations (which would be a
+    catastrophic bug in the artifact verification chain).
+
+  Each property is tested with 100,000 generated inputs per run. Properties
+  are run on every commit and on every artifact promotion candidate.
+
+
+================================================================================
+4. TESTING HIERARCHY
+================================================================================
+
+4.1  LEVEL 1: UNIT TESTS (Host Machine)
+───────────────────────────────────────
+
+Unit tests run on the developer's workstation (x86-64 Linux) using the
+Unity test framework. Genesis and Reflex code is compiled for the host with
+hardware abstraction layer replaced by mocks.
+
+  Test framework: Unity (ThrowTheSwitch)
+  Build system: CMake
+  Execution: < 30 seconds for the full suite (2500+ test cases)
+
+  Categories:
+  - API contract tests: Verify that sense_read() returns correct types,
+    actuator_set() validates all six checks, safety_get_state() returns
+    correct values, telemetry_log() handles buffer overflow gracefully.
+  - State machine tests: Verify every transition in the safe-state machine,
+    every transition in the NEXUSLINK protocol state machine, every
+    artifact manager state transition.
+  - Parser tests: Verify correct parsing of all 13 NEXUSLINK message types,
+    correct rejection of malformed frames, correct handling of CRC errors,
+    correct handling of oversized frames.
+  - Math tests: Verify PID controller output, filter response, coordinate
+    transformations, unit conversions. Compare against Python numpy reference.
+  - Edge case tests: Integer overflow, underflow, division by zero,
+    NaN/Inf in floating-point paths, buffer boundary conditions.
+
+  Coverage requirement: 95% line coverage, 90% branch coverage.
+  Coverage is measured with gcov/lcov and reported in CI.
+
+  Mock strategy:
+  Hardware-dependent functions (GPIO, ADC, UART, SPI) are replaced with
+  mock implementations that record calls and return configurable values.
+  The mock framework allows tests to:
+    - Verify that a specific hardware function was called with specific args.
+    - Return arbitrary sensor readings to test control logic.
+    - Inject faults (return error codes, corrupt data, simulate timeouts).
+    - Measure call counts and ordering.
+
+
+4.2  LEVEL 2: INTEGRATION TESTS (ESP32 + HIL Simulator)
+────────────────────────────────────────────────────────
+
+Integration tests run on actual ESP32-S3 hardware with a Hardware-in-the-Loop
+(HIL) simulator. The HIL simulator is a second ESP32 or a PC with USB-to-
+peripheral adapters that simulates the physical environment:
+
+  HIL simulator provides:
+  - Analog voltage outputs on DAC channels (simulating sensor readings)
+  - PWM input capture (measuring actuator PWM output)
+  - GPIO monitoring (reading GPIO state changes)
+  - UART simulation (sending/receiving NEXUSLINK frames)
+  - Fault injection (shorting GPIOs, disconnecting sensors, corrupting UART)
+
+  Test scenarios:
+  - Normal operation: Simulate sensor inputs, verify correct actuator outputs.
+  - Sensor failure: Disconnect a sensor, verify the system enters DEGRADED mode
+    and continues operating with remaining sensors.
+  - Actuator overcurrent: Simulate high current reading, verify the actuator
+    is disabled and SAFETY_VIOLATION is logged.
+  - Communication loss: Stop sending heartbeats, verify watchdog escalation
+    (WARNING -> ALARM -> SAFE_STATE).
+  - Artifact swap: Upload a new artifact via UART, verify the system reboots
+    into the new artifact and passes self-test.
+  - Artifact corruption: Upload a corrupted artifact (bad CRC), verify the
+    system rejects it and continues on the previous artifact.
+  - Safe-state trigger: Activate safe-state via button, heartbeat timeout,
+    and Cortex command. Verify that actuators reach safe positions within
+    the specified time limit.
+
+  Execution time: 5-10 minutes per test scenario. Full suite runs in < 2 hours.
+
+  Automation:
+  HIL tests are automated using a Python test runner (pytest) that controls
+  the HIL simulator via USB serial connections. Tests are parameterized:
+  the same test scenario runs with different sensor configurations, different
+  artifact versions, and different fault injection patterns.
+
+
+4.3  LEVEL 3: 72-HOUR STRESS TESTS
+────────────────────────────────────
+
+Before any artifact is promoted from A/B test to production, it must pass a
+72-hour continuous stress test on actual hardware. This test is the final
+gate before deployment.
+
+  Stress test configuration:
+  - 2 ESP32-S3 nodes (primary + backup, as in A/B test configuration)
+  - 1 HIL simulator providing continuous sensor input
+  - 1 PC running the test orchestrator and collecting metrics
+  - 1 Jetson Orin Nano (optional, for Cortex integration testing)
+
+  Random fault injection:
+  During the 72-hour test, the test orchestrator randomly injects faults
+  at a rate of 1 fault per minute (average, Poisson-distributed):
+
+    Fault types:
+    - Sensor disconnect (random sensor, random duration 1-60 seconds)
+    - UART frame corruption (random byte insertion/deletion/modification)
+    - Actuator stall (simulated mechanical jam)
+    - Supply voltage sag (simulated by disconnecting the regulated supply)
+    - Cortex heartbeat dropout (stop sending heartbeats for 1-30 seconds)
+    - NEXUSLINK frame injection (random valid-looking frames with wrong CRC)
+    - Artifact manager corruption (flip random bits in artifact flash)
+    - Clock glitch (suspend RTOS tick for 1-100ms)
+
+  Metrics collected continuously:
+    - Safety state transitions (count and timestamp of each transition)
+    - Safety violations (count, type, and artifact that caused each)
+    - Watchdog resets (count and timestamp)
+    - Actuator output (recorded at 1kHz for post-test analysis)
+    - Sensor readings (recorded at sensor rate for post-test analysis)
+    - CPU utilization (per-task, sampled at 10Hz)
+    - Memory usage (heap high-water mark, stack high-water mark per task)
+    - Communication statistics (packet loss, latency, error rate)
+    - Temperature (ESP32 die temperature, sampled at 1Hz)
+
+  Pass criteria:
+    - ZERO watchdog resets
+    - ZERO uncommanded actuator movements (actuator moved without a valid
+      command in the preceding cycle)
+    - ZERO safety violations that were not caused by deliberate fault injection
+    - ZERO memory leaks (heap high-water mark must not increase monotonically)
+    - Safety state machine must recover from every injected fault and return
+      to ACTIVE state within the specified recovery time
+    - Actuator output must never exceed the configured safe limits during
+      fault recovery
+    - Telemetry log must not contain any corrupted entries
+    - The artifact must survive all 72 hours without degradation (no drift
+      in control accuracy, no increase in error rate over time)
+
+  If ANY pass criterion is violated, the artifact is REJECTED. No appeal.
+  No "it only happened once." No "it was during a particularly bad fault
+  injection sequence." A single violation means the artifact is unsafe.
+
+
+4.4  LEVEL 4: SAFETY VIOLATION TESTS
+──────────────────────────────────────
+
+Dedicated tests that verify Genesis's ability to reject unsafe commands:
+
+  - Out-of-range actuator commands: Send actuator_set() with target values
+    from -100000 to +100000 for an actuator with range 0-100. Verify that
+    EVERY out-of-range value is rejected and the actuator does not move.
+    Test every integer value at the boundary (e.g., -1, 0, 1, 99, 100, 101).
+
+  - Rate limit bypass attempts: Send commands at maximum rate (1000 per second)
+    with maximum step size (0% to 100%). Verify that the rate limiter correctly
+    constrains the output and that no command "slips through."
+
+  - Interlock circumvention: Attempt to command an actuator when its interlock
+    condition is not met. Verify rejection. Then, rapidly toggle the interlock
+    sensor (simulate sensor glitch) and verify that the command is still
+    rejected (the interlock condition must be stable for a minimum duration).
+
+  - Integer overflow in command value: Send actuator_set() with INT32_MAX and
+    INT32_MIN. Verify no overflow in the range check calculation.
+
+  - Float NaN/Inf in command value: If the actuator target is stored as float,
+    send NaN and Inf values. Verify rejection.
+
+  - Concurrent safety violations: From two different RTOS tasks, simultaneously
+    send valid and invalid commands. Verify that the safety check is atomic
+    and that no invalid command can sneak through during a valid command
+    processing.
+
+
+4.5  PROMOTION GATE
+────────────────────
+
+The full test suite must pass on EVERY artifact promotion:
+
+  ┌─────────────────────┐
+  │  Artifact Candidate  │
+  └─────────┬───────────┘
+            │
+            ▼
+  ┌─────────────────────┐    FAIL ──▶ Return to Cortex for revision
+  │  Unit Tests (host)   │────────▶
+  └─────────┬───────────┘
+            │ PASS
+            ▼
+  ┌─────────────────────┐    FAIL ──▶ Return to Cortex for revision
+  │  Static Analysis     │────────▶
+  │  (clang-tidy, cppchk,│
+  │   MISRA)             │
+  └─────────┬───────────┘
+            │ PASS
+            ▼
+  ┌─────────────────────┐    FAIL ──▶ Return to Cortex for revision
+  │  Integration Tests   │────────▶
+  │  (ESP32 + HIL)       │
+  └─────────┬───────────┘
+            │ PASS
+            ▼
+  ┌─────────────────────┐    FAIL ──▶ REJECTED permanently
+  │  72-Hour Stress Test │────────▶
+  │  (random fault inj.) │
+  └─────────┬───────────┘
+            │ PASS
+            ▼
+  ┌─────────────────────┐
+  │  Deploy to A/B Test  │  (on backup hardware)
+  └─────────┬───────────┘
+            │
+            ▼
+  ┌─────────────────────┐    REJECT ──▶ Revert backup, archive artifact
+  │  A/B Test (human     │
+  │  review + metrics)   │
+  └─────────┬───────────┘
+            │ APPROVE
+            ▼
+  ┌─────────────────────┐
+  │  PROMOTE to Primary  │
+  └─────────────────────┘
+
+
+================================================================================
+5. ARTIFACT SIGNING -- CHAIN OF TRUST
+================================================================================
+
+5.1  CRYPTOGRAPHIC FOUNDATION
+──────────────────────────────
+
+NEXUS uses ECDSA (Elliptic Curve Digital Signature Algorithm) with the
+P-256 curve (also known as secp256r1 or prime256v1) for artifact signing.
+P-256 is chosen because:
+  - 128-bit security level, sufficient for the expected lifetime of the
+    hardware (10-15 years).
+  - Hardware acceleration on ESP32-S3 (ESP32-S3 has a hardware RSA/ECC
+    accelerator that supports P-256 sign and verify operations).
+  - Widely implemented, well-studied, no known practical attacks.
+  - Signature size is 64 bytes (r + s, each 32 bytes), small enough for
+    inclusion in the artifact header without excessive overhead.
+
+All cryptographic operations use the mbedTLS library, configured with:
+  - MBEDTLS_ECDSA_C (ECDSA sign/verify)
+  - MBEDTLS_ECP_DP_SECP256R1_ENABLED (P-256 curve)
+  - MBEDTLS_SHA256_C (SHA-256 hash)
+  - MBEDTLS_ASN1_PARSE_C (DER encoding for keys and signatures)
+  - No RSA, no AES, no ChaCha20 in the hot path (minimizes attack surface).
+
+
+5.2  THREE-TIER KEY HIERARCHY
+──────────────────────────────
+
+NEXUS implements a three-tier chain of trust:
+
+  TIER 0: MANUFACTURER ROOT KEY
+    - 256-bit ECDSA private key, generated offline in a secure facility.
+    - The public key is burned into every ESP32-S3's eFuse at the factory
+      during the production provisioning process.
+    - The private key exists ONLY in the manufacturer's Hardware Security
+      Module (HSM). It is never stored on any ESP32 or Jetson.
+    - The manufacturer root key signs ONE thing: the Genesis artifact.
+    - Every ESP32-S3 verifies its Genesis partition using this key at every
+      boot. If the signature does not validate, the ESP32 does not boot.
+
+  TIER 1: CORTEX DEPLOYMENT KEY
+    - 256-bit ECDSA private key, generated on the Jetson Orin Nano at
+      first boot (or provisioned during system setup).
+    - The Cortex public key is stored in the ESP32's NVS (non-volatile
+      storage) during the initial provisioning process.
+    - The Cortex deployment key signs every artifact that the Cortex
+      generates. This includes Reflex artifacts, Layer 3 updates, and
+      configuration bundles.
+    - The ESP32 verifies every incoming artifact against the Cortex key.
+    - The Cortex key itself is signed by the manufacturer root key during
+      the provisioning process. This creates the chain:
+      Manufacturer Key -> Cortex Key -> Artifacts
+
+  TIER 2: ARTIFACT SIGNATURES
+    - Every artifact binary is signed with the Cortex deployment key.
+    - The signature covers: SHA-256(artifact_binary || metadata_header).
+    - The metadata header includes: artifact name, version, target node type,
+      target node ID, timestamp, parent artifact hash, and description.
+    - The signature is embedded in the artifact's header, before the binary.
+
+  Chain of trust verification at boot:
+    1. ESP32 reads manufacturer public key from eFuse (cannot be modified).
+    2. ESP32 reads Genesis binary from protected partition.
+    3. ESP32 verifies Genesis signature using manufacturer key.
+    4. If valid, ESP32 boots Genesis.
+    5. Genesis reads Cortex public key from NVS.
+    6. Genesis verifies Cortex key signature using manufacturer key.
+    7. If valid, Genesis accepts Cortex-signed artifacts.
+    8. When an artifact arrives, Genesis verifies artifact signature using
+       Cortex key. If valid, proceeds with hash verification and deployment.
+
+
+5.3  FAILURE RESPONSES
+──────────────────────
+
+  Genesis signature failure (Tier 0):
+    - CRITICAL FAILURE. The ESP32 halts boot and enters a permanent fault
+      state. The red fault LED is illuminated. The ESP32 does not execute
+      any code. This requires JTAG/SWD access to recover (which requires
+      physical access to the device).
+    - A SECURITY_ALARM is transmitted on all interfaces (UART, I2C, GPIO)
+      for any monitoring equipment.
+
+  Cortex key signature failure (Tier 1):
+    - The Cortex key is rejected. Genesis enters SAFE_STATE and refuses all
+      artifact updates. The existing artifact continues to operate.
+    - A SECURITY_ALARM is logged and transmitted.
+    - Recovery: Re-provision the Cortex key via physical serial interface
+      with manufacturer-signed provisioning command.
+
+  Artifact signature failure (Tier 2):
+    - The artifact is rejected. Genesis sends ARTIFACT_ACK with status
+      SIGNATURE_INVALID.
+    - A SECURITY_ALARM is logged.
+    - The existing artifact is not affected.
+    - After 5 consecutive failed signature verifications from the same
+      source, Genesis blacklists that source for 1 hour.
+
+  Anti-rollback failure:
+    - Genesis maintains an anti-rollback counter in eFuse. This counter
+      increments every time an artifact with a higher version number is
+      deployed. If an artifact with a version number LOWER than the
+      counter is received, it is rejected.
+    - This prevents downgrade attacks: an attacker who compromises the
+      Cortex cannot deploy an older artifact with known vulnerabilities.
+
+  Key rotation:
+    - The Cortex key can be rotated by generating a new key pair on the
+      Cortex, signing the new public key with the manufacturer root key
+      (requires manufacturer cooperation), and deploying the new key to
+      ESP32 nodes via a signed KEY_UPDATE command.
+    - Genesis verifies the KEY_UPDATE signature using the manufacturer key.
+    - Key rotation is a manual, deliberate process that requires
+      manufacturer involvement. It cannot be triggered automatically.
+
+
+================================================================================
+6. SAFE-STATE MACHINE
+================================================================================
+
+6.1  DESIGN PHILOSOPHY
+──────────────────────
+
+The safe-state machine is the most important component in Genesis. It is the
+mechanism by which the system guarantees that a software failure cannot cause
+physical harm. When safe-state is triggered, the machine executes a
+deterministic sequence that brings all actuators to known-safe positions and
+locks them there.
+
+Key design principle: SAFE STATE IS THE DEFAULT. The system boots into safe
+state. The system returns to safe state on any anomaly. The system stays in
+safe state until explicitly commanded to leave it by a verified artifact.
+
+An artifact does not need to "achieve" safe state. Safe state is what
+happens when the artifact FAILS or is ABSENT. The artifact must actively
+command to LEAVE safe state, and Genesis continuously validates that the
+artifact is maintaining safe operation.
+
+6.2  SAFE-STATE SEQUENCE
+─────────────────────────
+
+When safe-state is triggered, Genesis executes the following deterministic
+sequence. Each step has a timeout. If a step does not complete within its
+timeout, Genesis skips to the next step and logs a TIMEOUT_VIOLATION.
+
+  Step 1: STOP ALL ACTUATORS (timeout: 10ms)
+    - Set all actuator PWM outputs to zero.
+    - Disable all DAC outputs.
+    - Set all relay outputs to OFF.
+    - This is a single register-write operation per actuator channel.
+    - No waiting for confirmation. No graceful deceleration. Hard stop.
+    - Purpose: Immediately remove all energy from the system.
+
+  Step 2: WAIT FOR ENERGY DISSIPATION (timeout: 100ms)
+    - Delay 100ms to allow mechanical energy to dissipate.
+    - During this delay, Genesis continues to monitor sensors.
+    - If any sensor reading indicates an unsafe condition (e.g., actuator
+      still moving, overcurrent still present), Genesis logs the condition.
+
+  Step 3: MOVE TO SAFE POSITIONS (timeout: 200ms per actuator)
+    - For actuators with defined safe positions (e.g., rudder center,
+      boom lowered, valve closed), command them to their safe position
+      at a reduced rate (25% of normal slew rate).
+    - This is done sequentially: actuator 1, then actuator 2, etc.
+      Sequential execution prevents bus contention and current overload.
+    - If any actuator fails to reach its safe position within the timeout,
+      Genesis logs ACTUATOR_SAFE_POSITION_FAILED and continues with the
+      next actuator.
+
+  Step 4: ENGAGE MECHANICAL LOCKS (timeout: 50ms per lock)
+    - If the hardware supports mechanical locks (solenoid-activated pins,
+      spring-return valves), engage them.
+    - Locks are engaged by setting a GPIO high, which activates a
+      solenoid that physically prevents actuator movement.
+    - If a lock fails to engage (no confirm signal from the lock sensor),
+      Genesis logs LOCK_ENGAGE_FAILED and continues.
+
+  Step 5: VERIFY VIA SENSORS (timeout: 200ms)
+    - Read all position sensors and verify that actuators are at or near
+      their safe positions (within a configurable tolerance, default 5%).
+    - Read all current sensors and verify that actuator currents are below
+      the quiescent threshold (motors stopped, valves de-energized).
+    - If any verification fails, Genesis re-issues the safe-position
+      command (Step 3) for the failing actuator, up to 3 retries.
+    - If all retries fail, Genesis enters FAULT state (requires manual
+      intervention).
+
+  Step 6: LOG AND NOTIFY (no timeout)
+    - Log the safe-state event to NVS (non-volatile, survives reboot).
+    - Transmit a SAFE_STATE notification on NEXUSLINK (broadcast).
+    - Illuminate the safe-state indicator LED.
+
+  Total worst-case time: 10 + 100 + (200 * N_actuators) + (50 * N_locks) + 200
+  For a typical system with 4 actuators and 2 locks: 10 + 100 + 800 + 100 + 200 = 1210ms
+
+  This time budget is documented in the system safety case. The physical
+  system must be designed so that no hazardous condition can develop within
+  the safe-state execution time (the "safe state response time").
+
+6.3  SAFE-STATE TRIGGERS
+─────────────────────────
+
+Safe state can be triggered by any of the following (OR logic):
+
+  - Cortex heartbeat timeout (10 seconds)
+  - Peer node heartbeat timeout (configurable, default 10 seconds)
+  - Three safety violations within 60 seconds
+  - Any sensor reading in FAULT quality state
+  - Temperature above critical threshold (100C die temperature)
+  - Supply voltage below critical threshold (2.44V brown-out)
+  - External safe-state button (physical GPIO with hardware debounce)
+  - Cortex SAFE_STATE command (via NEXUSLINK)
+  - Watchdog timeout (any level: TWDT, IWDT, external)
+  - Artifact self-test failure
+  - Memory corruption detected (heap canary, stack canary)
+
+6.4  LEAVING SAFE STATE
+───────────────────────
+
+An artifact leaves safe state by calling a special Genesis API function:
+  safety_status_t safety_request_active(safety_token_t token);
+
+The token is a 64-bit value that is generated by Genesis when the artifact
+passes its self-test. The token is stored in the artifact's control state
+structure. Only an artifact that has passed its self-test (and thus has a
+valid token) can request to leave safe state.
+
+Additionally, leaving safe state requires:
+  - All interlock conditions satisfied.
+  - All sensors in OK or DEGRADED quality state (no FAULT sensors).
+  - No pending safety violations in the log.
+  - Cortex heartbeat present (if the system was in Cortex-connected mode
+    before the safe-state trigger).
+  - Operator acknowledgment (if the safe-state was triggered by a safety
+    violation, not a normal shutdown -- this prevents automatic restart
+    into a potentially dangerous condition).
+
+The operator acknowledgment is implemented via a physical button press
+(HMI_NODE or physical button on the ESP32 board). The system will not
+leave safe state automatically after a safety violation. A human must
+physically press the "acknowledge and resume" button. This is a
+deliberate design choice: if the system entered safe state because
+something was wrong, a human must verify that the problem is resolved
+before the system resumes operation.
+
+
+================================================================================
+7. ANTI-DEADLOCK / ANTI-LIVELOCK
+================================================================================
+
+7.1  NO INFINITE BLOCKING
+──────────────────────────
+
+Deadlock is a silent killer in real-time systems. A deadlock in Genesis
+means the safe-state sequence cannot execute, which means the system cannot
+recover from a fault, which means the physical system may be in a hazardous
+state indefinitely.
+
+NEXUS enforces a strict rule: NO BLOCKING CALL MAY BLOCK INDEFINITELY.
+Every blocking operation has a timeout.
+
+  Mutex acquisition:
+    Genesis uses FreeRTOS mutexes with a timeout on every acquisition.
+    The default timeout is 10ms for control-path mutexes and 100ms for
+    non-critical mutexes (telemetry buffer, NVS access).
+
+    CORRECT:  xSemaphoreTake(mutex, pdMS_TO_TICKS(10));
+    WRONG:    xSemaphoreTake(mutex, portMAX_DELAY);  // FORBIDDEN
+    WRONG:    xSemaphoreTake(mutex, 0xFFFFFFFF);     // FORBIDDEN
+
+    If a mutex acquisition times out, Genesis:
+      1. Logs a DEADLOCK_WARNING event with the mutex name and the task
+         that was trying to acquire it.
+      2. Increments a per-mutex contention counter.
+      3. Returns an error code to the caller. The caller MUST handle the
+         error (typically by skipping the operation and continuing).
+
+    If the same mutex times out more than 10 times in 1 second, Genesis
+    logs a DEADLOCK_ALARM and transitions to DEGRADED mode.
+
+  Queue operations:
+    All FreeRTOS queue send/receive operations use timeouts. Queue sends
+    use a 0ms timeout (non-blocking) in safety-critical paths. Queue
+    receives use a 10ms timeout.
+
+  I2C/SPI transactions:
+    All I2C and SPI transactions have a hardware-level timeout. The ESP32
+    I2C controller has a built-in timeout register (I2C_TIME_OUT_REG).
+    Genesis configures this register to 10ms for all I2C transactions.
+    If the transaction times out, the I2C controller generates an interrupt,
+    and Genesis recovers by resetting the I2C peripheral.
+
+  UART operations:
+    All UART writes use a 50ms timeout per byte. If the UART TX FIFO is
+    full for more than 50ms, Genesis aborts the write and logs a
+    UART_TIMEOUT event. The data is added to the store-and-forward buffer
+    for later retransmission.
+
+
+7.2  LOCK ORDERING CONVENTION
+─────────────────────────────
+
+Deadlock is impossible if locks are always acquired in the same order.
+NEXUS defines a strict lock ordering that ALL code (Genesis, Reflex, and
+Layer 3) must follow:
+
+  Lock hierarchy (acquire in this order, release in reverse):
+
+    Level 1: safety_state_mutex     (protects the safety state machine)
+    Level 2: actuator_data_mutex    (protects actuator command/output data)
+    Level 3: sensor_data_mutex      (protects sensor reading buffers)
+    Level 4: telemetry_mutex        (protects the telemetry ring buffer)
+    Level 5: nexuslink_tx_mutex     (protects the NEXUSLINK TX queue)
+    Level 6: artifact_manager_mutex (protects artifact flash operations)
+    Level 7: nvs_mutex              (protects NVS read/write)
+
+  Rule: If a task holds Lock Level N, it MAY acquire Lock Level N+1 (or
+  higher). It MUST NOT acquire Lock Level N-1 (or lower).
+
+  Example of correct ordering:
+    Acquire safety_state_mutex (Level 1)
+    Acquire actuator_data_mutex (Level 2)
+    ... do work ...
+    Release actuator_data_mutex
+    Release safety_state_mutex
+
+  Example of INCORRECT ordering (would deadlock):
+    Acquire telemetry_mutex (Level 4)
+    Acquire safety_state_mutex (Level 1)  // VIOLATION: out of order
+    ... DEADLOCK if another task holds Level 1 and waits for Level 4 ...
+
+  Enforcement:
+    A custom GCC attribute is used to annotate mutex acquisition order:
+      __attribute__((lock_order(1))) static SemaphoreHandle_t safety_state_mutex;
+      __attribute__((lock_order(2))) static SemaphoreHandle_t actuator_data_mutex;
+    A custom clang-tidy check verifies at compile time that no code path
+    acquires locks out of order. This check is part of the mandatory CI
+    static analysis pipeline.
+
+
+7.3  PRIORITY INHERITANCE
+─────────────────────────
+
+Priority inversion is a well-known real-time scheduling hazard where a
+low-priority task holding a mutex prevents a high-priority task from
+running, even though medium-priority tasks are able to run. The classic
+Mars Pathfinder incident (1997) was caused by priority inversion.
+
+NEXUS uses FreeRTOS mutexes with priority inheritance enabled for ALL
+mutexes in the safety-critical path:
+
+  xSemaphoreCreateMutexStatic(&mutex_buffer);
+  // FreeRTOS mutexes use priority inheritance by default.
+
+  The priority inheritance protocol:
+    - When a high-priority task attempts to acquire a mutex held by a
+      low-priority task, the low-priority task's priority is temporarily
+      elevated to match the high-priority task.
+    - This prevents medium-priority tasks from preempting the low-priority
+      task while it holds the mutex.
+    - When the low-priority task releases the mutex, its priority is
+      restored to its original value.
+
+  Genesis uses strict priority assignment:
+    - Safety state task:       Priority 10 (highest)
+    - NEXUSLINK RX task:       Priority 8
+    - Control loop task:       Priority 6
+    - NEXUSLINK TX task:       Priority 4
+    - Telemetry publish task:  Priority 3
+    - Artifact manager task:   Priority 2
+    - NVS access task:         Priority 1 (lowest)
+
+  No two tasks share the same priority. This eliminates time-slicing
+  jitter within the same priority level.
+
+
+7.4  WATCHDOG AS ULTIMATE BACKSTOP
+──────────────────────────────────
+
+Despite all the anti-deadlock measures above, Genesis includes a
+three-level watchdog system as the ultimate backstop:
+
+  Level 1: FreeRTOS Task Watchdog (TWDT)
+    - Every task that runs for more than 5 seconds subscribes to the TWDT.
+    - Each task must call esp_task_wdt_reset() at least once every 5 seconds.
+    - If any subscribed task fails to reset the TWDT, FreeRTOS prints a
+      backtrace and resets the system.
+    - The TWDT is implemented in software and runs at the FreeRTOS timer
+      task priority. It catches deadlocked tasks but cannot catch hard
+      hangs (e.g., infinite loop with interrupts disabled).
+
+  Level 2: ESP32 Interrupt Watchdog (IWDT)
+    - The IWDT is a hardware timer that is serviced by the timer interrupt
+      handler. If the timer interrupt does not execute within the configured
+      window (default 5 seconds), the IWDT triggers a system reset.
+    - The IWDT catches cases where the timer interrupt is disabled, the
+      RTOS scheduler is stalled, or an interrupt handler runs for too long.
+    - The IWDT is independent of FreeRTOS. It runs even if FreeRTOS is
+      completely deadlocked.
+
+  Level 3: External Hardware Watchdog
+    - A dedicated watchdog IC (e.g., MAX6818 or TPS3823) is connected to
+      the ESP32 via a GPIO pin.
+    - Genesis toggles the GPIO every 100ms from a high-priority task.
+    - If the GPIO is not toggled for 500ms (5 consecutive misses), the
+      external watchdog IC drives the ESP32's reset pin (EN pin) low.
+    - The external watchdog catches ANY software failure, including:
+      - Complete system hang (no code executing at all)
+      - Flash corruption that prevents boot
+      - Power supply dropout that causes the ESP32 to halt without resetting
+    - The external watchdog is the LAST line of defense. It is hardware.
+    It cannot be disabled by software. It cannot be bypassed by a bug.
+
+  Watchdog test:
+    During the 72-hour stress test, the test orchestrator deliberately
+    triggers watchdog resets by injecting hangs (infinite loop in a task)
+    and verifying that:
+    - The system resets and reboots within the watchdog timeout.
+    - After reboot, the system enters safe state.
+    - The artifact that was running before the reset is NOT automatically
+      resumed (the system boots into safe state regardless of which artifact
+      was running when the watchdog fired).
+
+
+================================================================================
+8. C FALLBACK -- "REPTILE BRAIN"
+================================================================================
+
+8.1  DESIGN RATIONALE
+─────────────────────
+
+A Reflex artifact is complex. It has PID controllers, Kalman filters, state
+machines, mode logic, and domain-specific processing. Complex code has bugs.
+Some bugs are subtle and may not be caught by testing. If a bug in a Reflex
+artifact causes the artifact to fail its self-test at boot, or if the artifact
+crashes during operation (detected by the watchdog), what happens?
+
+In NEXUS, the answer is NOT "the system dies." The answer is: the Reptile
+Brain takes over.
+
+The Reptile Brain is a minimal C implementation (~200 lines) of the most
+critical control functions, compiled into the Genesis layer. It uses the
+same Genesis API functions (sense_read, actuator_set, safety_get_state,
+telemetry_log) that the Reflex layer uses. It is not optimal. It is not
+clever. But it is PROVABLY SAFE because it is simple enough for a human
+engineer to verify by inspection.
+
+The name is deliberate. The biological analogy: a lizard does not need a
+cerebral cortex to survive. Its spinal cord and brainstem (the "reptile
+brain") handle breathing, heartbeat, reflex movements, and threat avoidance.
+The lizard is not smart. The lizard is ALIVE. When the Cortex (and the
+Reflex artifact that the Cortex generated) fails, the Reptile Brain keeps
+the system alive.
+
+8.2  IMPLEMENTATION
+────────────────────
+
+The Reptile Brain implements the following functions (for each domain):
+
+  MARINE AUTOPILOT DOMAIN:
+    - Bang-bang heading hold: If heading error > 5 degrees, turn hard
+      (actuator_set to 100%). If heading error < -5 degrees, turn hard
+      the other way. If heading error is within 5 degrees, go straight.
+    - No PID. No integral windup. No derivative kick. No gain tuning.
+      Two thresholds. Two outputs. Impossible to get wrong.
+    - Fixed speed hold: Command the throttle to a preconfigured safe speed
+      (e.g., 50% of maximum). No acceleration profiling.
+    - This will produce oscillating heading control. The vessel will weave.
+      But it will NOT steer into a dock, a rock, or another vessel (assuming
+      the waypoint system is handled by the Cortex, which is not available --
+      so the Reptile Brain holds the LAST commanded heading).
+
+  AGRICULTURAL SPRAYER DOMAIN:
+    - Flow rate on/off control: If flow sensor reading is below the target
+      minus 10%, open valve to 100%. If above target plus 10%, close valve
+      to 0%. Otherwise, hold current position.
+    - No PID. No overshoot management. But the crop gets sprayed, just not
+      optimally.
+    - GPS speed compensation disabled. Fixed application rate regardless
+      of vehicle speed (wastes chemical but does not miss areas).
+
+  MINING VENTILATION DOMAIN:
+    - Gas threshold fan control: If gas concentration > threshold, fans ON.
+      If gas concentration < threshold * 0.8, fans OFF.
+    - No proportional control. No hysteresis optimization. Fans cycle on/off.
+      But the mine stays ventilated.
+
+8.3  ACTIVATION CONDITIONS
+──────────────────────────
+
+The Reptile Brain activates automatically when any of the following conditions
+are detected:
+
+  - The active artifact fails its self-test at boot (self_test() returns error).
+  - The active artifact slot contains invalid data (bad magic number, bad CRC).
+  - The active artifact slot is empty (no artifact has ever been deployed).
+  - The watchdog fires three times within 60 seconds (indicating the active
+    artifact is causing system crashes).
+  - The Cortex commands REPTILE_BRAIN activation explicitly.
+
+The Reptile Brain deactivates and returns control to the active artifact when:
+  - A new artifact is deployed and passes its self-test.
+  - The Cortex commands a return to normal operation.
+  - The operator presses the "resume normal" button on the HMI.
+
+8.4  VERIFICATION
+─────────────────
+
+The Reptile Brain is verified differently from the Reflex layer:
+
+  - Code review: Every line is reviewed by TWO independent engineers. The
+    reviewer must be able to explain what every line does. If the reviewer
+    cannot explain a line, it is too complex and must be simplified.
+  - Cyclomatic complexity: Every function must have cyclomatic complexity
+    <= 5. If any function exceeds this, it is refactored.
+  - Formal proof (optional, for the highest safety等级): The Reptile Brain's
+    control logic is small enough that its properties can be formally verified
+    using a tool like CBMC (C Bounded Model Checker). Properties verified:
+    - The actuator output is always within the configured safe range.
+    - The control function always terminates (no infinite loops).
+    - The control function does not write to any memory outside its stack frame
+      and the Genesis API function arguments.
+  - Testing: The Reptile Brain has its own dedicated test suite (50+ test cases)
+    that verifies every branch, every boundary condition, and every failure mode.
+
+The Reptile Brain is a safety net, not a primary control mode. It exists so
+that when everything else goes wrong, the system can still maintain basic
+safe operation until a human can intervene. It is the software equivalent of
+the mechanical failsafe on a steam engine: crude, but effective.
+
+
+================================================================================
+AFTERWORD: THE COST OF SAFETY
+================================================================================
+
+This methodology is expensive. It requires:
+  - 2x engineering time (or more) for Genesis compared to a non-safety design.
+  - Dedicated CI infrastructure for static analysis, fuzzing, and HIL testing.
+  - 72-hour test cycles for every artifact promotion (minimum).
+  - Formal training in MISRA C, IEC 61508, and real-time systems for all
+    engineers working on Genesis.
+  - A culture where "ship it now, fix it later" is not just discouraged but
+    FORBIDDEN for safety-critical code paths.
+
+This cost is justified because the alternative is worse. A hydraulic valve
+that slams open at full pressure because of an integer overflow in a PID
+controller will destroy equipment worth more than the entire engineering
+budget. A ventilation fan that fails to activate because of a deadlock in
+the telemetry publisher will kill people.
+
+NEXUS is designed for machines that operate in the physical world, where
+software bugs have physical consequences. The bullet-proof coding methodology
+is how we ensure that the software is worthy of that trust.
+
+Every line of Genesis code is written with the understanding that it may one
+day be the only thing standing between a machine and a catastrophe. Every
+Reflex artifact is tested with the understanding that it will control
+physical actuators that can cause real harm if they misbehave. Every artifact
+signing key is protected with the understanding that a compromised key means
+an attacker can inject malicious code into safety-critical systems.
+
+This is not paranoia. This is engineering discipline. This is what it means
+to build systems that operate in the physical world, where there are no
+undo buttons, no rollback to a saved game, no "try again" when a mistake
+has real consequences.
+
+The three-layer architecture, the API contract, the formal verification,
+the testing hierarchy, the artifact signing, the safe-state machine, the
+anti-deadlock measures, and the Reptile Brain -- these are not independent
+features. They form a coherent defense-in-depth strategy where each layer
+compensates for the limitations of the others.
+
+If the static analysis misses a bug, the fuzz testing catches it.
+If the fuzz testing misses a bug, the integration tests catch it.
+If the integration tests miss a bug, the 72-hour stress test catches it.
+If the 72-hour stress test misses a bug, the safe-state machine limits the damage.
+If the safe-state machine has a bug, the watchdog resets the system.
+If the watchdog fails, the external hardware watchdog resets the system.
+If the external watchdog fails, the Reptile Brain provides basic safe operation.
+If everything fails, the system defaults to safe state.
+
+This is what bullet-proof means. Not that bugs cannot exist, but that no
+single bug, at any layer, can cause the system to enter a hazardous state.
+
+================================================================================
+  END OF DOCUMENT
+  NXS-004-2025
+================================================================================

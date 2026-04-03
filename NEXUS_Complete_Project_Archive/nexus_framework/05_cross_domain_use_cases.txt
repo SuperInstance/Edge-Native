@@ -1,0 +1,1723 @@
+================================================================================
+        NEXUS CROSS-DOMAIN APPLICATION ANALYSIS: 8 INDUSTRIES BEYOND MARINE
+         ESP32 Reflex Nodes + Jetson Cortex = Universal Robotic Intelligence
+================================================================================
+  Document Version:   1.0
+  Date:               2025
+  Classification:     Open Architecture — Use Case Research
+  Prepared by:        Agent E — Cross-Domain Applications Researcher
+  Words:              ~5800
+================================================================================
+
+TABLE OF CONTENTS
+  1.  Executive Summary
+  2.  Why NEXUS is Domain-Agnostic
+  3.  Domain 1 — Agriculture: Crop Spraying
+  4.  Domain 2 — Construction: Excavator Assist
+  5.  Domain 3 — Warehouse: Inventory Robot
+  6.  Domain 4 — Greenhouse: Environmental Control
+  7.  Domain 5 — Mining: Ventilation Control
+  8.  Domain 6 — Water Treatment: Pump Station
+  9.  Domain 7 — Solar Farm: Panel Tracking
+  10. Domain 8 — Food Processing: Conveyor Line
+  11. Cross-Domain BOM Summary
+  12. Common Regulatory Landscape
+  13. Why NEXUS Fits Every Domain
+================================================================================
+
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+The NEXUS framework was conceived for marine autonomy, but its architecture is
+not marine-specific. The separation of REFLEX (ESP32 real-time control loops)
+from REASONING (Jetson Orin Nano high-level analysis and artifact evolution) is
+a universal pattern that maps onto ANY system where physical actuators must
+respond to sensor inputs with hard real-time guarantees, while higher-level
+optimization runs asynchronously.
+
+This document examines eight domains outside marine robotics. For each domain
+we present: the physical layout of Nodes and Cortex, what the Reflex layer
+handles, what the Reasoning layer learns, a concrete A/B test scenario, safety
+considerations unique to the domain, regulatory context, and a Bill of Materials
+estimate. The goal is to demonstrate that NEXUS is not a marine autopilot with
+ambitions — it is a general-purpose distributed intelligence architecture that
+happens to work beautifully on boats.
+
+Every domain below shares a common pattern: ESP32 Nodes serve as the "arms and
+legs" (sensing, actuating, reacting in real time), while a Jetson Cortex serves
+as the "brain" (learning patterns, optimizing parameters, proposing improved
+artifacts via the NEXUSLINK protocol). When the brain goes offline, the arms and
+legs keep working. This is the biological principle that makes NEXUS universally
+applicable.
+
+
+================================================================================
+2. WHY NEXUS IS DOMAIN-AGNOSTIC
+================================================================================
+
+Before diving into individual domains, it is worth stating the structural reasons
+NEXUS generalizes:
+
+  (a) HARDWARE-INDEPENDENT ARTIFACTS: A NEXUS artifact is a compiled ESP32-S3
+      binary with a standardized control_logic() function signature. The
+      function signature is identical whether the artifact controls a spray
+      valve, a hydraulic cylinder, a warehouse wheel motor, or a ventilation
+      fan. Domain specificity lives entirely in WHICH sensors and actuators the
+      artifact addresses — not in the framework itself.
+
+  (b) PROGRESSIVE ENHANCEMENT MODEL: Every NEXUS deployment starts at Level 0
+      (isolated, factory firmware only). This means a farmer, a construction
+      foreman, or a mine operator can buy a NEXUS-compatible machine and use it
+      IMMEDIATELY without any network setup, Jetson installation, or cloud
+      subscription. The intelligence layers are optional upgrades, not
+      prerequisites.
+
+  (c) SAFETY MONITOR IS INVARIANT: The eFuse-protected Safety Monitor logic
+      is identical across all domains. Overcurrent, overtemperature, limit
+      switch enforcement, watchdog, and heartbeat timeout do not depend on what
+      machine the ESP32 is mounted to. This means the safety certification
+      effort for the core platform is done ONCE and reused across domains.
+
+  (d) NEXUSLINK IS TRANSPORT-AGNOSTIC: The binary protocol runs over UART,
+      CAN, RS-485, Wi-Fi, ESP-NOW, or Ethernet. A mining tunnel with RS-485
+      daisy chains and a warehouse with Wi-Fi mesh use the exact same protocol
+      framing and message types.
+
+  (e) A/B TESTING IS BUILT IN: Every domain needs to answer the question "Does
+      this new control strategy actually work better?" NEXUS answers this with
+      a standardized A/B testing protocol that includes redundant hardware,
+      comparative metrics, and human approval gates.
+
+
+================================================================================
+3. DOMAIN 1 — AGRICULTURE: CROP SPRAYING
+================================================================================
+
+3.1  PHYSICAL LAYOUT
+─────────────────────────────────────────────────────────────────────────────────
+
+  REFLEX NODES (ESP32-S3):
+    Node 01 — CONTROL_NODE (Spray Rate Controller)
+      Inputs:  GPS position (UART/NMEA), ground speed (RPM sensor on wheel),
+               flow meter (pulse, 10–100 Hz), tank level (ultrasonic),
+               wind speed+direction (I2C anemometer)
+      Outputs: PWM to main spray pump (via motor driver), CAN commands to
+               valve nodes
+
+    Nodes 02–05 — ACTUATOR_NODE (Valve Controllers, x4, each driving 4 valves)
+      Inputs:  CAN commands from Node 01, individual nozzle flow sensors (x4),
+               boom height sensors (ultrasonic, x2 per node)
+      Outputs: PWM/solenoid drivers for spray valves (x4 each = 16 total),
+               boom height adjust actuators (x2 per node = 8 total)
+      Network: CAN bus daisy chain along the spray boom
+
+    Node 06 — SENSOR_NODE (Weather Station)
+      Inputs:  Temperature, humidity, wind speed, wind direction, solar
+               radiation, barometric pressure (all I2C)
+      Outputs: None (pure sensing)
+
+    Node 07 — HMI_NODE (Cab Display)
+      Inputs:  NEXUSLINK from agent network, operator inputs (buttons,
+               rotary encoder)
+      Outputs: 4.3" LCD display, LED indicators, buzzer
+
+  REASONING LAYER (Jetson Orin Nano):
+    Mounted in tractor cab. Connected via Wi-Fi gateway (Node 07 or dedicated
+    GATEWAY_NODE). Runs GPS-based coverage map generation, nozzle wear
+    detection, and spray optimization algorithms.
+
+3.2  WHAT REFLEX DOES
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Constant application rate: PID loop adjusting pump PWM based on ground
+    speed × target rate / nozzle calibration. Runs at 50 Hz. If speed doubles,
+    pump output doubles within 200 ms.
+
+  - Section control: Individual boom sections (x8) are turned on/off based on
+    GPS position relative to field boundary polygons. Boundary data is stored
+    in the CONTROL_NODE's flash (up to 100 polygons). No network required.
+
+  - Boom height regulation: Ultrasonic sensors on each boom section drive a
+    separate PID loop maintaining 50 cm above crop canopy. Each ACTUATOR_NODE
+    handles this independently — no single point of failure.
+
+  - Wind drift mitigation: If wind speed exceeds threshold (configurable,
+    default 15 km/h), sections facing downwind reduce flow by 50%. If wind
+    exceeds 25 km/h, all spraying halts. This is a Safety Monitor rule, not
+    a control logic rule — it cannot be overridden by any artifact.
+
+  - Tank empty detection: Ultrasonic level sensor triggers alarm at 10%
+    remaining. Safety Monitor prevents spray pump activation below 2% (dry
+    running protection).
+
+3.3  WHAT REASONING LEARNS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Nozzle wear detection: Flow meter readings drift over hundreds of hours.
+    The Jetson correlates flow drift with operating hours and chemical
+    viscosity to predict nozzle replacement intervals. When wear exceeds
+    threshold, it generates a maintenance alert artifact that updates the
+    HMI_NODE display.
+
+  - Pressure optimization for crop density: Using NDVI data (if a crop sensor
+    is available) or crop stage calendars, the Jetson learns the optimal
+    pressure range for different growth stages. It proposes pressure setpoint
+    changes as artifacts for the CONTROL_NODE.
+
+  - Wind-aware spray maps: The Jetson records wind conditions during every pass
+    and correlates with post-application coverage maps (from drones or manual
+    scouting). Over a season, it learns which field sections suffer drift
+    under specific wind vectors and proposes adjusted nozzle angles or
+    shutdown thresholds for those areas.
+
+  - Chemical savings accounting: Every hour of operation, the Jetson compares
+    actual chemical usage to theoretical usage based on area covered and
+    target rate. Savings from section control are quantified and displayed
+    as a cost metric on the HMI.
+
+3.4  A/B TEST SCENARIO
+─────────────────────────────────────────────────────────────────────────────────
+
+  Hypothesis: "Increasing the PID low-pass filter cutoff from 2 Hz to 5 Hz on
+  the spray rate controller will reduce flow oscillation by >30% without
+  increasing overshoot during acceleration/deceleration events."
+
+  Setup: Two identical sprayer booms (or left/right halves of a single boom
+  running independent controllers). PRIMARY runs artifact v1.2 (2 Hz filter),
+  BACKUP runs artifact v1.3 (5 Hz filter). Both booms spray the same crop
+  with the same chemical.
+
+  Duration: 20 hours of field operation across varying terrain and speed.
+
+  Metrics: Flow rate RMS error, overshoot during speed changes, chemical
+  consumption variance, operator-reported spray pattern quality.
+
+  Decision: If flow RMS error decreases >25% and overshoot increase is <1%,
+  promote v1.3 to all boom nodes.
+
+3.5  SAFETY CONSIDERATIONS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Chemical exposure: Any Safety Monitor trigger on the spray system (loss of
+    GPS, loss of flow meter, heartbeat timeout) MUST close all valves within
+    500 ms. This is a hard requirement, not a configuration option.
+
+  - Environmental contamination: Tank overfill, spill, and leak detection must
+    trigger immediate pump shutdown. These are Safety Monitor rules.
+
+  - Operator fatigue: The HMI_NODE must display clear spray status. Auto-shutoff
+    after operator inactivity (no HMI input for 60 seconds) is mandatory.
+
+  - Drift compliance: Regulatory maximum drift distances for specific chemicals
+    must be encoded as Safety Monitor thresholds. The Jetson cannot propose
+    artifacts that weaken these thresholds.
+
+3.6  BOM ESTIMATE
+─────────────────────────────────────────────────────────────────────────────────
+
+  Item                            Qty   Unit Cost    Total
+  ─────────────────────────────── ────  ──────────   ──────────
+  ESP32-S3-WROOM-1 (control)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (valve, x4)    4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (weather)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (HMI)          1     $4.50        $4.50
+  Jetson Orin Nano 8GB            1     $249.00      $249.00
+  GPS module (u-blox M8N)         1     $35.00       $35.00
+  Flow meter (turbine)            1     $45.00       $45.00
+  Ultrasonic level sensor         1     $22.00       $22.00
+  Wind sensor (I2C)               1     $28.00       $28.00
+  Solenoid valves (x16)           16    $12.00       $192.00
+  Boom height ultrasonics (x8)    8     $18.00       $144.00
+  4.3" LCD display + touch        1     $35.00       $35.00
+  CAN transceivers (x6)           6     $3.50        $21.00
+  Enclosures + wiring + misc      1     $80.00       $80.00
+  ─────────────────────────────── ────  ──────────   ──────────
+  TOTAL NEXUS ELECTRONICS                                $882.50
+
+  Note: This is the NEXUS control system cost only. The sprayer mechanical
+  system, tractor, pump, tank, and boom structure are separate costs.
+  The $883 control system replaces a typical $2,000–$5,000 commercial rate
+  controller with superior adaptive capability.
+
+3.7  WHY NEXUS FITS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Agriculture has unreliable connectivity (fields far from cell towers),
+  safety-critical chemical handling (hard real-time shutdown requirements),
+  and extreme environmental conditions (dust, vibration, temperature). The
+  NEXUS architecture where ESP32s continue safe spraying without ANY network
+  or Jetson is not a convenience — it is a regulatory and practical necessity.
+  The Genesis Artifact guarantees that a brand-new sprayer works the moment
+  it is bolted to the tractor, before any network is configured.
+
+
+================================================================================
+4. DOMAIN 2 — CONSTRUCTION: EXCAVATOR ASSIST
+================================================================================
+
+4.1  PHYSICAL LAYOUT
+─────────────────────────────────────────────────────────────────────────────────
+
+  REFLEX NODES (ESP32-S3):
+    Node 01 — CONTROL_NODE (Primary Motion Controller)
+      Inputs:  Joystick position (x2 axes, analog), foot pedal (analog),
+               engine RPM (tachometer), hydraulic system pressure (analog),
+               swing encoder (quadrature, SPI)
+      Outputs: CAN commands to valve control nodes
+
+    Nodes 02–05 — ACTUATOR_NODE (Hydraulic Valve Controllers, x4)
+      Inputs:  CAN commands from Node 01, cylinder position sensors
+               (magnetostrictive, analog, 0–10V), cylinder pressures (x2 each)
+      Outputs: Proportional valve drivers (PWM, x2 per node for boom, stick,
+               bucket, crowd), safety lockout solenoids
+
+    Node 06 — SENSOR_NODE (Machine Health Monitor)
+      Inputs:  Engine oil pressure, coolant temperature, hydraulic oil
+               temperature, hydraulic filter differential pressure, fuel level,
+               alternator voltage (all analog or CAN from ECU)
+      Outputs: None (pure sensing)
+
+    Node 07 — SENSOR_NODE (Load Monitor)
+      Inputs:  Load moment indicator (strain gauges on boom foot pin),
+               anti-tip sensor (inclinometer on chassis), ground slope
+               (3-axis accelerometer)
+      Outputs: None (pure sensing)
+
+    Node 08 — HMI_NODE (Cab Display)
+      Inputs:  NEXUSLINK, operator inputs (buttons, rotary dial, mode switch)
+      Outputs: 7" LCD, LED bar graph for load moment, buzzer, vibration motor
+
+  REASONING LAYER (Jetson Orin Nano):
+    Mounted in cab, vibration-isolated. Connected via CAN-to-Wi-Fi gateway.
+    Runs operator pattern analysis, soil type classification, and dig planning
+    optimization.
+
+4.2  WHAT REFLEX DOES
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Swing damping: When the operator releases the swing joystick, the
+    CONTROL_NODE reads the swing encoder velocity and applies deceleration
+    proportional to velocity squared (to simulate viscous damping). This
+    prevents the upper structure from overshooting the target position. Runs
+    at 100 Hz on the CONTROL_NODE.
+
+  - Overload protection: Node 07 publishes load moment data at 50 Hz. The
+    CONTROL_NODE limits cylinder extension speed when load moment exceeds 90%
+    of rated capacity. At 100%, all boom movement is halted by the Safety
+    Monitor — this is not artifact-modifiable.
+
+  - Anti-tipping: If the inclinometer detects a slope exceeding the machine's
+    stability limit for the current load and boom position, the Safety Monitor
+    on Node 07 sends a SAFE_STATE command to all ACTUATOR_NODEs. Response time
+    < 50 ms. Boom retract is commanded autonomously.
+
+  - Dig depth limit: Operator can set a maximum dig depth via HMI_NODE. The
+    CONTROL_NODE tracks bucket tooth position using kinematic calculations
+    from cylinder positions and machine geometry. If depth exceeds limit,
+    bucket curl is overridden. Runs at 50 Hz.
+
+  - Engine-hydraulic coordination: Based on engine RPM and hydraulic demand,
+    the CONTROL_NODE modulates hydraulic pump swashplate to prevent engine
+    stall. If RPM drops below 800 (diesel idle is ~750), hydraulic flow is
+    reduced proportionally.
+
+4.3  WHAT REASONING LEARNS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Operator skill profiling: The Jetson records every joystick input, the
+    resulting machine motion, and the time-to-complete-task for common
+    operations (trenching, leveling, loading trucks). Over weeks of
+    operation, it builds a statistical model of the operator's technique and
+    identifies inefficiencies (e.g., excessive swing speed that causes
+    overshoot, suboptimal bucket curl timing).
+
+  - Soil type adaptation: The Jetson correlates hydraulic pressure patterns
+    during digging with bucket tooth penetration rates and material handling
+    characteristics. Different soil types (clay, sand, rock, frozen ground)
+    produce distinct pressure signatures. The Jetson classifies soil type in
+    real-time and proposes different digging strategies (slower approach for
+    rock, faster scooping for sand) as artifact updates.
+
+  - Predictive maintenance: Strain gauge data, hydraulic pressure patterns,
+    and temperature trends feed a degradation model. The Jetson predicts pin
+    bushing wear, hydraulic seal failure, and swing bearing degradation weeks
+    before failure, generating maintenance alerts as HMI artifacts.
+
+  - Fuel optimization: The Jetson learns which combinations of engine RPM and
+    hydraulic flow rate produce the most work per liter of fuel for different
+    task types. It proposes engine RPM setpoint changes to the machine ECU
+    via a GATEWAY_NODE (Modbus or CAN).
+
+4.4  A/B TEST SCENARIO
+─────────────────────────────────────────────────────────────────────────────────
+
+  Hypothesis: "A swing damping coefficient of 0.7 (vs current 0.4) will reduce
+  average swing overshoot by 40% without increasing average swing cycle time
+  by more than 5%."
+
+  Setup: Install a second CONTROL_NODE on the same machine but controlling only
+  the swing function. Alternate between primary and backup controllers every
+  10 swing cycles (operator-agnostic test). Both publish swing metrics.
+
+  Duration: 500 swing cycles in a trenching operation.
+
+  Metrics: Swing overshoot angle (degrees), swing cycle time (seconds),
+  operator comfort rating (1–5 scale via HMI), hydraulic energy per cycle.
+
+  Decision: If overshoot decreases >30% and cycle time increase <5%, promote
+  the new damping artifact.
+
+4.5  SAFETY CONSIDERATIONS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Struck-by / crush hazards: The Safety Monitor MUST halt all hydraulic
+    motion if the operator restraint switch (seat belt) is open or if the
+    left-hand joystick deadman switch is released. This is a hard-wired
+    safety interlock AND a Safety Monitor rule.
+
+  - Tipping: The anti-tipping reflex described above must operate at < 50 ms
+    latency. CAN bus communication between Node 07 and the ACTUATOR_NODEs must
+    be validated at startup. Any CAN error triggers a safe-state (boom up,
+    swing brake).
+
+  - Underground utility strike: If a ground-penetrating radar or utility
+    locating sensor is added, detected utility proximity must trigger a
+    Safety Monitor rule that prevents dig depth below the utility depth.
+    This overrides any operator command or artifact.
+
+  - Rollover during transport: The inclinometer on Node 07 monitors chassis
+    angle during roading. If lateral slope exceeds 15°, the Safety Monitor
+    triggers an alarm and reduces maximum travel speed.
+
+4.6  BOM ESTIMATE
+─────────────────────────────────────────────────────────────────────────────────
+
+  Item                            Qty   Unit Cost    Total
+  ─────────────────────────────── ────  ──────────   ──────────
+  ESP32-S3-WROOM-1 (control)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (valve, x4)    4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (health)       1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (load)         1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (HMI)          1     $4.50        $4.50
+  Jetson Orin Nano 8GB            1     $249.00      $249.00
+  Magnetostrictive position (x4)  4     $85.00       $340.00
+  Pressure transducers (x8)       8     $45.00       $360.00
+  Inclinometer (3-axis)           1     $55.00       $55.00
+  Strain gauge amplifier          1     $120.00      $120.00
+  Swing encoder (quadrature)      1     $65.00       $65.00
+  7" LCD display                  1     $55.00       $55.00
+  CAN transceivers (x8)           8     $3.50        $28.00
+  Vibration-isolated enclosure    1     $120.00      $120.00
+  Wiring harness + misc           1     $150.00      $150.00
+  ─────────────────────────────── ────  ──────────   ──────────
+  TOTAL NEXUS ELECTRONICS                                $1,582.00
+
+  This is competitive with OEM assist systems ($3,000–$8,000) and provides
+  adaptive optimization that OEM systems do not offer.
+
+4.7  WHY NEXUS FITS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Excavator work sites are vibration-heavy, electrically noisy, and often
+  lack cellular coverage. The machine must NEVER lose its safety reflexes due
+  to a software crash or communication failure. NEXUS's biological model —
+  spinal cord (ESP32s) handles all safety reflexes even with no brain (Jetson)
+  — maps perfectly to heavy equipment requirements.
+
+
+================================================================================
+5. DOMAIN 3 — WAREHOUSE: INVENTORY ROBOT
+================================================================================
+
+5.1  PHYSICAL LAYOUT
+─────────────────────────────────────────────────────────────────────────────────
+
+  REFLEX NODES (ESP32-S3):
+    Node 01 — CONTROL_NODE (Navigation Controller)
+      Inputs:  Wheel odometry (quadrature encoders, x4), IMU (SPI, 6-axis),
+               bumper switches (x8, digital)
+      Outputs: Velocity commands to motor nodes (CAN), LED control commands
+
+    Nodes 02–05 — ACTUATOR_NODE (Motor Controllers, x4, one per wheel)
+      Inputs:  CAN velocity commands from Node 01, motor current sense
+               (analog, shunt resistor), motor temperature (NTC thermistor)
+      Outputs: H-bridge PWM (20 kHz), motor enable/disable relay
+      Safety:  Overcurrent shutdown at 15A (immediate, <1 ms), overtemperature
+               shutdown at 80°C (with 2-second cooldown), encoder fault
+               detection (if encoder pulse count disagrees with commanded
+               velocity by >50% for >200 ms)
+
+    Node 06 — SENSOR_NODE (Battery Management)
+      Inputs:  Battery voltage (analog divider), battery current (Hall effect),
+               individual cell voltages (x8 via I2C BMS IC), temperature (x2)
+      Outputs: Charger enable relay, contactor control
+
+    Node 07 — SENSOR_NODE (Barcode / QR Scanner Interface)
+      Inputs:  Barcode scanner (UART, 115200 baud), distance sensor
+               (ToF, I2C, for rack distance measurement)
+      Outputs: Scanner trigger (GPIO), indicator LED
+
+    Node 08 — HMI_NODE (Status Panel)
+      Inputs:  NEXUSLINK, physical E-stop button (hardwired to all motor
+               nodes via separate circuit), mode selector switch
+      Outputs: LED indicators (status, battery, fault), buzzer
+
+  REASONING LAYER (Jetson Orin Nano):
+    Mounted on robot chassis. Connected via internal Wi-Fi or Ethernet.
+    Runs SLAM (Simultaneous Localization and Mapping), path planning, fleet
+    coordination, and charging schedule optimization.
+
+    Note: The Jetson handles LIDAR processing and SLAM, but the REFLEX layer
+    handles obstacle avoidance independently. If the Jetson crashes, the robot
+    can still detect obstacles via bumper switches and stop.
+
+5.2  WHAT REFLEX DOES
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Obstacle avoidance (primary): Eight bumper switches are wired directly to
+    the ACTUATOR_NODEs via GPIO. A bumper trigger causes immediate motor
+    stop (< 1 ms). This is a Safety Monitor rule that runs in hardware
+    interrupt context, not in the control loop. No artifact can disable it.
+
+  - Obstacle avoidance (secondary): ToF distance sensors on the front and
+    sides feed the CONTROL_NODE. If distance < 30 cm, velocity is reduced
+    proportionally. If distance < 10 cm, full stop. This is control logic
+    (artifact-modifiable) but with Safety Monitor override at 5 cm.
+
+  - Motor current limiting: Each ACTUATOR_NODE monitors motor current. If
+    current exceeds 15A peak for > 100 ms, the motor is disabled for 2
+    seconds. If the overcurrent event occurs 3 times in 10 seconds, the
+    motor is latched off until a manual reset via HMI_NODE. This prevents
+    wheel damage from debris entanglement.
+
+  - Battery management: Node 06 monitors battery state continuously. At 20%
+    SoC, the robot initiates return-to-charge behavior (navigates to charging
+    station). At 10% SoC, all non-essential systems are powered down. At 5%
+    SoC, the contactor opens and the robot is immobile. These thresholds are
+    Safety Monitor rules.
+
+  - Speed limiting: Maximum speed is enforced by the Safety Monitor at the
+    ACTUATOR_NODE level. Even if the CONTROL_NODE commands maximum velocity,
+    the ACTUATOR_NODE clamps to the configured speed limit. This prevents
+    runaway conditions from any artifact bug.
+
+5.3  WHAT REASONING LEARNS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Optimal paths: The Jetson tracks every path taken between pickup and
+    drop-off locations. Over hundreds of trips, it learns the fastest routes
+    considering traffic patterns, aisle congestion, and charging station
+    proximity. It proposes updated path artifacts to the CONTROL_NODE.
+
+  - Traffic pattern prediction: By observing the movement of other robots
+    and human workers (via LIDAR), the Jetson learns peak congestion times
+    and locations. It proposes speed schedule changes: slower through known
+    congestion zones, faster through clear aisles.
+
+  - Charging schedule optimization: The Jetson records battery usage per task
+    and correlates with task schedule, robot duty cycles, and electricity
+    pricing (if available). It proposes charging schedule artifacts that
+    minimize peak electricity charges and maximize robot availability.
+
+  - Inventory placement analysis: By recording which locations are accessed
+    most frequently, the Jetson recommends (to the warehouse management
+    system) repositioning high-frequency items closer to packing stations.
+
+5.4  A/B TEST SCENARIO
+─────────────────────────────────────────────────────────────────────────────────
+
+  Hypothesis: "A trapezoidal acceleration profile (instead of current linear
+  ramp) will reduce battery energy consumption per trip by >8% without
+  increasing trip time by >3%."
+
+  Setup: Deploy two robots with identical loads on the same route. Robot A
+  runs artifact v2.1 (linear acceleration). Robot B runs artifact v2.2
+  (trapezoidal acceleration with peak then coast phase).
+
+  Duration: 200 trips each over a mixed route (straight aisles + turns).
+
+  Metrics: Energy consumption per trip (Wh), trip time (seconds), motor
+  temperature rise, current peak events.
+
+  Decision: If energy decreases >6% and trip time increases <3%, promote
+  v2.2 to the entire fleet.
+
+5.5  SAFETY CONSIDERATIONS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Pedestrian safety: Bumper-based obstacle detection is the last line of
+    defense. LIDAR-based detection (Jetson) provides earlier warning, but
+    the Safety Monitor bumper response must operate independently of the
+    Jetson. Maximum robot speed in shared aisles: 1.5 m/s (configurable
+    via Safety Monitor, not artifact).
+
+  - Fire risk: Lithium battery packs require cell-level monitoring. If any
+    cell voltage deviates > 0.2V from pack average or temperature exceeds
+    60°C, the contactor opens immediately. This is a Safety Monitor rule.
+
+  - Racking collision: ToF sensors detect approach to storage racks. Minimum
+    approach distance is enforced by the Safety Monitor. The robot cannot be
+    commanded closer than 10 cm to any rack face.
+
+  - E-stop: A physical E-stop button is hardwired to ALL motor controller
+    ACTUATOR_NODEs via a separate circuit (not through the NEXUSLINK network).
+    Pressing E-stop opens the motor power relay directly. The NEXUS network
+    is notified but does not participate in the E-stop function.
+
+5.6  BOM ESTIMATE
+─────────────────────────────────────────────────────────────────────────────────
+
+  Item                            Qty   Unit Cost    Total
+  ─────────────────────────────── ────  ──────────   ──────────
+  ESP32-S3-WROOM-1 (nav)          1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (motor, x4)    4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (battery)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (scanner)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (HMI)          1     $4.50        $4.50
+  Jetson Orin Nano 8GB            1     $249.00      $249.00
+  2D LIDAR (RPLiDAR A1)           1     $99.00       $99.00
+  Wheel motors with encoders (x4) 4     $65.00       $260.00
+  Motor drivers (H-bridge, x4)    4     $18.00       $72.00
+  BMS IC + cell monitoring        1     $15.00       $15.00
+  ToF distance sensors (x4)       4     $12.00       $48.00
+  Bumper switches (x8)            8     $3.00        $24.00
+  IMU (MPU-6050 or ICM-20948)     1     $8.00        $8.00
+  Barcode scanner module          1     $45.00       $45.00
+  LED indicators + buzzer         1     $12.00       $12.00
+  Battery pack (24V, 20Ah LiFePO4)1     $180.00      $180.00
+  Chassis + wiring + misc         1     $200.00      $200.00
+  ─────────────────────────────── ────  ──────────   ──────────
+  TOTAL NEXUS ROBOT                                         $1,253.00
+
+  This is significantly below commercial AMR costs ($5,000–$25,000) while
+  providing superior adaptive behavior through the artifact evolution system.
+
+5.7  WHY NEXUS FITS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Warehouses have Wi-Fi infrastructure (good connectivity) but require 24/7
+  uptime with zero safety incidents. The NEXUS model where bumper-based
+  obstacle avoidance operates at the ACTUATOR_NODE level (not dependent on
+  Jetson or network) provides the necessary safety guarantee. The artifact
+  evolution system allows fleet-wide optimization without taking robots
+  offline for firmware updates — new artifacts are tested on one robot via
+  A/B and promoted to the fleet only after validation.
+
+
+================================================================================
+6. DOMAIN 4 — GREENHOUSE: ENVIRONMENTAL CONTROL
+================================================================================
+
+6.1  PHYSICAL LAYOUT
+─────────────────────────────────────────────────────────────────────────────────
+
+  REFLEX NODES (ESP32-S3):
+    Nodes 01–06 — SENSOR_NODE (Environmental Sensor Clusters, x6)
+      Each cluster reads:
+        Temperature (DS18B20, 1-Wire, x2 per node = 12 total)
+        Humidity (SHT-31, I2C, x1 per node = 6 total)
+        CO2 (SCD-30 or SenseAir S8, UART, shared across clusters)
+        Light (TSL-2591, I2C, shared — see below)
+      Distributed across the greenhouse in a grid pattern. Connected via
+      RS-485 daisy chain to a central GATEWAY_NODE.
+
+    Nodes 07–08 — SENSOR_NODE (Soil Moisture Arrays, x2)
+      Each reads 4 soil moisture sensors (capacitive, analog) + 4 soil
+      temperature probes (DS18B20, 1-Wire) = 8 soil moisture + 8 soil
+      temperature sensors total.
+      Connected via RS-485.
+
+    Node 09 — SENSOR_NODE (Light Sensor Array)
+      4x photosynthetically active radiation (PAR) sensors (analog) mounted
+      at crop canopy height. Connected via I2C ADC or analog.
+
+    Node 10 — CONTROL_NODE (Climate Controller)
+      Inputs:  All sensor data via RS-485 from GATEWAY_NODE
+      Outputs: RS-485 commands to actuator nodes
+
+    Nodes 11–14 — ACTUATOR_NODE (Vent Controllers, x4)
+      Inputs:  RS-485 commands from Node 10
+      Outputs: Motorized vent actuators (PWM via MOSFET, x1 each = 4 vents)
+      Feedback: Vent position sensors (potentiometer, analog)
+
+    Node 15 — ACTUATOR_NODE (Heating Controller)
+      Inputs:  RS-485 commands
+      Outputs: Boiler circulation pump (PWM or relay), mixing valve actuator,
+               boiler enable relay
+
+    Nodes 16–17 — ACTUATOR_NODE (Irrigation Controllers, x2)
+      Inputs:  RS-485 commands
+      Outputs: Solenoid valves (x4 each = 8 irrigation zones)
+      Feedback: Flow sensors (pulse, x2 each = 4 total)
+
+    Node 18 — ACTUATOR_NODE (Shade Screen Controller)
+      Inputs:  RS-485 commands
+      Outputs: Shade screen motor (PWM, reversible)
+
+    Node 19 — HMI_NODE (Grower Interface)
+      Inputs:  NEXUSLINK, operator inputs (touchscreen + physical buttons)
+      Outputs: 10" touchscreen display
+
+  REASONING LAYER (Jetson Orin Nano):
+    Mounted in the greenhouse headhouse. Connected via Ethernet (wired
+    reliability in a fixed installation). Runs crop growth models, disease
+    prediction, energy optimization, and irrigation scheduling algorithms.
+
+6.2  WHAT REFLEX DOES
+─────────────────────────────────────────────────────────────────────────────────
+
+  - PID temperature control: The CONTROL_NODE runs a cascade PID loop. The
+    outer loop controls average greenhouse temperature (setpoint from HMI
+    or stored schedule). The inner loop controls vent position. If
+    temperature is below setpoint, vents close and heating is enabled. If
+    above, vents open proportionally. The PID parameters are stored in the
+    artifact and can be tuned by the Jetson. Loop rate: 10 Hz (temperature
+    changes slowly, so 10 Hz is more than sufficient).
+
+  - CO2 enrichment control: When vents are closed (heating mode) and CO2
+    level is below setpoint, the CO2 generator is enabled. When vents open,
+    CO2 enrichment is disabled (waste of CO2 to vent it outside). This
+    interlock is a Safety Monitor rule.
+
+  - Irrigation scheduling: Based on soil moisture readings and a schedule
+    stored in the CONTROL_NODE's flash, irrigation zones are activated.
+    Each zone waters until soil moisture reaches target, then stops. The
+    schedule includes time windows (no irrigation during high-humidity
+    periods to prevent fungal growth — this is a Safety Monitor rule tied
+    to the humidity sensor data).
+
+  - Shade screen control: If light intensity exceeds threshold (configurable
+    per crop stage) or temperature exceeds setpoint by >3°C, shade screen
+    deploys. This is control logic (artifact-modifiable) with a Safety
+    Monitor override for high-temperature emergency.
+
+  - Equipment interlock: Heating system and irrigation system cannot operate
+    simultaneously if the water pipes pass through the heating zone (freeze
+    protection concern). This interlock is encoded in the Safety Monitor.
+
+6.3  WHAT REASONING LEARNS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Crop-specific optimal conditions: The Jetson records temperature,
+    humidity, CO2, light, and soil moisture alongside crop yield data (manual
+    input from the grower at harvest). Over multiple growing cycles, it
+    builds a multivariate regression model of optimal conditions for each
+    crop variety. It proposes updated PID setpoints and schedules as artifacts.
+
+  - Disease prediction: The Jetson correlates environmental conditions
+    (leaf wetness duration from humidity data, temperature fluctuations)
+    with disease incidence reports from the grower. When conditions approach
+    known disease thresholds, it generates alerts and proposes preventive
+    ventilation or heating adjustments.
+
+  - Energy optimization: The Jetson tracks energy consumption for heating,
+    cooling, irrigation pumping, and CO2 generation. It correlates with
+    weather forecasts (pulled from cloud when available) and electricity
+    pricing. It proposes schedule shifts that exploit warmer daytime
+    temperatures (reduce heating), cooler nights (reduce ventilation
+    energy), and off-peak electricity rates.
+
+  - Irrigation efficiency: By tracking soil moisture response to irrigation
+    events, the Jetson learns the water retention characteristics of the
+    soil and the water uptake rate of the current crop. It proposes more
+    precise irrigation durations that reduce water waste while maintaining
+    optimal soil moisture.
+
+6.4  A/B TEST SCENARIO
+─────────────────────────────────────────────────────────────────────────────────
+
+  Hypothesis: "Adding a feed-forward term based on solar radiation forecast
+  to the temperature PID controller will reduce heating energy consumption by
+  >15% during winter months without increasing temperature deviation from
+  setpoint."
+
+  Setup: Two identical greenhouse zones (or two greenhouses). Zone A runs
+  artifact v3.0 (standard PID). Zone B runs artifact v3.1 (PID with solar
+  feed-forward). Both grow the same crop variety with the same setpoints.
+
+  Duration: 8 weeks during winter.
+
+  Metrics: Heating energy (kWh), temperature RMS error from setpoint,
+  temperature oscillation amplitude, crop growth rate.
+
+  Decision: If heating decreases >12% and temperature error does not
+  increase, promote v3.1.
+
+6.5  SAFETY CONSIDERATIONS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Freeze protection: If any temperature sensor reads below 2°C (configurable
+    crop-specific threshold), the Safety Monitor triggers maximum heating and
+    closes all vents. This is the highest-priority safety rule and cannot be
+    modified by any artifact.
+
+  - CO2 toxicity: If CO2 exceeds 5000 ppm, the Safety Monitor shuts off CO2
+    generation AND opens vents, regardless of temperature setpoint. This
+    protects human workers in the greenhouse.
+
+  - Irrigation flooding: If any soil moisture sensor reads saturation for
+    > 30 minutes, irrigation for that zone is disabled by the Safety Monitor.
+    This prevents root rot and water waste from a stuck valve.
+
+  - Worker presence: If a door sensor indicates a worker has entered the
+    greenhouse, shade screen motor speed is limited to prevent entanglement.
+
+6.6  BOM ESTIMATE
+─────────────────────────────────────────────────────────────────────────────────
+
+  Item                            Qty   Unit Cost    Total
+  ─────────────────────────────── ────  ──────────   ──────────
+  ESP32-S3-WROOM-1 (env, x6)      6     $4.50        $27.00
+  ESP32-S3-WROOM-1 (soil, x2)     2     $4.50        $9.00
+  ESP32-S3-WROOM-1 (light)        1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (climate)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (vent, x4)     4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (heat)         1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (irrig, x2)    2     $4.50        $9.00
+  ESP32-S3-WROOM-1 (shade)        1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (HMI)          1     $4.50        $4.50
+  Jetson Orin Nano 8GB            1     $249.00      $249.00
+  Temp sensors DS18B20 (x20)      20    $3.50        $70.00
+  Humidity sensors SHT-31 (x6)    6     $8.00        $48.00
+  CO2 sensor SCD-30 (x3)          3     $28.00       $84.00
+  PAR light sensors (x4)          4     $35.00       $140.00
+  Soil moisture (x8)              8     $12.00       $96.00
+  Solenoid valves (x8)            8     $15.00       $120.00
+  Vent actuators (x4)             4     $45.00       $180.00
+  10" touchscreen                 1     $85.00       $85.00
+  RS-485 transceivers (x14)       14    $1.50        $21.00
+  Wiring + enclosures             1     $200.00      $200.00
+  ─────────────────────────────── ────  ──────────   ──────────
+  TOTAL NEXUS GREENHOUSE SYSTEM                            $1,378.50
+
+  This replaces a typical greenhouse climate controller ($3,000–$15,000) with
+  a more adaptive, crop-aware system that improves over multiple growing
+  seasons.
+
+6.7  WHY NEXUS FITS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Greenhouse environments are high-humidity, high-temperature, and
+  electrically noisy (water pumps, motors, VFDs create EMI). The RS-485
+  wired backbone provides reliable communication. The Jetson's ability to
+  learn crop-specific optimal conditions over multiple seasons and propose
+  progressively better PID artifacts is the key value proposition — no
+  commercial greenhouse controller offers this self-improving behavior.
+
+
+================================================================================
+7. DOMAIN 5 — MINING: VENTILATION CONTROL
+================================================================================
+
+7.1  PHYSICAL LAYOUT
+─────────────────────────────────────────────────────────────────────────────────
+
+  REFLEX NODES (ESP32-S3):
+    Nodes 01–08 — SENSOR_NODE (Gas Detection Clusters, x8)
+      Each cluster reads:
+        CO (electrochemical, analog)
+        NO2 (electrochemical, analog)
+        CH4 (catalytic pellistor, analog) — primary explosion risk
+        Temperature (DS18B20, 1-Wire)
+      Distributed along the mine tunnel at 100-meter intervals.
+      Connected via RS-485 daisy chain. Each node has an IP67-rated enclosure
+      with explosion-proof (ATEX/IECEx certified) sensor housings.
+
+    Nodes 09–12 — SENSOR_NODE (Airflow Monitors, x4)
+      Each reads:
+        Airflow velocity (thermal anemometer, analog, 0–10 m/s)
+        Differential pressure (MPX series, analog, for airflow direction)
+      Mounted at key junctions and fan stations. Connected via RS-485.
+
+    Nodes 13–20 — ACTUATOR_NODE (Fan Controllers, x8)
+      Inputs:  RS-485 commands from CONTROL_NODE
+      Outputs: VFD control (Modbus RTU over RS-485, or 4–20 mA analog)
+               for main ventilation fans (x8)
+      Feedback: Fan current (analog), VFD status (Modbus register),
+               vibration sensor (optional)
+
+    Nodes 21–24 — ACTUATOR_NODE (Alarm Controllers, x4)
+      Inputs:  RS-485 commands + local gas sensor data (wired directly,
+               not through network)
+      Outputs: Strobe lights (relay), sirens (relay), evacuation door
+               actuators (solenoid)
+
+    Node 25 — CONTROL_NODE (Ventilation Master Controller)
+      Inputs:  All sensor data via RS-485 from GATEWAY_NODE
+      Outputs: RS-485 commands to fan and alarm nodes
+
+    Node 26 — HMI_NODE (Surface Control Room Panel)
+      Inputs:  NEXUSLINK (via Ethernet gateway through mine shaft), operator
+               inputs
+      Outputs: Large display, physical alarm acknowledge button, evacuation
+               button
+
+  REASONING LAYER (Jetson Orin Nano):
+    Mounted in the surface control room (outside the hazardous area).
+    Connected via Ethernet through the mine communication infrastructure.
+    Runs gas buildup prediction, airflow simulation, predictive maintenance,
+    and energy optimization.
+
+7.2  WHAT REFLEX DOES
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Gas monitoring with auto-response: Each gas SENSOR_NODE continuously
+    monitors CO, NO2, and CH4 levels. If ANY sensor exceeds its alarm
+    threshold, the node sends an ALARM message (P0 priority) to the
+    CONTROL_NODE. The CONTROL_NODE commands fan speed increase. If CH4
+    exceeds 1% LEL (Lower Explosive Limit), the Safety Monitor on the local
+    ALARM_CONTROLLER node triggers evacuation alarms autonomously — it does
+    NOT wait for the CONTROL_NODE or Jetson.
+
+  - Auto fan speed control: Based on the highest gas reading across all
+    sensor clusters, the CONTROL_NODE adjusts fan speeds using a step
+    function or PID controller (artifact-dependent). If gas is low, fans
+    run at minimum speed (energy saving). If gas rises, fans ramp up. If
+    gas exceeds action level, fans run at maximum. This control loop runs
+    at 5 Hz (gas changes relatively slowly in a large tunnel volume).
+
+  - Equipment interlock: If ventilation fans are not running (confirmed by
+    airflow sensors showing < 0.5 m/s), a Safety Monitor rule prevents
+    heavy equipment from operating in the affected zone. This interlock
+    is communicated via NEXUSLINK COMMAND messages and confirmed by
+    heartbeat.
+
+  - Temperature-based fan control: In deep mines, rock temperature can be
+    high. The CONTROL_NODE adds temperature to the fan speed calculation.
+    If temperature exceeds 30°C (worker safety limit), fans are set to
+    maximum regardless of gas levels.
+
+7.3  WHAT REASONING LEARNS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Gas buildup prediction: The Jetson correlates gas sensor trends with
+    mining activity schedules (blasting, equipment operation, worker
+    presence) to predict gas buildup before it occurs. It proposes
+    pre-emptive fan speed increases as artifact updates, reducing peak
+    gas concentrations.
+
+  - Airflow pattern optimization: Using airflow velocity and direction
+    data from multiple points, the Jetson builds a simplified Computational
+    Fluid Dynamics (CFD) model of the mine tunnel ventilation. It identifies
+    dead zones, short-circuits, and recirculation areas. It proposes fan
+    speed adjustments for individual fans to optimize overall airflow
+    distribution.
+
+  - Energy optimization: The Jetson tracks fan energy consumption vs. gas
+    levels and temperature. It learns the minimum fan speed that maintains
+    acceptable gas levels under different operating conditions (shift
+    changes, blasting cycles, weather affecting natural ventilation). It
+    proposes energy-saving fan speed profiles as artifacts.
+
+  - Predictive maintenance: Fan motor current trends, vibration data (if
+    available), and run hours feed a degradation model. The Jetson predicts
+    fan bearing failure and impeller wear, generating maintenance alerts
+    before failures occur.
+
+7.4  A/B TEST SCENARIO
+─────────────────────────────────────────────────────────────────────────────────
+
+  Hypothesis: "A predictive fan speed profile (pre-emptive ramp-up before
+  shift change based on historical gas trends) will reduce peak CH4
+  concentration by >20% compared to reactive control, while consuming <5%
+  more fan energy."
+
+  Setup: During a 2-week trial, Zone A uses reactive control (current
+  artifact). Zone B uses predictive control (proposed artifact with pre-
+  emptive fan profiles based on Jetson's shift schedule). Gas sensors in
+  both zones are calibrated identically.
+
+  Duration: 14 days covering multiple shift cycles and blasting events.
+
+  Metrics: Peak CH4 concentration (ppm), time-above-action-level (minutes),
+  fan energy consumption (kWh), gas sensor alarm count.
+
+  Decision: If peak CH4 decreases >15% and energy increase <5%, promote
+  the predictive artifact.
+
+7.5  SAFETY CONSIDERATIONS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Explosive atmosphere: ALL electronic equipment in the mine tunnel must
+    be ATEX/IECEx certified for the relevant gas group (typically Group I
+    for coal mining, Group IIC for general underground). ESP32-S3 modules
+    must be housed in certified explosion-proof enclosures. RS-485
+    connections must use intrinsically safe barriers (zener diode barriers).
+
+  - Autonomous evacuation alarm: The ALARM_CONTROLLER nodes MUST be able
+    to trigger evacuation without any network communication. Gas sensors
+    are wired directly to these nodes via analog inputs. If the local gas
+    sensor exceeds the evacuation threshold, the alarm triggers
+    autonomously. The NEXUS network is used for coordination and remote
+    monitoring, NOT for the primary safety function.
+
+  - Communication failure: If RS-485 communication is lost between the
+    CONTROL_NODE and any fan controller, the affected fans default to
+    maximum speed (fail-safe for ventilation — always more air, never less).
+
+  - Power failure: Ventilation fans are on UPS-backed power. If main power
+    fails, the NEXUS system detects the power loss (via voltage monitor
+    on the GATEWAY_NODE) and triggers emergency lighting and backup fan
+    startup within 10 seconds.
+
+7.6  BOM ESTIMATE
+─────────────────────────────────────────────────────────────────────────────────
+
+  Item                            Qty   Unit Cost    Total
+  ─────────────────────────────── ────  ──────────   ──────────
+  ESP32-S3-WROOM-1 (gas, x8)      8     $4.50        $36.00
+  ESP32-S3-WROOM-1 (airflow, x4)  4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (fan, x8)      8     $4.50        $36.00
+  ESP32-S3-WROOM-1 (alarm, x4)    4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (control)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (HMI)          1     $4.50        $4.50
+  Jetson Orin Nano 8GB            1     $249.00      $249.00
+  CO sensors (x8)                 8     $85.00       $680.00
+  NO2 sensors (x8)                8     $120.00      $960.00
+  CH4 sensors (x8)                8     $150.00      $1,200.00
+  Thermal anemometers (x4)        4     $180.00      $720.00
+  ATEX enclosures (x26)           26    $120.00      $3,120.00
+  IS barriers for RS-485 (x26)    26    $45.00       $1,170.00
+  Strobes + sirens (x8)           8     $65.00       $520.00
+  RS-485 cable (1000m + fittings) 1     $400.00      $400.00
+  Surface HMI display             1     $350.00      $350.00
+  Wiring + terminations           1     $300.00      $300.00
+  ─────────────────────────────── ────  ──────────   ──────────
+  TOTAL NEXUS VENTILATION SYSTEM                          $9,826.00
+
+  The ATEX enclosures and IS barriers dominate the cost. The NEXUS
+  electronics themselves are under $400. A commercial mine ventilation
+  automation system costs $15,000–$50,000+, making this competitive with
+  the added benefit of adaptive optimization.
+
+7.7  WHY NEXUS FITS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Mining is the ultimate test of resilient architecture. Tunnels are long,
+  communication is unreliable, and safety systems must NEVER fail. The NEXUS
+  model where each gas sensor node triggers local alarms autonomously (Safety
+  Monitor rule, no network dependency) is exactly what mining regulations
+  require. The Jetson adds optimization intelligence on top, but the baseline
+  safety operates even if every wire is cut except the sensor-to-alarm link.
+
+
+================================================================================
+8. DOMAIN 6 — WATER TREATMENT: PUMP STATION
+================================================================================
+
+8.1  PHYSICAL LAYOUT
+─────────────────────────────────────────────────────────────────────────────────
+
+  REFLEX NODES (ESP32-S3):
+    Nodes 01–04 — SENSOR_NODE (Pressure Transmitters, x4)
+      Inputs:  4–20 mA pressure transmitters (0–16 bar range) at key points:
+               pump discharge header, network high point, zone inlet, zone
+               return. Also local temperature.
+      Connected via 4–20 mA to ESP32 ADC + RS-485 for telemetry.
+
+    Nodes 05–08 — SENSOR_NODE (Flow Meters, x4)
+      Inputs:  Pulse output flow meters (turbine or electromagnetic) at
+               pump discharge, zone supply, zone return, and overflow.
+      Connected via pulse counter input + RS-485.
+
+    Nodes 09–10 — SENSOR_NODE (Tank Level Monitors, x2)
+      Inputs:  Ultrasonic level sensors (4–20 mA, 0–10 m range) for clear
+               water tank and raw water reservoir.
+      Connected via 4–20 mA to ESP32 ADC + RS-485.
+
+    Node 11 — SENSOR_NODE (Water Quality Monitor)
+      Inputs:  Chlorine residual (amperometric, 4–20 mA), pH (glass
+               electrode, 4–20 mA), turbidity (nephelometric, 4–20 mA),
+               conductivity (4–20 mA).
+      All via 4–20 mA to ESP32 ADC + RS-485.
+
+    Node 12 — CONTROL_NODE (Pump Station Controller)
+      Inputs:  All sensor data via RS-485
+      Outputs: RS-485 commands to pump controllers, chlorine dosing pump
+
+    Nodes 13–16 — ACTUATOR_NODE (Pump Controllers, x4)
+      Inputs:  RS-485 commands from Node 12
+      Outputs: VFD control (Modbus RTU) for centrifugal pumps (x4)
+      Feedback: Pump current, VFD frequency, run hours, fault codes
+
+    Node 17 — ACTUATOR_NODE (Chlorine Dosing Controller)
+      Inputs:  RS-485 commands from Node 12
+      Outputs: Stepper motor driver for dosing pump, solenoid valve
+
+    Node 18 — HMI_NODE (Local Operator Panel)
+      Inputs:  NEXUSLINK, operator inputs (buttons, selector switches)
+      Outputs: 7" industrial touchscreen, LED indicators
+
+  REASONING LAYER (Jetson Orin Nano):
+    Mounted in the pump station control room. Connected via Ethernet.
+    Runs demand pattern analysis, predictive maintenance, water quality
+    trend analysis, and energy optimization (minimum-cost pump scheduling).
+
+8.2  WHAT REFLEX DOES
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Constant-pressure PID control: The CONTROL_NODE maintains constant
+    discharge pressure (e.g., 4 bar) by adjusting pump VFD speed. This is
+    a classic PID loop running at 5 Hz. As demand increases (pressure
+    drops), pump speed increases. If a single pump cannot maintain
+    pressure, additional pumps are started in a lead-lag sequence.
+
+  - Lead-lag pump sequencing: Up to 4 pumps operate in a configurable
+    sequence. The lead pump runs at variable speed. When it reaches 90%
+    capacity, the lag pump starts. If demand drops, the lag pump stops
+    after a minimum run time (to prevent short-cycling). Run hours are
+    equalized across pumps for even wear.
+
+  - Tank level management: If the clear water tank level drops below 30%,
+    pump speed increases to maximum. If tank level exceeds 90%, pump speed
+    decreases. If tank level reaches 100%, all pumps stop (overflow
+    prevention — Safety Monitor rule).
+
+  - Chlorine dosing control: Proportional to flow rate. The CONTROL_NODE
+    reads flow through the dosing point and adjusts the dosing pump speed
+    to maintain target chlorine residual. If chlorine residual exceeds
+    2.0 mg/L (regulatory maximum), dosing is stopped by the Safety Monitor.
+
+  - Dry-run protection: If a pump is running but flow is zero (stuck valve,
+    empty source), the pump is stopped within 5 seconds by the Safety
+    Monitor to prevent seal damage.
+
+8.3  WHAT REASONING LEARNS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Demand pattern recognition: The Jetson records flow and pressure data
+    over weeks and identifies diurnal, weekly, and seasonal demand patterns.
+    It learns that demand peaks at 7:00 AM and 6:00 PM (residential use)
+    and drops at night. It proposes time-based pressure setpoint adjustments
+    (lower pressure at night to reduce losses) as artifacts.
+
+  - Predictive maintenance: Pump vibration trends (if vibration sensors
+    are added), current signature analysis, and seal leak detection (from
+    packing gland drip rate) feed a maintenance prediction model. The
+    Jetson predicts impeller wear, seal failure, and bearing degradation.
+
+  - Energy optimization: The Jetson runs a linear programming optimization
+    to find the pump combination and speed that delivers required flow at
+    minimum energy cost, considering electricity pricing (time-of-use).
+    It proposes updated pump scheduling artifacts.
+
+  - Water quality trends: Chlorine decay rate is correlated with temperature,
+    pH, and residence time. The Jetson learns the specific decay curve for
+    this distribution network and proposes more precise chlorine dosing
+    setpoints that minimize residual chlorine while maintaining
+    disinfection.
+
+8.4  A/B TEST SCENARIO
+─────────────────────────────────────────────────────────────────────────────────
+
+  Hypothesis: "A night-time pressure reduction from 4.0 bar to 3.2 bar
+  (between 11 PM and 5 AM) will reduce pump energy consumption by >18%
+  without causing any customer complaints about low pressure."
+
+  Setup: Deploy the reduced night-time pressure artifact on one pressure
+  zone (Zone A). Zone B maintains constant 4.0 bar. Monitor customer
+  complaints, pressure logs, and energy consumption for both zones.
+
+  Duration: 30 days.
+
+  Metrics: Pump energy consumption (kWh), minimum pressure recorded at
+  customer taps, customer complaint count, pipe burst incidents.
+
+  Decision: If energy decreases >15% and minimum pressure remains above
+  regulatory minimum (typically 1.5 bar at customer tap) with no increase
+  in complaints, promote the time-based pressure artifact.
+
+8.5  SAFETY CONSIDERATIONS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Contamination prevention: Backflow prevention devices must be monitored.
+    If a backflow preventer fault is detected, the affected pump is stopped
+    and an alarm is triggered. This is a Safety Monitor rule.
+
+  - Overpressure protection: If discharge pressure exceeds 6 bar (or
+    pipeline MAWP — Maximum Allowable Working Pressure), all pumps are
+    stopped immediately by the Safety Monitor. Pressure relief valves
+    provide mechanical backup.
+
+  - Water quality: If chlorine residual drops below 0.2 mg/L (disinfection
+    minimum) or exceeds 2.0 mg/L (regulatory maximum), the Safety Monitor
+    triggers an alarm and optionally isolates the affected zone.
+
+  - Scada integration: The Jetson communicates with the plant SCADA system
+    via Modbus TCP or OPC-UA through a GATEWAY_NODE. SCADA provides
+    supervisory control; NEXUS provides local autonomous control. If SCADA
+    communication is lost, NEXUS continues operating on its current
+    artifact (which includes safe baseline behavior).
+
+8.6  BOM ESTIMATE
+─────────────────────────────────────────────────────────────────────────────────
+
+  Item                            Qty   Unit Cost    Total
+  ─────────────────────────────── ────  ──────────   ──────────
+  ESP32-S3-WROOM-1 (pressure, x4) 4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (flow, x4)     4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (tank, x2)     2     $4.50        $9.00
+  ESP32-S3-WROOM-1 (quality)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (control)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (pump, x4)     4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (chlorine)     1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (HMI)          1     $4.50        $4.50
+  Jetson Orin Nano 8GB            1     $249.00      $249.00
+  Pressure transmitters (x4)      4     $120.00      $480.00
+  Flow meters (x4)                4     $350.00      $1,400.00
+  Ultrasonic level sensors (x2)   2     $180.00      $360.00
+  Chlorine analyzer               1     $2,200.00    $2,200.00
+  pH analyzer                     1     $1,800.00    $1,800.00
+  Pump VFDs (x4)                  4     $800.00      $3,200.00
+  Chlorine dosing pump + motor    1     $600.00      $600.00
+  Industrial touchscreen           1     $350.00      $350.00
+  Industrial enclosure (IP65)     1     $400.00      $400.00
+  Wiring + terminations           1     $300.00      $300.00
+  ─────────────────────────────── ────  ──────────   ──────────
+  TOTAL NEXUS PUMP STATION                                $11,478.00
+
+  Note: The VFDs, analyzers, and flow meters dominate this BOM — they are
+  the process instruments, not the NEXUS control system. The NEXUS
+  electronics (ESP32s + Jetson) total under $350. A comparable PLC-based
+  system (Siemens S7 or Allen-Bradley ControlLogix) would cost $8,000–
+  $15,000 for the control hardware alone, before adding the optimization
+  intelligence that the Jetson provides.
+
+8.7  WHY NEXUS FITS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Water treatment requires 24/7/365 operation with zero downtime. Traditional
+  PLCs provide reliable control but cannot learn or optimize. NEXUS provides
+  PLC-equivalent reliability (ESP32 Reflex with Safety Monitor) PLUS Jetson-
+  driven optimization that reduces energy costs and improves water quality
+  over time. The artifact evolution system allows the utility to improve
+  pump scheduling and chlorine dosing without hiring control system
+  integrators for each optimization cycle.
+
+
+================================================================================
+9. DOMAIN 7 — SOLAR FARM: PANEL TRACKING
+================================================================================
+
+9.1  PHYSICAL LAYOUT
+─────────────────────────────────────────────────────────────────────────────────
+
+  REFLEX NODES (ESP32-S3):
+    Nodes 01–05 — CONTROL_NODE (Tracker Controllers, x5, each controlling
+                   4 tracker axes = 20 total)
+      Inputs:  Sun position sensor (photoresistor array + inclinometer,
+               I2C), tracker angle feedback (absolute encoder, SPI),
+               wind speed (analog)
+      Outputs: Stepper motor drivers (STEP/DIR via GPIO, x4 per node = 20
+               total), tracker home position limit switches (GPIO input)
+      Note: Each tracker controller is mounted on a tracker pedestal and
+      connected via RS-485 daisy chain along the tracker row.
+
+    Node 06 — SENSOR_NODE (Irradiance Monitor)
+      Inputs:  Pyranometer (4–20 mA, global horizontal irradiance),
+               PV panel back-of-module temperature (x4, thermocouple via
+               MAX31855 SPI ADC), ambient temperature, wind speed
+      Connected via RS-485.
+
+    Node 07 — SENSOR_NODE (String Monitoring, x20 strings)
+      Inputs:  Current sensors (Hall effect, analog, one per string) × 20
+               (via I2C multiplexer), string voltage (via differential ADC,
+               one per string) × 20
+      Note: This node may need to be split across 2–3 ESP32s due to the
+      20-string sensor count. Alternatively, use a dedicated STM32-based
+      string monitoring unit communicating via Modbus to a single ESP32.
+
+    Node 08 — SENSOR_NODE (Weather Station)
+      Inputs:  Temperature, humidity, wind speed, wind direction,
+               barometric pressure, rain sensor (all I2C or analog)
+      Connected via RS-485.
+
+    Node 09 — ACTUATOR_NODE (Weather Stow Controller)
+      Inputs:  RS-485 commands from any CONTROL_NODE
+      Outputs: Stow command relay (wired to all tracker motor drivers —
+               stow is a hardwired safety function)
+      Note: This node exists as a redundant path for the weather stow
+               command. If the RS-485 network fails, each CONTROL_NODE also
+               monitors wind locally and can stow independently.
+
+    Node 10 — HMI_NODE (Maintenance Panel)
+      Inputs:  NEXUSLINK, maintenance mode key switch
+      Outputs: LCD display, tracker status LEDs
+
+  REASONING LAYER (Jetson Orin Nano):
+    Mounted in the inverter station or site control room. Connected via
+    Ethernet (wired to RS-485 gateways). Runs solar position algorithms,
+    string-level performance monitoring, soiling detection, and cleaning
+    schedule optimization.
+
+9.2  WHAT REFLEX DOES
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Single-axis tracking: Each CONTROL_NODE calculates the optimal tracker
+    angle based on astronomical position (sun elevation and azimuth from
+    an internal ephemeris algorithm using GPS-derived time and location) OR
+    from the local sun position sensor. The tracker angle follows the sun
+    from sunrise to sunset. At sunset, trackers return to the stow
+    position (horizontal or nighttime tilt). This control loop runs at
+    1 Hz (sun position changes slowly).
+
+  - Weather stow: If wind speed exceeds the tracker's survival threshold
+    (typically 60–80 km/h depending on tracker design), the CONTROL_NODE
+    commands all connected trackers to the stow position (horizontal,
+    minimum wind loading). This is a Safety Monitor rule — no artifact can
+    disable it. The wind sensor is read at 10 Hz to catch gusts.
+
+  - Backtracking: In early morning and late afternoon, when the sun is low,
+    trackers on the south side of a row can shade trackers on the north
+    side. The CONTROL_NODE implements backtracking: trackers tilt slightly
+    away from optimal to minimize row-to-row shading. The backtracking
+    algorithm is part of the artifact and can be optimized by the Jetson.
+
+  - Motor protection: The Safety Monitor on each CONTROL_NODE monitors
+    stepper motor current. If the tracker encounters an obstruction (snow,
+    debris, mechanical failure), current rises. If current exceeds the
+    stall threshold for > 2 seconds, the motor is disabled and an alarm
+    is sent.
+
+  - Snow load detection: If the tracker angle sensor shows a deviation
+    from the commanded angle of > 5° (indicating snow accumulation
+    deflecting the panel), an alarm is sent. The operator can command a
+    "shake" sequence (rapid tilt forward and back) via the HMI to shed
+    snow.
+
+9.3  WHAT REASONING LEARNS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Seasonal tracking optimization: The Jetson compares actual energy output
+    (from string monitors and inverter data) with theoretical optimal
+    tracking. It identifies periods where actual output is below theoretical
+    (due to soiling, shading, or suboptimal backtracking angles). Over
+    seasons, it proposes adjusted backtracking angles as artifacts.
+
+  - Soiling detection: By comparing the power output of a clean reference
+    string (manually cleaned weekly) with the average of all strings, the
+    Jetson detects soiling rate. It correlates soiling rate with weather
+    conditions (rain frequency, dust events) and proposes cleaning
+    schedules.
+
+  - String-level fault detection: Individual string current and voltage
+    deviations from expected values indicate potential faults (diode
+    failure, cell cracking, PID degradation). The Jetson builds a
+    statistical model of normal string behavior and flags anomalies.
+
+  - Cleaning schedule optimization: The Jetson correlates cleaning events
+    (manual or robotic) with energy production before and after cleaning.
+    It calculates the energy value of cleaning (kWh gained per cleaning
+    event) vs. cleaning cost and proposes optimal cleaning intervals.
+
+9.4  A/B TEST SCENARIO
+─────────────────────────────────────────────────────────────────────────────────
+
+  Hypothesis: "Adjusting the backtracking algorithm to use a -8° offset
+  instead of -5° in the morning hours (6–9 AM) will reduce row-to-row
+  shading losses by >2% without reducing total morning energy production."
+
+  Setup: Two adjacent tracker rows. Row A uses current backtracking
+  artifact (v1.4, -5° offset). Row B uses proposed artifact (v1.5, -8°
+  morning offset). Both rows have string monitoring for comparison.
+
+  Duration: 30 days covering varying cloud conditions.
+
+  Metrics: Morning energy production (kWh, 6–12 AM), total daily energy
+  production, string-level current mismatch, tracking motor energy
+  consumption.
+
+  Decision: If morning shading losses decrease >1.5% and total daily
+  production does not decrease, promote v1.5.
+
+9.5  SAFETY CONSIDERATIONS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Wind survival: The weather stow function is the most critical safety
+    feature. It MUST operate even if the Jetson, the RS-485 network, and
+    the local sun position sensor all fail. Each CONTROL_NODE has its own
+    wind sensor and independently decides to stow. The Safety Monitor
+    enforces the wind threshold.
+
+  - Lightning: Solar farms are exposed. All tracker controllers must have
+    surge protection on power and communication lines. The ESP32's GPIO
+    inputs should be opto-isolated from external circuits.
+
+  - Motor stall: If a tracker cannot reach its commanded position within
+    the expected time (based on motor speed and angle change), the Safety
+    Monitor disables the motor and sends an alarm. This prevents motor
+    overheating and mechanical damage.
+
+  - Arc flash: String monitoring should detect ground faults. If any string
+    shows a ground fault indication (current imbalance > 10%), the affected
+    string should be disconnected by the inverter or combiner box (which is
+    outside the NEXUS scope but triggered by an alarm from Node 07).
+
+9.6  BOM ESTIMATE
+─────────────────────────────────────────────────────────────────────────────────
+
+  Item                            Qty   Unit Cost    Total
+  ─────────────────────────────── ────  ──────────   ──────────
+  ESP32-S3-WROOM-1 (tracker, x5) 5     $4.50        $22.50
+  ESP32-S3-WROOM-1 (irradiance)   1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (string mon)   3     $4.50        $13.50
+  ESP32-S3-WROOM-1 (weather)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (stow)         1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (HMI)          1     $4.50        $4.50
+  Jetson Orin Nano 8GB            1     $249.00      $249.00
+  Stepper motor drivers (x20)     20    $12.00       $240.00
+  Absolute encoders (x20)         20    $18.00       $360.00
+  Hall effect current sensors (x20)20   $8.00       $160.00
+  Wind sensors (x6)               6     $25.00       $150.00
+  Pyranometer                     1     $180.00      $180.00
+  Weather station (full)          1     $350.00      $350.00
+  RS-485 cable + gateways         1     $300.00      $300.00
+  Solar-powered node enclosures   12    $45.00       $540.00
+  Wiring + terminations           1     $250.00      $250.00
+  ─────────────────────────────── ────  ──────────   ──────────
+  TOTAL NEXUS TRACKING SYSTEM (20-axis)                     $2,833.00
+
+  Per-tracker-axis cost: ~$142. Commercial single-axis tracker controllers
+  cost $150–$400 per axis and do NOT include adaptive optimization, soiling
+  detection, or string-level fault analysis.
+
+9.7  WHY NEXUS FITS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Solar farms are geographically distributed, often in remote locations with
+  limited connectivity and maintenance access. Each tracker must operate
+  autonomously (especially the weather stow function). The NEXUS model where
+  each CONTROL_NODE stows its trackers based on local wind data — without any
+  dependence on a central controller, network, or cloud service — is the
+  only safe architecture for large solar installations. The Jetson adds
+  intelligence (soiling detection, cleaning optimization, fault prediction)
+  but the baseline safety is completely independent.
+
+
+================================================================================
+10. DOMAIN 8 — FOOD PROCESSING: CONVEYOR LINE
+================================================================================
+
+10.1  PHYSICAL LAYOUT
+─────────────────────────────────────────────────────────────────────────────────
+
+  REFLEX NODES (ESP32-S3):
+    Nodes 01–04 — ACTUATOR_NODE (Motor Speed Controllers, x4, each driving
+                   2 conveyor sections = 8 total)
+      Inputs:  RS-485 speed commands from CONTROL_NODE, motor current (via
+               VFD analog output), motor temperature (NTC)
+      Outputs: VFD control (Modbus RTU or 4–20 mA) for conveyor motors (x8)
+      Safety:  Emergency stop input (hardwired, Safety Monitor rule),
+               overcurrent protection, motor overtemperature
+
+    Node 05 — CONTROL_NODE (Line Speed Coordinator)
+      Inputs:  Line speed setpoint (from HMI or Jetson), encoder feedback
+               from each conveyor section (quadrature, x8), downstream
+               accumulation sensor (photoelectric, x4)
+      Outputs: RS-485 speed commands to motor controllers, upstream/downstream
+               speed ratio adjustments
+
+    Nodes 06–09 — SENSOR_NODE (Weigh Stations, x4)
+      Inputs:  Load cells (4-wire, HX711 ADC, SPI or I2C), product
+               presence sensor (photoelectric)
+      Connected via RS-485 or direct to CONTROL_NODE.
+
+    Nodes 10–13 — SENSOR_NODE (Temperature Monitors, x4)
+      Inputs:  PT100 RTD temperature sensors (4-wire, via MAX31865 SPI ADC)
+               at critical process points (cooking, pasteurization, freezing)
+      Connected via RS-485.
+
+    Node 14 — ACTUATOR_NODE (Reject Actuator Controller)
+      Inputs:  RS-485 reject commands from CONTROL_NODE (triggered by weight
+               out-of-range, temperature out-of-range, or camera inspection)
+      Outputs: Pneumatic solenoid valve (reject arm / diverter), camera
+               trigger signal (GPIO)
+      Safety:  Reject confirmation sensor (photoelectric — verify product
+               was actually rejected)
+
+    Node 15 — SENSOR_NODE (Camera Trigger Interface)
+      Inputs:  Machine vision camera (industrial, GigE or USB, managed by
+               Jetson), camera trigger input/output (GPIO), product
+               presence sensor (photoelectric for precise positioning)
+
+    Node 16 — HMI_NODE (Operator Panel)
+      Inputs:  NEXUSLINK, operator inputs (touchscreen, E-stop button,
+               mode selector)
+      Outputs: 10" industrial touchscreen, status LEDs, tower light
+
+  REASONING LAYER (Jetson Orin Nano):
+    Mounted in the line control cabinet. Connected via Ethernet.
+    Runs machine vision inspection (camera connected via GigE or USB),
+    quality analytics, yield optimization, and predictive maintenance.
+
+10.2  WHAT REFLEX DOES
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Line speed synchronization: The CONTROL_NODE maintains a speed ratio
+    between adjacent conveyor sections to prevent product collisions or
+    gaps. Upstream conveyors run slightly faster than downstream (to
+    maintain product contact without crushing). Speed ratio is a
+    configurable parameter in the artifact.
+
+  - Weight-based sorting: Each weigh station reports product weight. If
+    weight is outside the acceptable range (min/max configurable per
+    product recipe), the CONTROL_NODE calculates the time delay for the
+    product to reach the reject station and sends a timed reject command
+    to Node 14. This is a classic "flying reject" where the decision and
+    the action are separated in time. The timing calculation uses conveyor
+    speed and distance to the reject point.
+
+  - Temperature monitoring: Each temperature SENSOR_NODE continuously
+    monitors process temperatures. If any temperature exceeds the recipe
+    setpoint by >5°C or drops below setpoint by >5°C, the Safety Monitor
+    triggers an alarm. If temperature exceeds a critical threshold
+    (product safety risk), the Safety Monitor stops the line and triggers
+    a reject for all products currently in the critical zone.
+
+  - Accumulation control: Downstream photoelectric sensors detect product
+    backup (accumulation). When accumulation is detected, the CONTROL_NODE
+    reduces upstream conveyor speed to prevent product pileup. When
+    accumulation clears, speed ramps back up.
+
+  - E-stop: A physical E-stop button is hardwired to ALL motor controller
+    ACTUATOR_NODEs. Pressing E-stop opens the motor contactors directly.
+    The NEXUS network is notified but does not participate in E-stop.
+    E-stop recovery requires manual reset at each node.
+
+10.3  WHAT REASONING LEARNS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Optimal line speed for product mix: The Jetson records product type,
+    weight distribution, temperature profiles, and defect rates for each
+    production run. Over multiple runs, it learns the maximum line speed
+    that maintains quality targets for each product mix. It proposes speed
+    setpoint changes as artifacts for the CONTROL_NODE.
+
+  - Machine vision defect detection: The Jetson runs a CNN-based vision
+    model that inspects products at the camera station. Defect images are
+    logged and used to periodically retrain the model. The improved model
+    is deployed as a new Jetson artifact (not an ESP32 artifact, since
+    vision runs on the Jetson).
+
+  - Predictive maintenance: Conveyor motor current trends, temperature
+    trends, and vibration (if sensors are added) feed a degradation model.
+    The Jetson predicts bearing failure, belt wear, and gearbox issues
+    before they cause unplanned downtime.
+
+  - Waste reduction: The Jetson tracks reject rates by cause (weight,
+    temperature, visual defect) and correlates with upstream process
+    parameters. It identifies root causes of waste (e.g., a specific
+    temperature zone running cold causes 3% more rejects) and proposes
+    process adjustments.
+
+10.4  A/B TEST SCENARIO
+─────────────────────────────────────────────────────────────────────────────────
+
+  Hypothesis: "A feed-forward weight compensation algorithm (predicting
+  product weight based on upstream filling machine parameters and pre-
+  adjusting the weight acceptance window) will reduce false rejects by
+  >25% without increasing consumer risk of out-of-spec product."
+
+  Setup: Run the production line with Product X for 5 days using current
+  artifact (v2.0). Then switch to proposed artifact (v2.1) with feed-
+  forward compensation for 5 days. Track reject rates and product weight
+  statistics.
+
+  Duration: 10 production days.
+
+  Metrics: False reject rate (%), actual out-of-spec rate (%), weight
+  distribution statistics (mean, standard deviation), consumer complaint
+  rate (30-day lag).
+
+  Decision: If false rejects decrease >20% and actual out-of-spec rate
+  does not increase, promote v2.1.
+
+10.5  SAFETY CONSIDERATIONS
+─────────────────────────────────────────────────────────────────────────────────
+
+  - Food safety: Temperature is the primary food safety parameter. If any
+    cook/chill process deviates from the critical temperature limit (e.g.,
+    pasteurization temperature drops below 72°C for >15 seconds), ALL
+    product produced during the deviation must be rejected or quarantined.
+    The Safety Monitor implements this as a hard rule.
+
+  - Physical hazard prevention: The reject actuator MUST be verified. If
+    the reject confirmation sensor does not detect the rejected product,
+    the line is stopped and an alarm is triggered. This prevents
+    out-of-spec product from reaching consumers.
+
+  - Machine guarding: Conveyor nip points and moving machinery must have
+    physical guards with interlock switches. If a guard is opened, the
+    Safety Monitor stops the affected conveyor section. Guard interlock
+    switches are wired directly to ACTUATOR_NODEs, not through the network.
+
+  - Allergen cross-contamination: If the line switches between products
+    with different allergen profiles, the Jetson verifies that the
+    correct cleaning protocol has been completed (via HMI operator
+    confirmation) before allowing production to resume.
+
+  - Hygiene: All NEXUS node enclosures must be IP69K rated (high-pressure,
+    high-temperature washdown). Stainless steel enclosures, sealed
+    connectors, and food-grade cable glands are required.
+
+10.6  BOM ESTIMATE
+─────────────────────────────────────────────────────────────────────────────────
+
+  Item                            Qty   Unit Cost    Total
+  ─────────────────────────────── ────  ──────────   ──────────
+  ESP32-S3-WROOM-1 (motor, x4)   4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (control)     1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (weigh, x4)   4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (temp, x4)    4     $4.50        $18.00
+  ESP32-S3-WROOM-1 (reject)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (camera)      1     $4.50        $4.50
+  ESP32-S3-WROOM-1 (HMI)         1     $4.50        $4.50
+  Jetson Orin Nano 8GB           1     $249.00      $249.00
+  Conveyor motor VFDs (x8)       8     $450.00      $3,600.00
+  Load cells + ADC (x4)          4     $85.00       $340.00
+  PT100 sensors + MAX31865 (x4)  4     $35.00       $140.00
+  Industrial camera (GigE)       1     $1,500.00    $1,500.00
+  Pneumatic reject system        1     $350.00      $350.00
+  Photoelectric sensors (x8)     8     $65.00       $520.00
+  10" industrial touchscreen      1     $450.00      $450.00
+  IP69K stainless enclosures     16    $85.00       $1,360.00
+  Tower light + E-stop           1     $120.00      $120.00
+  Wiring + terminations          1     $400.00      $400.00
+  ─────────────────────────────── ────  ──────────   ──────────
+  TOTAL NEXUS CONVEYOR LINE                                 $9,101.00
+
+  Again, the VFDs, camera, and IP69K enclosures dominate. The NEXUS control
+  electronics are under $330. A comparable PLC + HMI + SCADA system for
+  this line would cost $12,000–$25,000, without the adaptive optimization
+  capabilities.
+
+10.7  WHY NEXUS FITS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Food processing lines require deterministic timing (product must be at
+  the right place at the right time), food safety compliance (HACCP
+  critical limits must be enforced with zero tolerance), and high
+  availability (downtime costs thousands of dollars per hour). The NEXUS
+  REFLEX layer provides PLC-equivalent deterministic control with
+  built-in safety monitoring. The REASONING layer adds machine vision,
+  waste reduction analytics, and predictive maintenance that traditional
+  PLCs cannot provide. The artifact evolution system allows continuous
+  improvement without production line shutdowns for firmware updates.
+
+
+================================================================================
+11. CROSS-DOMAIN BOM SUMMARY
+================================================================================
+
+  Domain                  ESP32s    Jetson    NEXUS Elec.   Full System
+  ──────────────────────  ────────  ────────  ────────────   ──────────
+  1. Agriculture Spray    7         1         $883           $5,000–$15,000
+  2. Construction Excav.  8         1         $1,582         $8,000–$20,000
+  3. Warehouse Robot      8         1         $1,253         $3,000–$8,000
+  4. Greenhouse Enviro.   19        1         $1,379         $5,000–$15,000
+  5. Mining Ventilation   26        1         $9,826         $20,000–$50,000
+  6. Water Treatment      18        1         $11,478        $30,000–$80,000
+  7. Solar Panel Track.   12        1         $2,833         $10,000–$30,000
+  8. Food Processing      16        1         $9,101         $25,000–$60,000
+
+  Key observations:
+  - NEXUS electronics (ESP32s + Jetson) are ALWAYS a small fraction of total
+    system cost, typically 5–15%. The value proposition is not cheaper
+    hardware — it is smarter, self-improving software that reduces operating
+    costs over the system's lifetime.
+  - Mining and water treatment have the highest BOM due to ATEX/IS
+    barriers and industrial-grade instrumentation requirements.
+  - Every domain uses exactly ONE Jetson Orin Nano. The Jetson's 40 TOPS
+    of compute is more than sufficient for all eight domains. In larger
+    deployments (e.g., 200-tracker solar farm, 50-robot warehouse), a
+    single Jetson can coordinate all nodes. For geographically distributed
+    deployments (multiple greenhouses), each facility has its own Jetson,
+    and artifact learning is synced via cloud.
+
+  Cumulative BOM for all eight domains: $37,335 in NEXUS electronics,
+  demonstrating that the same $250 Jetson + $5–$120 ESP32 hardware platform
+  serves radically different industries with zero architectural changes.
+
+
+================================================================================
+12. COMMON REGULATORY LANDSCAPE
+================================================================================
+
+  Domain          Key Regulations                           Impact on NEXUS
+  ──────────────  ──────────────────────────────────────    ────────────────
+  Agriculture     EPA pesticide application regulations     Safety Monitor
+                  (FIFRA in US, EU Directive 2009/128)      must enforce
+                                                           drift limits
+  Construction    ISO 13849 (machinery safety),              Safety Monitor
+                  EN 474 (earth-moving machinery)           must meet PL-d
+                                                           or higher
+  Warehouse       ANSI/RIA R15.08 (mobile robots),          E-stop, bumper
+                  ISO 3691-4 (driverless trucks)            systems required
+  Greenhouse      Food safety (GAP certifications),         Temperature
+                  worker safety (CO2 limits)                monitoring
+  Mining          ATEX/IECEx (explosive atmospheres),       Explosion-proof
+                  Mine Safety Act, MSHA regulations         enclosures req.
+  Water Treat.    Safe Drinking Water Act, EPA/WHO          Chlorine, pH
+                  limits on chlorine, pH, turbidity        limits in Safety
+                                                           Monitor
+  Solar Farm      NEC (electrical safety), IEC 62446       Arc flash
+                  (PV system testing), local building       detection
+  Food Process.   FDA 21 CFR Part 117 (HACCP), FSMA,       Temperature,
+                  EU Regulation 852/2004 (food hygiene)    allergen tracking
+                                                           in Safety Monitor
+
+  Common theme: EVERY domain has regulations that require hard, deterministic
+  safety responses. These responses must operate without software dependency,
+  network dependency, or cloud dependency. The NEXUS Safety Monitor —
+  eFuse-protected, hardware-enforced, operating at microsecond-level
+  response times — is designed to meet these regulatory requirements across
+  all domains. The regulatory compliance effort for the Safety Monitor core
+  is done ONCE and inherited by every domain deployment.
+
+
+================================================================================
+13. WHY NEXUS FITS EVERY DOMAIN
+================================================================================
+
+The eight domains examined in this document share five properties that make
+NEXUS the ideal architecture:
+
+  1. UNRELIABLE CONNECTIVITY: Fields, tunnels, remote solar sites, and
+     moving warehouse robots all experience communication dropouts. NEXUS
+     makes independent operation the default, not the fallback.
+
+  2. HARD REAL-TIME SAFETY: Every domain has physical safety requirements
+     with microsecond to millisecond response times. NEXUS's REFLEX layer
+     (ESP32) provides deterministic, bounded response times.
+
+  3. ADAPTIVE OPTIMIZATION: Every domain benefits from learning and
+     optimization — better spray patterns, more efficient digging, lower
+     energy consumption, less food waste. NEXUS's REASONING layer (Jetson)
+     provides this without compromising safety.
+
+  4. REGULATORY COMPLIANCE: Every domain operates under regulatory
+     frameworks that require deterministic safety systems. NEXUS's Safety
+     Monitor, with its eFuse protection and hardware-enforced rules, is
+     designed for compliance.
+
+  5. COST PRESSURE: Every domain seeks to do more with less — reduce
+     chemical use, minimize energy, decrease waste, extend equipment life.
+     NEXUS's artifact evolution system provides continuous improvement at
+     zero marginal cost once deployed.
+
+The NEXUS framework is not a marine autopilot. It is a universal pattern for
+building machines that are SAFE by design, USEFUL out of the box, and SMART
+over time. The marine application is simply the first domain where this
+pattern was applied. The eight domains in this document demonstrate that the
+pattern generalizes completely.
+
+The ESP32 is the spinal cord. The Jetson is the brain. Every robotic system
+has arms and legs that need reflexes, and a brain that needs to learn. NEXUS
+provides both, for any domain, on commodity hardware, with safety guarantees
+that no cloud-dependent architecture can match.
+
+================================================================================
+  END OF DOCUMENT
+================================================================================

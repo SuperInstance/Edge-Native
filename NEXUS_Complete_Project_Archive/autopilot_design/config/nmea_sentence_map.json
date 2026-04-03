@@ -1,0 +1,705 @@
+{
+  "_comment": "NMEA 0183 Sentence Configuration \u2014 Defines all sentences parsed (input) and generated (output)",
+  "_version": "1.1.0",
+  "input_sentences": {
+    "$HDM": {
+      "description": "Heading Magnetic \u2014 PRIMARY heading source when using NMEA compass (fallback if no I2C compass)",
+      "enabled": true,
+      "priority": 1,
+      "fields": [
+        {
+          "index": 1,
+          "name": "heading",
+          "type": "float",
+          "min": 0.0,
+          "max": 359.9,
+          "units": "degrees",
+          "description": "Magnetic heading"
+        },
+        {
+          "index": 2,
+          "name": "reference",
+          "type": "string",
+          "valid_values": [
+            "M"
+          ],
+          "description": "Always M for HDM"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "HD",
+        "HE",
+        "AG",
+        "GP",
+        "GN"
+      ],
+      "update_rate_hz": "5-10",
+      "action": "update_heading_magnetic",
+      "stale_timeout_ms": 500
+    },
+    "$HDT": {
+      "description": "Heading True \u2014 True heading, requires magnetic variation to convert",
+      "enabled": true,
+      "priority": 2,
+      "fields": [
+        {
+          "index": 1,
+          "name": "heading",
+          "type": "float",
+          "min": 0.0,
+          "max": 359.9,
+          "units": "degrees",
+          "description": "True heading"
+        },
+        {
+          "index": 2,
+          "name": "reference",
+          "type": "string",
+          "valid_values": [
+            "T"
+          ],
+          "description": "Always T for HDT"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "HD",
+        "HE",
+        "GN"
+      ],
+      "update_rate_hz": "5-10",
+      "action": "update_heading_true",
+      "variation_source": "$RMC or config",
+      "stale_timeout_ms": 500
+    },
+    "$HDG": {
+      "description": "Heading, Deviation, Variation \u2014 PREFERRED heading sentence (contains deviation correction and magnetic variation)",
+      "enabled": true,
+      "priority": 0,
+      "fields": [
+        {
+          "index": 1,
+          "name": "heading",
+          "type": "float",
+          "min": 0.0,
+          "max": 359.9,
+          "units": "degrees",
+          "description": "Heading with deviation applied"
+        },
+        {
+          "index": 2,
+          "name": "deviation",
+          "type": "float",
+          "min": -180.0,
+          "max": 180.0,
+          "units": "degrees",
+          "description": "Magnetic deviation (E/W)"
+        },
+        {
+          "index": 3,
+          "name": "deviation_dir",
+          "type": "string",
+          "valid_values": [
+            "E",
+            "W"
+          ],
+          "description": "Deviation direction"
+        },
+        {
+          "index": 4,
+          "name": "variation",
+          "type": "float",
+          "min": -180.0,
+          "max": 180.0,
+          "units": "degrees",
+          "description": "Magnetic variation (E/W)"
+        },
+        {
+          "index": 5,
+          "name": "variation_dir",
+          "type": "string",
+          "valid_values": [
+            "E",
+            "W"
+          ],
+          "description": "Variation direction"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "HD",
+        "HE"
+      ],
+      "update_rate_hz": "5-10",
+      "action": "update_heading_with_deviation",
+      "stale_timeout_ms": 500
+    },
+    "$RMC": {
+      "description": "Recommended Minimum Navigation \u2014 GPS position, SOG, COG, magnetic variation, date/time",
+      "enabled": true,
+      "priority": 10,
+      "fields": [
+        {
+          "index": 1,
+          "name": "status",
+          "type": "string",
+          "valid_values": [
+            "A",
+            "V"
+          ],
+          "description": "A=Active/Valid, V=Void"
+        },
+        {
+          "index": 2,
+          "name": "lat",
+          "type": "string",
+          "description": "Latitude DDmm.mm"
+        },
+        {
+          "index": 4,
+          "name": "lon",
+          "type": "string",
+          "description": "Longitude DDDmm.mm"
+        },
+        {
+          "index": 6,
+          "name": "sog_kts",
+          "type": "float",
+          "min": 0.0,
+          "max": 100.0,
+          "units": "knots",
+          "description": "Speed over ground"
+        },
+        {
+          "index": 7,
+          "name": "cog_deg",
+          "type": "float",
+          "min": 0.0,
+          "max": 359.9,
+          "units": "degrees",
+          "description": "Course over ground"
+        },
+        {
+          "index": 8,
+          "name": "date",
+          "type": "string",
+          "description": "DDMMYY"
+        },
+        {
+          "index": 9,
+          "name": "mag_variation",
+          "type": "float",
+          "min": -180.0,
+          "max": 180.0,
+          "units": "degrees",
+          "description": "Magnetic variation"
+        },
+        {
+          "index": 10,
+          "name": "mag_var_dir",
+          "type": "string",
+          "valid_values": [
+            "E",
+            "W"
+          ],
+          "description": "Variation direction"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "GP",
+        "GN"
+      ],
+      "update_rate_hz": "1-5",
+      "action": "update_gps_data",
+      "stale_timeout_ms": 5000
+    },
+    "$GGA": {
+      "description": "GPS Fix Data \u2014 Position, fix quality, HDOP, altitude",
+      "enabled": true,
+      "priority": 11,
+      "fields": [
+        {
+          "index": 1,
+          "name": "utc_time",
+          "type": "string",
+          "description": "HHMMSS"
+        },
+        {
+          "index": 2,
+          "name": "lat",
+          "type": "string",
+          "description": "Latitude DDmm.mm"
+        },
+        {
+          "index": 3,
+          "name": "lat_hemisphere",
+          "type": "string",
+          "valid_values": [
+            "N",
+            "S"
+          ],
+          "description": "Latitude N/S"
+        },
+        {
+          "index": 4,
+          "name": "lon",
+          "type": "string",
+          "description": "Longitude DDDmm.mm"
+        },
+        {
+          "index": 5,
+          "name": "lon_hemisphere",
+          "type": "string",
+          "valid_values": [
+            "E",
+            "W"
+          ],
+          "description": "Longitude E/W"
+        },
+        {
+          "index": 6,
+          "name": "fix_quality",
+          "type": "integer",
+          "min": 0,
+          "max": 2,
+          "description": "0=no fix, 1=GPS, 2=DGPS"
+        },
+        {
+          "index": 8,
+          "name": "num_satellites",
+          "type": "integer",
+          "min": 0,
+          "max": 24,
+          "description": "Satellites in use"
+        },
+        {
+          "index": 9,
+          "name": "hdop",
+          "type": "float",
+          "min": 0.5,
+          "max": 99.9,
+          "description": "Horizontal dilution of precision"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "GP",
+        "GN"
+      ],
+      "update_rate_hz": "1-5",
+      "action": "update_gps_fix",
+      "stale_timeout_ms": 10000
+    },
+    "$APB": {
+      "description": "Autopilot Sentence B \u2014 PRIMARY command for track/course mode. Contains heading-to-steer from chart plotter with XTE correction already applied.",
+      "enabled": true,
+      "priority": 5,
+      "fields": [
+        {
+          "index": 1,
+          "name": "bearing_status",
+          "type": "string",
+          "valid_values": [
+            "A",
+            "V"
+          ],
+          "description": "Bearing validity"
+        },
+        {
+          "index": 2,
+          "name": "heading_status",
+          "type": "string",
+          "valid_values": [
+            "A",
+            "V"
+          ],
+          "description": "Heading validity"
+        },
+        {
+          "index": 3,
+          "name": "bearing_to_wp_true",
+          "type": "float",
+          "min": 0.0,
+          "max": 359.9,
+          "units": "degrees",
+          "description": "Bearing origin to waypoint (true)"
+        },
+        {
+          "index": 4,
+          "name": "bearing_ref",
+          "type": "string",
+          "valid_values": [
+            "T",
+            "M"
+          ],
+          "description": "Bearing reference"
+        },
+        {
+          "index": 5,
+          "name": "bearing_dest_not_used",
+          "type": "string",
+          "description": "Always N"
+        },
+        {
+          "index": 6,
+          "name": "bearing_dest_origin_not_used",
+          "type": "string",
+          "description": "Always A"
+        },
+        {
+          "index": 7,
+          "name": "bearing_to_dest",
+          "type": "float",
+          "min": 0.0,
+          "max": 359.9,
+          "units": "degrees",
+          "description": "Bearing to destination"
+        },
+        {
+          "index": 8,
+          "name": "dest_bearing_ref",
+          "type": "string",
+          "valid_values": [
+            "T",
+            "M"
+          ],
+          "description": "Reference"
+        },
+        {
+          "index": 9,
+          "name": "waypoint_id",
+          "type": "string",
+          "description": "Destination waypoint identifier"
+        },
+        {
+          "index": 10,
+          "name": "bearing_to_wp_mag",
+          "type": "float",
+          "description": "Bearing origin to waypoint (magnetic)"
+        },
+        {
+          "index": 11,
+          "name": "wp_bearing_ref",
+          "type": "string",
+          "valid_values": [
+            "M",
+            ""
+          ],
+          "description": "Reference"
+        },
+        {
+          "index": 12,
+          "name": "heading_to_steer",
+          "type": "float",
+          "min": 0.0,
+          "max": 359.9,
+          "units": "degrees",
+          "description": "HEADING TO STEER (KEY FIELD) \u2014 magnetic"
+        },
+        {
+          "index": 13,
+          "name": "steer_ref",
+          "type": "string",
+          "valid_values": [
+            "M",
+            "T"
+          ],
+          "description": "Heading reference"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "EC",
+        "GP",
+        "GN",
+        "AG"
+      ],
+      "update_rate_hz": "1",
+      "action": "set_track_heading",
+      "key_field": 12,
+      "valid_when": "fields[0] == 'A' && fields[1] == 'A'",
+      "switch_to_track_mode": true,
+      "stale_timeout_ms": 5000
+    },
+    "$RMB": {
+      "description": "Recommended Minimum Navigation to Waypoint \u2014 LEGACY course tracking (use $APB when available)",
+      "enabled": true,
+      "priority": 6,
+      "fields": [
+        {
+          "index": 1,
+          "name": "status",
+          "type": "string",
+          "valid_values": [
+            "A",
+            "V"
+          ],
+          "description": "A=Active, V=Void"
+        },
+        {
+          "index": 2,
+          "name": "xte_nm",
+          "type": "float",
+          "min": 0.0,
+          "max": 99.9,
+          "units": "nm",
+          "description": "Cross-track error (always positive)"
+        },
+        {
+          "index": 3,
+          "name": "xte_direction",
+          "type": "string",
+          "valid_values": [
+            "L",
+            "R"
+          ],
+          "description": "L=steer left (port), R=steer right (starboard)"
+        },
+        {
+          "index": 4,
+          "name": "origin_wp",
+          "type": "string",
+          "description": "Origin waypoint ID"
+        },
+        {
+          "index": 5,
+          "name": "dest_wp",
+          "type": "string",
+          "description": "Destination waypoint ID"
+        },
+        {
+          "index": 11,
+          "name": "bearing_to_dest",
+          "type": "float",
+          "min": 0.0,
+          "max": 359.9,
+          "units": "degrees",
+          "description": "True bearing to destination"
+        },
+        {
+          "index": 12,
+          "name": "dest_velocity",
+          "type": "float",
+          "min": 0.0,
+          "max": 50.0,
+          "units": "kts",
+          "description": "Speed toward destination"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "GP",
+        "GN",
+        "EC"
+      ],
+      "update_rate_hz": "1",
+      "action": "set_track_heading_legacy",
+      "fallback_for_apb": true,
+      "stale_timeout_ms": 5000
+    },
+    "$VHW": {
+      "description": "Water Speed and Heading \u2014 Provides speed through water for gain scheduling. CRITICAL: Water speed determines actual rudder authority.",
+      "enabled": true,
+      "priority": 8,
+      "fields": [
+        {
+          "index": 1,
+          "name": "water_speed_true",
+          "type": "float",
+          "min": 0.0,
+          "max": 50.0,
+          "units": "knots",
+          "description": "Water speed (true heading)"
+        },
+        {
+          "index": 2,
+          "name": "water_speed_ref",
+          "type": "string",
+          "description": "Heading reference (often blank)"
+        },
+        {
+          "index": 5,
+          "name": "water_speed_mag",
+          "type": "float",
+          "min": 0.0,
+          "max": 50.0,
+          "units": "knots",
+          "description": "Water speed (magnetic heading, often blank)"
+        },
+        {
+          "index": 7,
+          "name": "water_speed_kts",
+          "type": "float",
+          "min": 0.0,
+          "max": 50.0,
+          "units": "knots",
+          "description": "Speed through water in knots (primary speed field)"
+        },
+        {
+          "index": 8,
+          "name": "speed_units",
+          "type": "string",
+          "valid_values": [
+            "N",
+            "K"
+          ],
+          "description": "N=knots, K=km/h"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "VD",
+        "VW"
+      ],
+      "update_rate_hz": "1",
+      "action": "update_water_speed",
+      "stale_timeout_ms": 10000
+    },
+    "$MWV": {
+      "description": "Wind Speed and Angle \u2014 Apparent or true wind for wind mode operation",
+      "enabled": true,
+      "priority": 9,
+      "fields": [
+        {
+          "index": 1,
+          "name": "wind_angle",
+          "type": "float",
+          "min": 0.0,
+          "max": 360.0,
+          "units": "degrees",
+          "description": "Wind angle"
+        },
+        {
+          "index": 2,
+          "name": "reference",
+          "type": "string",
+          "valid_values": [
+            "R",
+            "T"
+          ],
+          "description": "R=Relative(apparent), T=True"
+        },
+        {
+          "index": 3,
+          "name": "wind_speed",
+          "type": "float",
+          "min": 0.0,
+          "max": 200.0,
+          "units": "varies",
+          "description": "Wind speed"
+        },
+        {
+          "index": 4,
+          "name": "speed_units",
+          "type": "string",
+          "valid_values": [
+            "K",
+            "M",
+            "N"
+          ],
+          "description": "K=km/h, M=m/s, N=knots"
+        },
+        {
+          "index": 5,
+          "name": "status",
+          "type": "string",
+          "valid_values": [
+            "A",
+            "V"
+          ],
+          "description": "A=valid, V=invalid"
+        }
+      ],
+      "checksum_validation": true,
+      "talker_ids": [
+        "WR",
+        "MW",
+        "VW"
+      ],
+      "update_rate_hz": "1-4",
+      "action": "update_wind_data",
+      "stale_timeout_ms": 5000
+    }
+  },
+  "output_sentences": {
+    "$HDM": {
+      "description": "Output vessel heading magnetic to other instruments (chart plotters, repeaters)",
+      "enabled": true,
+      "talker_id": "AG",
+      "fields": [
+        {
+          "index": 0,
+          "name": "heading",
+          "source": "shared_heading_filtered",
+          "format": "05.1",
+          "units": "degrees"
+        },
+        {
+          "index": 1,
+          "name": "reference",
+          "value": "M"
+        }
+      ],
+      "update_rate_hz": 10,
+      "example": "$AGHDM,127.5,M*2A"
+    },
+    "$RSA": {
+      "description": "Output rudder sensor angle to instruments",
+      "enabled": true,
+      "talker_id": "AG",
+      "fields": [
+        {
+          "index": 0,
+          "name": "starboard_rudder",
+          "source": "shared_rudder_angle",
+          "format": "05.1",
+          "units": "degrees",
+          "description": "Starboard rudder angle (always positive or zero)"
+        },
+        {
+          "index": 1,
+          "name": "stbd_valid",
+          "value": "A",
+          "description": "Always A"
+        },
+        {
+          "index": 2,
+          "name": "port_rudder",
+          "source": "abs(shared_rudder_angle) when negative",
+          "format": "05.1",
+          "units": "degrees",
+          "description": "Port rudder angle (always positive or zero)"
+        },
+        {
+          "index": 3,
+          "name": "port_valid",
+          "value": "A",
+          "description": "Always A"
+        }
+      ],
+      "update_rate_hz": 10,
+      "example": "$AGRSA,5.2,A,0.0,A*3F"
+    }
+  },
+  "checksum": {
+    "algorithm": "xor",
+    "start_char": "$",
+    "end_char": "*",
+    "length": 2,
+    "validation": "mandatory",
+    "max_invalid_per_window": 10,
+    "window_duration_ms": 5000,
+    "action_on_failure": "increment_counter_and_discard"
+  },
+  "parser": {
+    "_comment": "Fix M-06: NMEA sentence buffer and parser configuration",
+    "max_sentence_length_bytes": 128,
+    "_comment_buffer": "Increased from 64 bytes to 128 bytes minimum. Longest expected NMEA sentence: $GPAPB with 13 fields (~82 bytes with checksum). 128 bytes provides margin for extended sentences and vendor-specific data. Overflows cause sentence corruption and alarm storms.",
+    "max_field_count": 20,
+    "field_separator": ",",
+    "checksum_mandatory": true,
+    "overflow_action": "discard_and_alarm"
+  }
+}

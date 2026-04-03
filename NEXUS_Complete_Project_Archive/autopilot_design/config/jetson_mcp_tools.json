@@ -1,0 +1,557 @@
+{
+  "_comment": "MCP (Model Context Protocol) tool definitions for Jetson LLM voice interface",
+  "_version": "1.1.0",
+  "_description": "These tools allow an AI assistant to control the ESP32 autopilot via serial commands",
+  "tools": [
+    {
+      "name": "set_heading",
+      "description": "Set the autopilot target heading to a specific magnetic bearing in degrees (0-360). The autopilot must be engaged for this to take effect, or you can set engage=true to engage and set heading simultaneously.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "heading": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 359.9,
+            "description": "Target magnetic heading in degrees"
+          },
+          "engage": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, engage autopilot and set heading. If false, only change heading (must already be engaged). DEFAULTS TO FALSE \u2014 must be explicitly set to true to engage. Safety: prevents unintended autopilot activation from voice misinterpretation.",
+            "_comment": "Fix C-07: Changed default from true to false. Any voice command setting heading will NOT engage unless explicitly requested."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "voice",
+              "app",
+              "nmea"
+            ],
+            "default": "voice",
+            "description": "Source of this command for telemetry logging"
+          }
+        },
+        "required": [
+          "heading"
+        ]
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "heading_set": {
+            "type": "number",
+            "description": "The heading that was set (0-360)"
+          },
+          "engaged": {
+            "type": "boolean",
+            "description": "Whether the autopilot is now engaged"
+          },
+          "previous_heading": {
+            "type": "number",
+            "description": "The heading before this change"
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message if status is 'error'"
+          }
+        }
+      }
+    },
+    {
+      "name": "get_status",
+      "description": "Get the current status of the autopilot system including mode, heading, rudder angle, engagement state, alarms, and sensor health.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "standby",
+              "engaging",
+              "auto",
+              "track",
+              "wind",
+              "alarm"
+            ]
+          },
+          "engaged": {
+            "type": "boolean"
+          },
+          "heading_current": {
+            "type": "number",
+            "description": "Current vessel heading (degrees magnetic)"
+          },
+          "heading_target": {
+            "type": "number",
+            "description": "Target heading (degrees magnetic)"
+          },
+          "heading_error": {
+            "type": "number",
+            "description": "Current heading error (degrees)"
+          },
+          "rudder_angle": {
+            "type": "number",
+            "description": "Current rudder angle (degrees, + = starboard)"
+          },
+          "rudder_commanded": {
+            "type": "number",
+            "description": "Commanded rudder angle from PID"
+          },
+          "speed_stw": {
+            "type": "number",
+            "description": "Speed through water in knots (0 if unavailable)"
+          },
+          "speed_sog": {
+            "type": "number",
+            "description": "Speed over ground in knots (0 if unavailable)"
+          },
+          "clutch_engaged": {
+            "type": "boolean"
+          },
+          "compass_valid": {
+            "type": "boolean"
+          },
+          "gps_fix_valid": {
+            "type": "boolean"
+          },
+          "jetson_link_up": {
+            "type": "boolean"
+          },
+          "voltage": {
+            "type": "number",
+            "description": "Supply voltage in volts"
+          },
+          "alarms": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "critical",
+                    "warning",
+                    "info"
+                  ]
+                }
+              }
+            }
+          },
+          "uptime_seconds": {
+            "type": "integer"
+          },
+          "profile": {
+            "type": "string",
+            "description": "Active gain profile name"
+          }
+        }
+      }
+    },
+    {
+      "name": "engage",
+      "description": "Engage the autopilot. The autopilot will begin holding the current heading or a specified heading. Requires valid compass and rudder sensor data.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "track",
+              "wind"
+            ],
+            "default": "auto",
+            "description": "Operating mode: auto=heading hold, track=GPS course follow, wind=apparent wind angle hold"
+          },
+          "heading": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 359.9,
+            "description": "Heading to hold (only for auto mode). If omitted, captures current heading."
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "engaged": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "heading_captured": {
+            "type": "number",
+            "description": "The heading the autopilot is now holding"
+          },
+          "clutch_engaged": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "confirmation_required": {
+        "type": "verbal_confirmation",
+        "description": "Voice 'engage autopilot' must receive verbal confirmation before engaging. The LLM must prompt: 'Confirm autopilot engage?' and wait for explicit 'yes'/'confirm' response within 5 seconds.",
+        "timeout_seconds": 5,
+        "confirm_phrases": [
+          "yes",
+          "confirm",
+          "engage",
+          "yes confirm"
+        ],
+        "reject_phrases": [
+          "no",
+          "cancel",
+          "stop",
+          "abort"
+        ],
+        "on_timeout": "do_not_engage",
+        "on_reject": "do_not_engage"
+      },
+      "engage_guard_conditions": {
+        "_comment": "Fix C-07: Additional safety checks before allowing voice engagement",
+        "refuse_if_speed_below_kts": 1.0,
+        "refuse_if_heading_rate_above_deg_per_sec": 10.0,
+        "refuse_if_mode_is": "alarm",
+        "refuse_if_clutch_fault_active": true,
+        "description": "Voice engagement refused if: GPS speed < 1 knot (at anchor), heading rate > 10\u00b0/sec (turning), or in alarm mode."
+      }
+    },
+    {
+      "name": "standby",
+      "description": "Disengage the autopilot. All solenoids turn off, clutch de-energages, rudder returns to center (hydraulic lock), and manual steering is restored. Use this to hand control back to the helmsman.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "engaged": {
+            "type": "boolean",
+            "description": "Will be false"
+          },
+          "clutch_engaged": {
+            "type": "boolean",
+            "description": "Will be false"
+          }
+        }
+      }
+    },
+    {
+      "name": "set_mode",
+      "description": "Switch the autopilot operating mode. Can only switch between engaged modes. Use engage() or standby() to change engagement state.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "track",
+              "wind"
+            ],
+            "description": "Target mode"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "previous_mode": {
+            "type": "string"
+          },
+          "current_mode": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "get_compass",
+      "description": "Get detailed compass data including raw and filtered heading, rate of turn, calibration status, and sensor health.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "heading": {
+            "type": "number",
+            "description": "Filtered heading (degrees, 0-360)"
+          },
+          "heading_raw": {
+            "type": "number",
+            "description": "Raw sensor heading before filtering"
+          },
+          "rate_of_turn": {
+            "type": "number",
+            "description": "Degrees per second (positive = turning to starboard)"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "bno085",
+              "nmea_hdm",
+              "nmea_hdg",
+              "nmea_hdt"
+            ]
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low",
+              "none"
+            ]
+          },
+          "cal_status": {
+            "type": "string",
+            "enum": [
+              "calibrated",
+              "calibrating",
+              "uncalibrated",
+              "unknown"
+            ]
+          },
+          "last_update_ms": {
+            "type": "integer",
+            "description": "Milliseconds since last compass reading"
+          }
+        }
+      }
+    },
+    {
+      "name": "get_rudder",
+      "description": "Get current rudder position including actual angle, commanded angle, and sensor details.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "angle": {
+            "type": "number",
+            "description": "Current rudder angle in degrees (+ starboard, - port)"
+          },
+          "commanded": {
+            "type": "number",
+            "description": "PID-commanded rudder angle"
+          },
+          "sensor": {
+            "type": "string",
+            "enum": [
+              "as5048a",
+              "potentiometer",
+              "none"
+            ]
+          },
+          "calibrated": {
+            "type": "boolean"
+          },
+          "last_update_ms": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "calibrate",
+      "description": "Start, stop, or check the status of a sensor calibration procedure. Compass calibration requires rotating the boat 360\u00b0. Rudder calibration requires turning the rudder to its limits.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "compass",
+              "rudder_center",
+              "rudder_limits"
+            ],
+            "description": "Which calibration to perform"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "stop",
+              "status"
+            ],
+            "description": "start=begin calibration, stop=save results, status=query current state"
+          }
+        },
+        "required": [
+          "type",
+          "action"
+        ]
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "Current calibration state (idle, in_progress, complete, failed)"
+          },
+          "progress_pct": {
+            "type": "integer",
+            "description": "Calibration progress percentage (if applicable)"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "set_gains",
+      "description": "Modify PID controller gains for fine-tuning the autopilot response. Use with caution \u2014 incorrect gains can cause oscillation or loss of control. The D gain is the most important for damping. Set I to 0 to disable integral (recommended starting point).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "P": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 0.03,
+            "description": "Proportional gain"
+          },
+          "I": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 0.05,
+            "description": "Integral gain (0 = disabled)"
+          },
+          "D": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 0.24,
+            "description": "Derivative gain (rate of turn damping)"
+          },
+          "DD": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 0.24,
+            "description": "Second derivative gain (reaction time)"
+          },
+          "PR": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 0.02,
+            "description": "Proportional root gain (overshoot reduction)"
+          },
+          "FF": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 2.4,
+            "description": "Feed forward gain (course change response)"
+          }
+        }
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "gains_applied": {
+            "type": "object",
+            "description": "The gains that are now active"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "get_config",
+      "description": "Get the current autopilot configuration including all PID gains, safety thresholds, sensor settings, and serial parameters.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "config": {
+            "type": "object",
+            "description": "Current firmware configuration"
+          }
+        }
+      }
+    }
+  ]
+}

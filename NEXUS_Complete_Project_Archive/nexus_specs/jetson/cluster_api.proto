@@ -1,0 +1,934 @@
+syntax = "proto3";
+
+package nexus.jetson.cluster;
+
+// ---------------------------------------------------------------------------
+// Imports – use well-known types for timestamps, durations, and empty payloads
+// ---------------------------------------------------------------------------
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/field_mask.proto";
+
+// ---------------------------------------------------------------------------
+// File-level options
+// ---------------------------------------------------------------------------
+option csharp_namespace = "Nexus.Jetson.Cluster";
+option go_package      = "github.com/nexus/jetson/clusterpb;clusterpb";
+option java_multiple_files = true;
+option java_outer_classname = "ClusterApiProto";
+option java_package     = "com.nexus.jetson.cluster";
+option php_namespace    = "Nexus\\Jetson\\Cluster";
+option ruby_package     = "Nexus::Jetson::Cluster";
+option swift_prefix     = "NJC";
+
+// ===========================================================================
+// Service 1 – NodeDiscovery
+// ===========================================================================
+
+// Peer discovery, health checking, and cluster membership.
+service NodeDiscovery {
+  // A Jetson node announces itself to the cluster on startup.
+  rpc Announce(AnnounceRequest) returns (AnnounceResponse);
+
+  // Long-lived streaming heartbeat. The server pushes pings and the client
+  // must respond; missed pings trigger re-discovery.
+  rpc Heartbeat(HeartbeatRequest) returns (stream HeartbeatResponse);
+
+  // Returns a point-in-time snapshot of the entire cluster.
+  rpc GetClusterStatus(GetClusterStatusRequest) returns (ClusterStatus);
+}
+
+// ===========================================================================
+// Service 2 – NodeManager
+// ===========================================================================
+
+// ESP32 node lifecycle management: registration, role assignment, reflex
+// deployment, observation control, and self-test.
+service NodeManager {
+  // Enumerate all known ESP32 nodes.
+  rpc ListNodes(google.protobuf.Empty) returns (NodeList);
+
+  // Retrieve detailed information for a single node.
+  rpc GetNodeInfo(NodeId) returns (NodeInfo);
+
+  // Assign or change the role of a node.
+  rpc AssignRole(RoleAssignment) returns (RoleResult);
+
+  // Deploy a reflex binary to a node and activate it.
+  rpc DeployReflex(ReflexDeployment) returns (DeployResult);
+
+  // Start an observation session on a node (camera + sensors).
+  rpc StartObservation(ObsControl) returns (ObsResult);
+
+  // Stream observation data back to the caller in chunks.
+  rpc DumpObservation(ObsDumpRequest) returns (stream ObsDumpChunk);
+
+  // Execute a self-test suite on a node.
+  rpc RunSelftest(NodeId) returns (SelftestResult);
+}
+
+// ===========================================================================
+// Service 3 – ReflexOrchestrator
+// ===========================================================================
+
+// Reflex lifecycle management including creation, validation, A/B testing,
+// promotion, and rollback.
+service ReflexOrchestrator {
+  // List all reflexes deployed on a given node.
+  rpc ListReflexes(NodeId) returns (ReflexList);
+
+  // Create a new reflex version on the target node.
+  rpc CreateReflex(ReflexSpec) returns (ReflexVersion);
+
+  // Dry-run validate a reflex spec without deploying it.
+  rpc ValidateReflex(ReflexSpec) returns (ValidationResult);
+
+  // Configure an A/B test between two reflex versions.
+  rpc ABTestConfigure(ABTestConfig) returns (ABTestId);
+
+  // Retrieve the latest results of an A/B test.
+  rpc ABTestResult(ABTestId) returns (ABTestResult);
+
+  // Promote the winner of an A/B test (or a specific version) to production.
+  rpc PromoteReflex(ReflexVersion) returns (PromoteResult);
+
+  // Roll back a node to a previous reflex version.
+  rpc RollbackReflex(ReflexVersion) returns (RollbackResult);
+}
+
+// ===========================================================================
+// Service 4 – LearningPipeline
+// ===========================================================================
+
+// Observation analysis: narration ingestion, pattern discovery, hypothesis
+// validation, and reflex generation from patterns.
+service LearningPipeline {
+  // Ingest a human narration and extract a candidate behavioural rule.
+  rpc SubmitNarration(Narration) returns (ExtractedRule);
+
+  // Run unsupervised pattern discovery on accumulated observation data.
+  rpc DiscoverPatterns(PatternDiscoveryRequest) returns (DiscoveredPatterns);
+
+  // Validate a hypothesis against historical observation data.
+  rpc ValidateHypothesis(Hypothesis) returns (ValidationResult);
+
+  // Generate a reflex specification from a discovered pattern and context.
+  rpc GenerateReflexFromPattern(PatternAndContext) returns (ReflexSpec);
+}
+
+// ===========================================================================
+// Service 5 – AutonomyManager
+// ===========================================================================
+
+// INCREMENTS framework: trust-based autonomy level management.
+service AutonomyManager {
+  // Get current autonomy state for a subsystem.
+  rpc GetAutonomyState(SubsystemId) returns (AutonomyState);
+
+  // Set the maximum allowed autonomy level (human safety gate).
+  rpc SetMaxLevel(SetMaxLevelRequest) returns (SetResult);
+
+  // Retrieve historical trust scores for a subsystem.
+  rpc GetTrustHistory(TrustQuery) returns (TrustHistory);
+
+  // Force an override on a subsystem (human-in-the-loop).
+  rpc OverrideSubsystem(OverrideRequest) returns (OverrideResult);
+
+  // Request advancement to the next autonomy level (may be auto-denied).
+  rpc AdvanceLevel(AdvancementRequest) returns (AdvancementResult);
+}
+
+// ===========================================================================
+// Service 6 – ChatInterface
+// ===========================================================================
+
+// Human-facing chat interface. Supports streaming responses for
+// long-running inference or multi-step reasoning.
+service ChatInterface {
+  // Send a chat message and receive a streamed response.
+  rpc SendMessage(ChatMessage) returns (stream ChatResponse);
+}
+
+// ###########################################################################
+// #
+// #  M E S S A G E   D E F I N I T I O N S
+// #
+// ###########################################################################
+
+// ---------------------------------------------------------------------------
+// Shared / Utility messages
+// ---------------------------------------------------------------------------
+
+// Generic identifier for an ESP32 node.
+message NodeId {
+  string node_id = 1;  // e.g. "esp32-cam-03"
+}
+
+// Generic identifier for a reflex.
+message ReflexId {
+  string reflex_id = 1;  // e.g. "reflex-door-proximity-v2"
+}
+
+// Generic identifier for a subsystem within the INCREMENTS framework.
+message SubsystemId {
+  string subsystem_id = 1;  // e.g. "door-control", "hvac"
+}
+
+// Generic identifier for an A/B test.
+message ABTestId {
+  string test_id = 1;  // UUID
+}
+
+// Health status of a single node or subsystem.
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY     = 1;
+  HEALTH_STATUS_DEGRADED    = 2;
+  HEALTH_STATUS_UNHEALTHY   = 3;
+  HEALTH_STATUS_UNKNOWN     = 4;
+}
+
+// Operating mode of a node.
+enum NodeMode {
+  NODE_MODE_UNSPECIFIED = 0;
+  NODE_MODE_ACTIVE      = 1;
+  NODE_MODE_MAINTENANCE = 2;
+  NODE_MODE_STANDBY     = 3;
+  NODE_MODE_OFFLINE     = 4;
+}
+
+// Roles that can be assigned to an ESP32 node.
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED    = 0;
+  NODE_ROLE_SENSOR         = 1;   // Camera / environmental sensor only
+  NODE_ROLE_ACTUATOR       = 2;   // Motor, relay, solenoid control
+  NODE_ROLE_GATEWAY        = 3;   // BLE/WiFi bridge to other ESP32s
+  NODE_ROLE_EDGE_PROCESSOR = 4;   // Runs lightweight TFLite models
+  NODE_ROLE_COORDINATOR    = 5;   // Local cluster leader
+  NODE_ROLE_SAFETY_MONITOR = 6;   // Dedicated safety watchdog
+}
+
+// Status of a deployment operation.
+enum DeployStatus {
+  DEPLOY_STATUS_UNSPECIFIED = 0;
+  DEPLOY_STATUS_PENDING     = 1;
+  DEPLOY_STATUS_TRANSFERRING = 2;
+  DEPLOY_STATUS_INSTALLING  = 3;
+  DEPLOY_STATUS_ACTIVATING  = 4;
+  DEPLOY_STATUS_SUCCEEDED   = 5;
+  DEPLOY_STATUS_FAILED      = 6;
+  DEPLOY_STATUS_ROLLED_BACK = 7;
+}
+
+// Autonomy levels in the INCREMENTS framework.
+enum AutonomyLevel {
+  AUTONOMY_LEVEL_UNSPECIFIED   = 0;
+  AUTONOMY_LEVEL_0_MANUAL      = 1;  // Full human control
+  AUTONOMY_LEVEL_1_ASSISTED    = 2;  // System suggests, human decides
+  AUTONOMY_LEVEL_2_SUPERVISED  = 3;  // System acts, human can veto
+  AUTONOMY_LEVEL_3_AUTONOMOUS  = 4;  // System acts, human is notified
+  AUTONOMY_LEVEL_4_FULL        = 5;  // Fully autonomous, human only audits
+}
+
+// Severity of a safety event.
+enum SafetySeverity {
+  SAFETY_SEVERITY_UNSPECIFIED = 0;
+  SAFETY_SEVERITY_INFO        = 1;
+  SAFETY_SEVERITY_WARNING     = 2;
+  SAFETY_SEVERITY_CAUTION     = 3;
+  SAFETY_SEVERITY_CRITICAL    = 4;
+  SAFETY_SEVERITY_EMERGENCY   = 5;
+}
+
+// Outcome of a hypothesis validation.
+enum ValidationOutcome {
+  VALIDATION_OUTCOME_UNSPECIFIED = 0;
+  VALIDATION_OUTCOME_CONFIRMED   = 1;
+  VALIDATION_OUTCOME_REFUTED     = 2;
+  VALIDATION_OUTCOME_INCONCLUSIVE = 3;
+  VALIDATION_OUTCOME_PARTIAL     = 4;
+}
+
+// Status of a reflex promotion.
+enum PromotionStatus {
+  PROMOTION_STATUS_UNSPECIFIED = 0;
+  PROMOTION_STATUS_PENDING     = 1;
+  PROMOTION_STATUS_APPROVED    = 2;
+  PROMOTION_STATUS_REJECTED    = 3;
+  PROMOTION_STATUS_ROLLED_BACK = 4;
+  PROMOTION_STATUS_ACTIVE      = 5;
+}
+
+// ---------------------------------------------------------------------------
+// NodeDiscovery messages
+// ---------------------------------------------------------------------------
+
+message AnnounceRequest {
+  string node_id              = 1;
+  string hostname             = 2;
+  string ip_address           = 3;
+  uint32 grpc_port            = 4;
+  uint32 mqtt_port            = 5;
+  string hardware_model       = 6;   // e.g. "Jetson Orin Nano"
+  string serial_number        = 7;
+  map<string, string> labels  = 8;   // e.g. {"rack": "A", "floor": "2"}
+  google.protobuf.Timestamp boot_time = 9;
+  string api_version          = 10;  // Semver of the cluster API
+  repeated string capabilities = 11; // e.g. "gpu-inference", "camera-0"
+}
+
+message AnnounceResponse {
+  bool accepted               = 1;
+  string cluster_id           = 2;
+  string rejection_reason     = 3;
+  uint32 heartbeat_interval_s = 4;   // Requested heartbeat interval in seconds
+  repeated string peers       = 5;   // Node IDs of current cluster members
+  google.protobuf.Timestamp cluster_time = 6;
+}
+
+message HeartbeatRequest {
+  string node_id              = 1;
+  float cpu_usage_percent     = 2;
+  float gpu_usage_percent     = 3;
+  float ram_usage_percent     = 4;
+  float temperature_celsius   = 5;
+  uint32 active_reflex_count  = 6;
+  uint32 connected_node_count = 7;
+  map<string, float> sensor_health = 8;  // sensor_id -> health 0..1
+}
+
+message HeartbeatResponse {
+  enum PingType {
+    PING_TYPE_UNSPECIFIED = 0;
+    PING_TYPE_SYNC        = 1;  // Normal keepalive
+    PING_TYPE_CONFIG_PUSH = 2;  // Server pushing a config change
+    PING_TYPE_RECONNECT   = 3;  // Requesting client reconnect
+    PING_TYPE_EVICTION    = 4;  // Node is being evicted
+  }
+  PingType type                        = 1;
+  google.protobuf.Timestamp timestamp   = 2;
+  uint32 sequence                       = 3;
+  string message                        = 4;  // Human-readable detail
+  ClusterConfig config_delta            = 5;  // Only populated on CONFIG_PUSH
+}
+
+// A cluster-wide config that can be diffed via FieldMask.
+message ClusterConfig {
+  uint32 heartbeat_timeout_s   = 1;
+  uint32 max_cluster_size      = 2;
+  float cpu_threshold_warn     = 3;
+  float cpu_threshold_crit     = 4;
+  float gpu_threshold_warn     = 5;
+  float gpu_threshold_crit     = 6;
+  float ram_threshold_warn     = 7;
+  float ram_threshold_crit     = 8;
+  float temp_threshold_warn    = 9;
+  float temp_threshold_crit    = 10;
+  bool auto_scaling_enabled    = 11;
+  uint32 default_retention_days = 12;
+  string log_level             = 13;
+  map<string, string> env_overrides = 14;
+}
+
+message GetClusterStatusRequest {
+  bool include_node_details  = 1;
+  bool include_reflex_summary = 2;
+}
+
+message ClusterStatus {
+  string cluster_id                      = 1;
+  uint32 total_nodes                     = 2;
+  uint32 healthy_nodes                   = 3;
+  uint32 degraded_nodes                  = 4;
+  uint32 unhealthy_nodes                 = 5;
+  google.protobuf.Timestamp last_updated = 6;
+  HealthStatus overall_health            = 7;
+  float aggregate_cpu_percent            = 8;
+  float aggregate_gpu_percent            = 9;
+  float aggregate_ram_percent            = 10;
+  repeated NodeSummary nodes             = 11;
+  ClusterConfig config                   = 12;
+  repeated string pending_operations     = 13;
+  string leader_node_id                  = 14;
+  uint32 uptime_seconds                  = 15;
+}
+
+message NodeSummary {
+  string node_id           = 1;
+  string hostname          = 2;
+  HealthStatus health      = 3;
+  NodeMode mode            = 4;
+  float cpu_percent        = 5;
+  float gpu_percent        = 6;
+  float ram_percent        = 7;
+  float temperature_c      = 8;
+  uint32 reflex_count      = 9;
+  google.protobuf.Timestamp last_heartbeat = 10;
+  uint32 uptime_seconds    = 11;
+}
+
+// ---------------------------------------------------------------------------
+// NodeManager messages
+// ---------------------------------------------------------------------------
+
+message NodeList {
+  repeated NodeInfo nodes = 1;
+}
+
+message NodeInfo {
+  string node_id                      = 1;
+  string hostname                     = 2;
+  string ip_address                   = 3;
+  uint32 grpc_port                    = 4;
+  NodeRole role                       = 5;
+  NodeMode mode                       = 6;
+  HealthStatus health                 = 7;
+  string hardware_model               = 8;
+  string firmware_version             = 9;
+  string serial_number                = 10;
+  google.protobuf.Timestamp boot_time = 11;
+  uint32 uptime_seconds               = 12;
+  float cpu_percent                   = 13;
+  float gpu_percent                   = 14;
+  float ram_percent                   = 15;
+  float temperature_celsius           = 16;
+  uint32 free_storage_mb             = 17;
+  uint32 total_storage_mb            = 18;
+  repeated string connected_sensors  = 19;
+  repeated string active_reflexes    = 20;
+  map<string, string> labels         = 21;
+  google.protobuf.Timestamp last_heartbeat = 22;
+  string site_id                     = 23;
+  google.protobuf.Struct metadata    = 24;  // Extensible key-value metadata
+}
+
+message RoleAssignment {
+  string node_id         = 1;
+  NodeRole target_role   = 2;
+  string reason          = 3;
+  string requested_by    = 4;  // User or system ID
+  bool force             = 5;  // True to bypass safety checks
+  google.protobuf.Timestamp effective_at = 6;
+}
+
+message RoleResult {
+  bool success             = 1;
+  string node_id           = 2;
+  NodeRole previous_role   = 3;
+  NodeRole current_role    = 4;
+  string message           = 5;
+  google.protobuf.Timestamp applied_at = 6;
+}
+
+message ReflexDeployment {
+  string node_id                   = 1;
+  string reflex_id                 = 2;
+  uint32 version                   = 3;
+  bytes binary_blob                = 4;   // gzip-compressed reflex binary
+  string checksum_sha256           = 5;
+  repeated string required_sensors = 6;   // Sensors this reflex needs
+  uint32 priority                  = 7;   // Execution priority (lower = higher)
+  google.protobuf.Duration timeout = 8;   // Max execution time per cycle
+  map<string, string> env_vars     = 9;   // Environment variables for the reflex
+  bool activate_immediately        = 10;
+  string rollback_version          = 11;  // Version to fall back to on failure
+  uint32 max_retries               = 12;
+  google.protobuf.Duration cooldown = 13; // Cooldown between retry attempts
+}
+
+message DeployResult {
+  bool success                  = 1;
+  string node_id                = 2;
+  string reflex_id              = 3;
+  uint32 version                = 4;
+  DeployStatus status           = 5;
+  string message                = 6;
+  uint32 bytes_transferred      = 7;
+  google.protobuf.Duration transfer_time = 8;
+  google.protobuf.Duration install_time  = 9;
+  repeated string warnings      = 10;
+}
+
+message ObsControl {
+  string node_id                   = 1;
+  repeated string sensor_ids       = 2;
+  google.protobuf.Duration duration = 3;  // How long to observe (0 = indefinite)
+  uint32 sample_rate_hz            = 4;
+  string format                    = 5;  // "raw", "jpeg", "h264"
+  uint32 quality                   = 6;  // Compression quality (1-100)
+  repeated string metadata_tags    = 7;
+  bool store_locally               = 8;
+  bool stream_to_cluster           = 9;
+  uint32 buffer_size_mb            = 10;
+  string session_id                = 11;  // Client-provided session ID
+}
+
+message ObsResult {
+  bool success             = 1;
+  string session_id        = 2;
+  string message           = 3;
+  google.protobuf.Duration estimated_duration = 4;
+  uint32 estimated_size_mb = 5;
+  repeated string active_sensor_ids = 6;
+}
+
+message ObsDumpRequest {
+  string node_id             = 1;
+  string session_id          = 2;
+  google.protobuf.Timestamp start_time = 3;
+  google.protobuf.Timestamp end_time   = 4;
+  repeated string sensor_ids  = 5;
+  string format               = 6;  // "proto", "json", "raw"
+  uint32 chunk_size_kb        = 7;
+  bool include_metadata       = 8;
+}
+
+message ObsDumpChunk {
+  uint32 sequence             = 1;
+  bytes payload               = 2;
+  string sensor_id            = 3;
+  google.protobuf.Timestamp capture_time = 4;
+  bool is_last                = 5;
+  uint32 total_chunks         = 6;
+  string checksum             = 7;  // CRC32 of this chunk
+  string session_id           = 8;
+  map<string, string> metadata = 9;
+}
+
+message SelftestResult {
+  string node_id                       = 1;
+  bool passed                          = 2;
+  google.protobuf.Timestamp started_at  = 3;
+  google.protobuf.Duration duration     = 4;
+  repeated TestStep steps              = 5;
+  string summary                       = 6;
+}
+
+message TestStep {
+  string name                          = 1;
+  bool passed                          = 2;
+  float duration_ms                    = 3;
+  string message                       = 4;
+  string error_detail                  = 5;
+  map<string, float> measurements      = 6;  // step-specific readings
+}
+
+// ---------------------------------------------------------------------------
+// ReflexOrchestrator messages
+// ---------------------------------------------------------------------------
+
+message ReflexList {
+  string node_id                  = 1;
+  repeated ReflexSummary reflexes = 2;
+}
+
+message ReflexSummary {
+  string reflex_id                        = 1;
+  uint32 version                          = 2;
+  ReflexSpec spec                         = 3;
+  bool is_active                          = 4;
+  bool is_production                      = 5;
+  uint32 execution_count                  = 6;
+  uint32 error_count                      = 7;
+  google.protobuf.Duration avg_exec_time  = 8;
+  google.protobuf.Timestamp deployed_at   = 9;
+  google.protobuf.Timestamp last_executed = 10;
+  string deployed_by                      = 11;
+  uint32 priority                         = 12;
+}
+
+message ReflexSpec {
+  string reflex_id                        = 1;
+  uint32 version                          = 2;
+  string name                             = 3;
+  string description                      = 4;
+  string author                           = 5;
+  repeated string trigger_conditions      = 6;   // Condition expressions
+  repeated string actions                 = 7;   // Action expressions
+  repeated string required_sensors        = 8;
+  repeated string required_actuators      = 9;
+  map<string, string> parameters          = 10;  // Tunable parameters
+  google.protobuf.Duration max_exec_time  = 11;
+  uint32 priority                         = 12;
+  repeated string tags                    = 13;
+  bool safety_critical                    = 14;
+  string failure_mode                     = 15;  // "safe-stop", "continue", "retry"
+  google.protobuf.Struct config_schema    = 16;  // JSON Schema for config
+  map<string, float> resource_limits      = 17;  // "cpu_percent": 10.0, etc.
+  string parent_pattern_id                = 18;  // If generated from a pattern
+  uint32 max_retries                      = 19;
+  google.protobuf.Duration retry_cooldown = 20;
+}
+
+message ReflexVersion {
+  string reflex_id       = 1;
+  uint32 version         = 2;
+  string node_id         = 3;
+  string checksum_sha256 = 4;
+  google.protobuf.Timestamp created_at = 5;
+  string created_by      = 6;
+  string changelog       = 7;
+}
+
+message ValidationResult {
+  bool valid               = 1;
+  repeated string errors   = 2;
+  repeated string warnings = 3;
+  repeated string suggestions = 4;
+  map<string, float> resource_estimate = 5;
+  float compatibility_score = 6;  // 0.0 – 1.0 against target node
+}
+
+message ABTestConfig {
+  string test_id             = 1;
+  string reflex_id           = 2;
+  uint32 version_a           = 3;   // Control version
+  uint32 version_b           = 4;   // Treatment version
+  string target_node_id      = 5;
+  google.protobuf.Duration duration = 6;
+  uint32 min_sample_size     = 7;
+  float confidence_threshold = 8;   // e.g. 0.95
+  repeated string metrics    = 9;   // "latency_ms", "accuracy", "energy_mJ"
+  map<string, string> traffic_split = 10;  // node_id -> "A" or "B"
+  string hypothesis          = 11;  // Human-readable test hypothesis
+  bool auto_promote          = 12;  // Auto-promote winner on completion
+}
+
+message ABTestResult {
+  string test_id                         = 1;
+  string reflex_id                       = 2;
+  enum TestStatus {
+    TEST_STATUS_UNSPECIFIED = 0;
+    TEST_STATUS_RUNNING     = 1;
+    TEST_STATUS_COMPLETED   = 2;
+    TEST_STATUS_INCONCLUSIVE = 3;
+    TEST_STATUS_CANCELLED   = 4;
+    TEST_STATUS_ERROR       = 5;
+  }
+  TestStatus status                      = 3;
+  uint32 total_samples_a                 = 4;
+  uint32 total_samples_b                 = 5;
+  map<string, MetricComparison> metrics  = 6;
+  string winner                          = 7;  // "A", "B", or "none"
+  float confidence                       = 8;
+  google.protobuf.Timestamp started_at   = 9;
+  google.protobuf.Timestamp completed_at = 10;
+  string summary                         = 11;
+  repeated string anomalies              = 12;
+}
+
+message MetricComparison {
+  double mean_a         = 1;
+  double mean_b         = 2;
+  double std_dev_a      = 3;
+  double std_dev_b      = 4;
+  double delta          = 5;  // mean_b - mean_a
+  double p_value        = 6;
+  double confidence     = 7;
+  bool statistically_significant = 8;
+  string interpretation = 9;
+}
+
+message PromoteResult {
+  bool success                 = 1;
+  string reflex_id             = 2;
+  uint32 promoted_version      = 3;
+  uint32 previous_version      = 4;
+  PromotionStatus status       = 5;
+  string message               = 6;
+  google.protobuf.Timestamp promoted_at = 7;
+  string promoted_by           = 8;
+  repeated string affected_nodes = 9;
+}
+
+message RollbackResult {
+  bool success                  = 1;
+  string reflex_id              = 2;
+  uint32 rolled_back_from       = 3;
+  uint32 rolled_back_to         = 4;
+  string reason                 = 5;
+  google.protobuf.Timestamp rolled_back_at = 6;
+  repeated string affected_nodes = 7;
+  string message                = 8;
+}
+
+// ---------------------------------------------------------------------------
+// LearningPipeline messages
+// ---------------------------------------------------------------------------
+
+message Narration {
+  string narration_id               = 1;
+  string text                       = 2;  // Raw narration text
+  string source_node_id             = 3;
+  string session_id                 = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  string language                   = 6;
+  map<string, string> context       = 7;  // e.g. "location": "hallway-B"
+  repeated string attached_tags     = 8;
+  google.protobuf.Timestamp observation_start = 9;
+  google.protobuf.Timestamp observation_end   = 10;
+  string speaker                    = 11;  // User or system ID
+  float confidence                  = 12; // Narration transcription confidence
+}
+
+message ExtractedRule {
+  string rule_id                    = 1;
+  string narration_id               = 2;
+  string condition                  = 3;  // Formal condition expression
+  string action                     = 4;  // Formal action expression
+  float confidence                  = 5;  // 0.0 – 1.0
+  repeated string supporting_quotes = 6;  // Excerpts from narration
+  repeated string conflicting_quotes = 7;
+  map<string, float> evidence_scores = 8;
+  string suggested_reflex_name      = 9;
+  bool requires_validation          = 10;
+  string extracted_by               = 11;  // Model or pipeline ID
+}
+
+message PatternDiscoveryRequest {
+  string node_id                            = 1;
+  google.protobuf.Timestamp start_time      = 2;
+  google.protobuf.Timestamp end_time        = 3;
+  repeated string sensor_ids                = 4;
+  repeated string focus_areas               = 5;  // e.g. "traffic-flow", "occupancy"
+  uint32 max_patterns                       = 6;
+  float min_confidence                      = 7;
+  uint32 max_complexity                     = 8;  // Max rule complexity level
+  repeated string exclude_patterns          = 9;  // Pattern IDs to exclude
+  bool include_temporal_patterns            = 10;
+  bool include_spatial_patterns             = 11;
+  google.protobuf.Duration time_budget      = 12;
+}
+
+message DiscoveredPatterns {
+  repeated DiscoveredPattern patterns       = 1;
+  uint32 total_analyzed                     = 2;
+  google.protobuf.Duration discovery_time    = 3;
+  uint32 observations_processed             = 4;
+  string analysis_version                   = 5;
+}
+
+message DiscoveredPattern {
+  string pattern_id                         = 1;
+  string name                               = 2;
+  string description                        = 3;
+  float confidence                          = 4;
+  float frequency                           = 5;  // Occurrences per hour
+  repeated string conditions                = 6;
+  repeated string outcomes                  = 7;
+  map<string, float> feature_importance     = 8;
+  repeated string related_pattern_ids       = 9;
+  google.protobuf.Timestamp first_seen      = 10;
+  google.protobuf.Timestamp last_seen       = 11;
+  uint32 occurrence_count                   = 12;
+  float temporal_consistency                = 13;  // 0.0 – 1.0
+  string category                           = 14;  // "temporal", "spatial", "correlation"
+  google.protobuf.Struct details            = 15;  // Extensible pattern-specific data
+}
+
+message Hypothesis {
+  string hypothesis_id          = 1;
+  string description            = 2;
+  string condition              = 3;
+  string expected_outcome       = 4;
+  google.protobuf.Timestamp start_time = 5;
+  google.protobuf.Timestamp end_time   = 6;
+  repeated string node_ids      = 7;
+  repeated string sensor_ids    = 8;
+  float min_confidence          = 9;
+  uint32 min_samples            = 10;
+  map<string, string> params    = 11;
+  string proposed_by            = 12;
+}
+
+message PatternAndContext {
+  string pattern_id                       = 1;
+  string node_id                          = 2;
+  map<string, string> context             = 3;
+  repeated string target_sensors          = 4;
+  repeated string target_actuators        = 5;
+  string desired_behavior                 = 6;
+  map<string, string> constraints         = 7;
+  bool safety_critical                    = 8;
+  string reflex_name                      = 9;
+  repeated string additional_rules        = 10;
+}
+
+// ---------------------------------------------------------------------------
+// AutonomyManager messages
+// ---------------------------------------------------------------------------
+
+message AutonomyState {
+  string subsystem_id                       = 1;
+  AutonomyLevel current_level               = 2;
+  AutonomyLevel max_allowed_level           = 3;
+  AutonomyLevel target_level                = 4;
+  float trust_score                         = 5;   // 0.0 – 1.0
+  uint32 successful_actions                 = 6;
+  uint32 failed_actions                     = 7;
+  uint32 human_overrides                    = 8;
+  google.protobuf.Timestamp last_action     = 9;
+  google.protobuf.Timestamp last_override   = 10;
+  google.protobuf.Timestamp level_changed_at = 11;
+  string active_policy_id                   = 12;
+  bool is_locked                            = 13;  // Locked by human override
+  string lock_reason                        = 14;
+  google.protobuf.Timestamp lock_expires    = 15;
+  repeated string active_reflexes           = 16;
+  map<string, float> sub_trust_scores       = 17; // per-reflex trust
+}
+
+message SetMaxLevelRequest {
+  string subsystem_id         = 1;
+  AutonomyLevel max_level     = 2;
+  string reason               = 3;
+  string set_by               = 4;
+  bool apply_to_cluster       = 5;  // Apply to all nodes
+}
+
+message SetResult {
+  bool success                      = 1;
+  string subsystem_id               = 2;
+  AutonomyLevel previous_max        = 3;
+  AutonomyLevel new_max             = 4;
+  string message                    = 5;
+  google.protobuf.Timestamp applied_at = 6;
+}
+
+message TrustQuery {
+  string subsystem_id                       = 1;
+  google.protobuf.Timestamp start_time      = 2;
+  google.protobuf.Timestamp end_time        = 3;
+  uint32 resolution_points                  = 4;  // Max data points to return
+  repeated string metric_ids                = 5;  // Which trust metrics to include
+}
+
+message TrustHistory {
+  string subsystem_id                     = 1;
+  repeated TrustDataPoint data_points     = 2;
+  uint32 total_points                     = 3;
+  float current_trust                     = 4;
+  float average_trust                     = 5;
+  float min_trust                         = 6;
+  float max_trust                         = 7;
+  google.protobuf.Timestamp window_start  = 8;
+  google.protobuf.Timestamp window_end    = 9;
+}
+
+message TrustDataPoint {
+  google.protobuf.Timestamp timestamp   = 1;
+  float overall_trust                   = 2;
+  float confidence_score                = 3;
+  float safety_score                    = 4;
+  float reliability_score               = 5;
+  map<string, float> dimension_scores   = 6;
+  uint32 actions_since_last             = 7;
+  uint32 errors_since_last              = 8;
+}
+
+message OverrideRequest {
+  string subsystem_id             = 1;
+  string action                   = 2;  // "pause", "resume", "lock", "unlock", "force-action"
+  string reason                   = 3;
+  string requested_by             = 4;
+  google.protobuf.Duration duration = 5;  // 0 = indefinite
+  string target_state             = 6;  // JSON-encoded target state for force-action
+  bool require_confirmation       = 7;
+}
+
+message OverrideResult {
+  bool success                      = 1;
+  string subsystem_id               = 2;
+  string action_taken               = 3;
+  AutonomyLevel previous_level      = 4;
+  AutonomyLevel current_level       = 5;
+  bool is_locked                    = 6;
+  string message                    = 7;
+  google.protobuf.Timestamp applied_at = 8;
+  google.protobuf.Timestamp expires_at = 9;
+}
+
+message AdvancementRequest {
+  string subsystem_id          = 1;
+  AutonomyLevel target_level   = 2;
+  string reason                = 3;
+  string requested_by          = 4;
+  bool force                   = 5;  // Skip automatic trust check
+  map<string, string> evidence = 6;  // Supporting evidence for advancement
+}
+
+message AdvancementResult {
+  bool approved                            = 1;
+  string subsystem_id                      = 2;
+  AutonomyLevel previous_level             = 3;
+  AutonomyLevel new_level                  = 4;
+  float trust_at_decision                  = 5;
+  float trust_threshold                    = 6;
+  string message                           = 7;
+  repeated string conditions_met           = 8;
+  repeated string conditions_unmet         = 9;
+  google.protobuf.Timestamp effective_at   = 10;
+  string next_steps                        = 11;
+}
+
+// ---------------------------------------------------------------------------
+// ChatInterface messages
+// ---------------------------------------------------------------------------
+
+message ChatMessage {
+  string message_id                = 1;
+  string text                      = 2;
+  string session_id                = 3;
+  string user_id                   = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  string language                  = 6;
+  ChatContext context              = 7;
+  repeated Attachment attachments  = 8;
+  string model_preference          = 9;   // e.g. "fast", "accurate"
+}
+
+message ChatContext {
+  string subsystem_id          = 1;
+  string node_id               = 2;
+  string reflex_id             = 3;
+  AutonomyLevel autonomy_level = 4;
+  map<string, string> metadata = 5;
+  repeated string active_sessions = 6;
+  string focus_area            = 7;
+}
+
+message Attachment {
+  string content_type    = 1;  // MIME type
+  bytes data            = 2;
+  string filename        = 3;
+  uint32 size_bytes      = 4;
+  string description     = 5;
+}
+
+message ChatResponse {
+  string message_id                 = 1;
+  string session_id                 = 2;
+  string text                       = 3;
+  bool is_complete                  = 4;
+  bool is_error                     = 5;
+  string error_code                 = 6;
+  string error_message              = 7;
+  repeated SuggestedAction actions  = 8;
+  google.protobuf.Timestamp timestamp = 9;
+  string model_used                 = 10;
+  float confidence                  = 11;
+  repeated string citations         = 12;
+  map<string, string> metadata      = 13;
+}
+
+message SuggestedAction {
+  string label                      = 1;
+  string description                = 2;
+  string action_type                = 3;  // "rpc", "mqtt-publish", "url"
+  string target                     = 4;  // RPC method, MQTT topic, or URL
+  map<string, string> params       = 5;
+  bool requires_confirmation        = 6;
+  string risk_level                 = 7;  // "low", "medium", "high"
+}

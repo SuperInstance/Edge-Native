@@ -1,0 +1,1920 @@
+================================================================================
+    VESSEL ROBOTICS PLATFORM — NETWORK AND PHYSICAL ARCHITECTURE
+    Technical Brief No. 12  |  Revision 1.0
+    Commercial Fishing Vessel Integration
+================================================================================
+
+    Author:    Agent C — Network and Physical Architecture Expert
+    Date:      2025
+    Scope:     Physical wiring, networking, communication backbone, power
+               distribution, enclosure design, EMC, and connector standards
+               for a multi-Jetson / multi-ESP32 robotics platform aboard a
+               commercial fishing vessel.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. Executive Summary
+  2. Vessel Network Backbone — Three-Tier Architecture
+     2.1 Tier 1: Jetson Cluster LAN (Gigabit Ethernet)
+     2.2 Tier 2: ESP32 Node Bus (RS-422 Serial)
+     2.3 Tier 3: NMEA 0183 Instrument Bus
+     2.4 Why NOT CAN Bus for ESP32-to-Jetson Communication
+     2.5 Why NOT WiFi as Primary Control Path
+     2.6 WiFi as Backup and Monitoring Only
+  3. ESP32-to-Jetson Physical Wiring
+     3.1 RS-422 Differential Serial — Primary Link
+     3.2 Daisy-Chain Topology with Store-and-Forward
+     3.3 Star Topology from Central RS-422 Hub
+     3.4 USB-RS422 Adapter Selection (FTDI FT4232H)
+     3.5 Connector Standardization: M12 and DE-9 Marine-Rated
+     3.6 Galvanic Isolation: ADuM1201 Optoisolators
+  4. NMEA 0183 Bus Design
+     4.1 Listener Topology: Talkers → Listener Tees → Listeners
+     4.2 Talker Devices and Baud Rates
+     4.3 Autopilot ESP32 NMEA Integration
+     4.4 NMEA Multiplexer Daemon on Jetson-Alpha
+  5. Power Distribution Architecture
+     5.1 Central 12V DC Bus
+     5.2 ESP32 Node Power Conditioning
+     5.3 Jetson Orin Nano Power Requirements
+     5.4 UPS / Battery Backup: LiFePO4 12V 20Ah
+     5.5 Kill Switch Hierarchy
+  6. Physical Placement and Enclosures
+     6.1 Jetson-Alpha — Navigation Station
+     6.2 Jetson-Bravo — Wheelhouse / Back Deck
+     6.3 Jetson-Charlie — Engine Room / Electronics Bay
+     6.4 ESP32 Node Boxes — Standardized IP67 Enclosures
+     6.5 Waterproof Spare Parts Kit
+  7. Cable Routing and Electromagnetic Compatibility (EMC)
+     7.1 Power-Signal Separation
+     7.2 RS-422 Cable Specifications
+     7.3 NMEA Cable Routing
+     7.4 Ferrite Chokes and Cable Glands
+     7.5 Cable Labeling Standards
+  8. Connector Standardization — Universal Pinout
+  9. Network Topology ASCII Diagrams
+  10. Bill of Materials — Network and Wiring Summary
+  11. Testing and Commissioning Procedures
+  12. Risk Assessment and Mitigation
+  13. Conclusion
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+This technical brief defines the complete physical networking, wiring, power
+distribution, and enclosure architecture for a commercial fishing vessel's
+robotics platform. The platform consists of three NVIDIA Jetson Orin Nano
+Super compute nodes and eight or more ESP32 microcontroller nodes, all
+connected through a rigorously designed three-tier network backbone.
+
+The architecture prioritizes reliability, simplicity, and serviceability in
+a harsh marine environment. Every design decision is driven by the constraints
+of a saltwater, high-vibration, high-EMI, wet environment where a failure
+can mean the loss of the vessel or crew safety hazard.
+
+Key design principles:
+
+  - WIRED PRIMARY, WIRELESS SECONDARY: All control and telemetry paths use
+    physically wired connections. WiFi exists only for monitoring tablets.
+  - SIMPLE PROTOCOLS: RS-422 serial with JSON payloads, not CAN bus, not
+    custom protocols. Any technician can debug with a terminal program.
+  - STANDARDIZED CONNECTORS: Every ESP32 node box uses the same M12 8-pin
+    connector with the same pinout. Any node can plug into any location.
+  - MARINE-GRADE EVERYTHING: IP67 enclosures, galvanic isolation, ferrite
+    chokes, UV-rated cable, heat-shrink labels, drain wires.
+  - FAIL-SAFE POWER: LiFePO4 battery backup with diode-OR switchover means
+    the robotics system survives engine/alternator failure for 30+ minutes.
+
+
+================================================================================
+2. VESSEL NETWORK BACKBONE — THREE-TIER ARCHITECTURE
+================================================================================
+
+The vessel's robotics network is organized into three distinct tiers, each
+optimized for its specific role in the system. This separation of concerns
+ensures that a failure in one tier does not cascade into others.
+
+------------------------------------------------------------------------------
+2.1 TIER 1: JETSON CLUSTER LAN — GIGABIT ETHERNET (10.0.0.0/24)
+------------------------------------------------------------------------------
+
+Tier 1 is the high-speed backbone connecting the three Jetson Orin Nano Super
+compute nodes. This is a standard Gigabit Ethernet LAN with the following
+characteristics:
+
+  Network:     10.0.0.0/24 (255.255.255.0)
+  Speed:       1000 Mbps (Gigabit Ethernet, IEEE 802.3ab)
+  Medium:      Cat6 UTP or STP (shielded twisted pair preferred for marine)
+  Topology:    Star — 5-port or 8-port unmanaged Gigabit Ethernet switch
+  Cabling:     Marine-grade Cat6, UV-resistant jacket, shielded
+
+  IP Assignment (static):
+    10.0.0.1   Jetson-Alpha  (primary, nav station)
+    10.0.0.2   Jetson-Bravo  (secondary, wheelhouse)
+    10.0.0.3   Jetson-Charlie (tertiary, engine room)
+    10.0.0.10  Ethernet switch (management, if managed)
+    10.0.0.100 NMEA multiplexer daemon virtual interface (on Alpha)
+    10.0.0.200 Wi-Fi access point (if used for monitoring)
+
+  Protocols on Tier 1:
+    - ROS 2 DDS (Data Distribution Service) over UDP multicast
+    - NMEA multiplexer data sharing (TCP/UDP)
+    - SSH for remote administration
+    - VNC for display mirroring to helm monitors
+    - MQTT bridge (from Tier 3 WiFi tablets, relayed by Jetson-Alpha)
+
+  Why Gigabit Ethernet:
+    The Jetson Orin Nano Super generates significant data volumes:
+    - 3 camera streams (compressed H.264/HEVC, ~15 Mbps each = 45 Mbps total)
+    - ROS 2 topic traffic (point clouds, object detections, ~20 Mbps)
+    - Inter-Jetson coordination messages (~1 Mbps)
+    Total steady-state: ~70 Mbps, well within Gigabit capacity.
+    The 10x headroom ensures no packet loss during peak loads (e.g., all
+    cameras streaming at full resolution simultaneously).
+
+  Physical Switch:
+    - Model: Industrial DIN-rail Gigabit switch (e.g., Moxa EDS-205A or
+      equivalent unmanaged 5-port switch)
+    - Mounting: DIN rail in navigation station, inside IP54 enclosure
+    - Power: 12V DC from vessel bus (via local fuse)
+    - Features: Full-duplex, auto-MDI/MDI-X, no fan (silent operation)
+
+------------------------------------------------------------------------------
+2.2 TIER 2: ESP32 NODE BUS — RS-422 SERIAL (115200 BAUD)
+------------------------------------------------------------------------------
+
+Tier 2 connects the ESP32 microcontroller nodes to their assigned Jetson
+compute nodes. This tier carries all sensor data, actuator commands, and
+node heartbeat messages between the ESP32s and the Jetsons.
+
+  Protocol:    RS-422 differential serial (EIA-422)
+  Baud Rate:   115200 bps (configurable per port)
+  Frame:       8N1 (8 data bits, no parity, 1 stop bit)
+  Payload:     JSON text frames, newline-delimited
+  Max Cable:   1200 meters (EIA-422 spec, at 115200 baud practical limit
+               is ~300m — more than enough for any vessel)
+  Topology:    Star (preferred) or daisy-chain (alternative)
+
+  Message Format (JSON over RS-422):
+    {"node":"pump_control","msg_type":"status","ts":1700000000,
+     "data":{"pressure_psi":45.2,"flow_gpm":12.1,"pump_on":true}}
+    {"node":"winch_monitor","msg_type":"telemetry","ts":1700000001,
+     "data":{"line_tension_lb":2200,"speed_rpm":45,"temp_c":38.5}}
+    {"node":"deck_camera_ptz","msg_type":"command","ts":1700000002,
+     "data":{"pan":45.0,"tilt":-10.0,"zoom":2.0}}
+
+  RS-422 Port Assignment per Jetson:
+    Each Jetson has 4 to 8 RS-422 ports via USB adapters:
+      Jetson-Alpha ports: Autopilot ESP32, GPS mux, Compass ESP32,
+                          System monitor ESP32, Spare x2
+      Jetson-Bravo ports: Winch ESP32, Camera PTZ ESP32, Deck sensor ESP32,
+                          Spare x2
+      Jetson-Charlie ports: Pump ESP32, Engine monitor ESP32, Tank level
+                            ESP32, Spare x2
+
+  Bandwidth Analysis:
+    - Each ESP32 transmits ~10-50 JSON messages per second
+    - Average message size: ~150 bytes (JSON with sensor data)
+    - Per-node throughput: 150 bytes × 40 msgs/sec × 10 bits = 48,000 bps
+    - 8 nodes on one Jetson: 384,000 bps = 37.5 KB/s
+    - RS-422 at 115200 bps provides 11,520 bytes/sec = 93 KB/s effective
+    - Headroom: ~2.5x — comfortable margin for burst traffic
+
+------------------------------------------------------------------------------
+2.3 TIER 3: NMEA 0183 INSTRUMENT BUS (4800 BAUD)
+------------------------------------------------------------------------------
+
+Tier 3 is the standard marine instrument bus following NMEA 0183 protocol.
+This bus connects existing vessel navigation instruments (GPS, compass,
+depth sounder, wind sensor, AIS receiver) to the robotics platform.
+
+  Protocol:    NMEA 0183 (EIA-422 single-talker, multi-listener)
+  Baud Rate:   4800 baud (standard), 38400 baud (AIS high-speed)
+  Topology:    Single talker per bus segment, multiple listeners via tees
+  Wiring:      EIA-422 differential (TX+ / TX- to RX+ / RX-)
+
+  Connected Instruments:
+    - GPS receiver:        4800 baud, GGA/GSA/GSV/RMC sentences
+    - Magnetic compass:    4800 baud, HDG/HDM sentences
+    - Depth sounder:       4800 baud, DBT/DBK sentences
+    - Wind sensor:         4800 baud, MWV/MWD sentences
+    - AIS receiver:        38400 baud, VDM/VDO sentences (separate bus)
+    - Chart plotter input: (receives autopilot sentences from ESP32)
+
+  The robotics platform connects to this bus as a LISTENER ONLY. The
+  autopilot ESP32 has a dedicated talker port that outputs $HDM and $RSA
+  sentences on a SEPARATE bus segment to the chart plotter. It never
+  transmits on the main instrument bus.
+
+
+------------------------------------------------------------------------------
+2.4 WHY NOT CAN BUS FOR ESP32-TO-JETSON COMMUNICATION
+------------------------------------------------------------------------------
+
+CAN bus (Controller Area Network) is the standard for automotive and
+industrial control, and a natural question is: why not use it here?
+
+  1. RS-422 IS SIMPLER TO IMPLEMENT ON JETSON:
+     The Jetson Orin Nano has no native CAN controller. Adding CAN requires
+     either a USB-to-CAN adapter (SocketCAN, peak-linux-driver) or an SPI
+     CAN transceiver (MCP2515) on a custom HAT. RS-422 requires only a
+     USB-RS422 adapter with a standard Linux serial driver — zero custom
+     kernel modules, zero GPIO pin conflicts.
+
+  2. RS-422 SUPPORTS LONGER CABLE RUNS:
+     CAN bus is limited to ~40 meters at 1 Mbps, or ~500 meters at 50 kbps.
+     RS-422 at 115200 baud supports 1200 meters (spec) with ~300 meters
+     practical. On a 25-meter fishing vessel, this is not a limiting factor,
+     but RS-422 has more headroom for routing around obstacles.
+
+  3. BANDWIDTH IS SUFFICIENT:
+     Our ESP32 nodes transmit at most 50 JSON messages per second, totaling
+     <40 Kbps per Jetson. RS-422 at 115200 provides 93 KB/s effective.
+     CAN at 1 Mbps would be massively over-provisioned, and CAN at 125 kbps
+     would be tighter than RS-422 at 115200.
+
+  4. RS-422 IS FULL-DUPLEX:
+     CAN is half-duplex with CSMA/CD arbitration. RS-422 provides separate
+     TX and RX pairs, eliminating collision risk entirely. The master (Jetson)
+     can send commands to the ESP32 at any time without waiting for bus
+     arbitration.
+
+  5. DEBUGGABILITY:
+     Any USB serial terminal (minicom, screen, picocom) can monitor RS-422
+     traffic. JSON payloads are human-readable. CAN requires specialized
+     tools (candump, cansniffer) and binary message parsing.
+
+  6. POINT-TO-POINT SIMPLICITY:
+     CAN requires careful bus termination (120-ohm resistors at each end)
+     and a single continuous backbone. RS-422 star topology is trivially
+     wired with no termination concerns per segment.
+
+  Conclusion: CAN bus is the right choice for in-vehicle networks with many
+  nodes sharing a single bus at high speed (e.g., 50+ ECUs in a car). For
+  our use case — 8-12 ESP32 nodes connected to 3 Jetsons via short serial
+  links — RS-422 is simpler, more debuggable, fully sufficient, and requires
+  zero custom hardware on the Jetson side.
+
+
+------------------------------------------------------------------------------
+2.5 WHY NOT WIFI AS PRIMARY CONTROL PATH
+------------------------------------------------------------------------------
+
+WiFi is attractive for its wireless convenience, but it is fundamentally
+unsuitable as the primary control path on a commercial fishing vessel:
+
+  1. MARINE ENVIRONMENT INTERFERENCE:
+     - The vessel's VHF radio (156 MHz), AIS transponder (162 MHz), radar
+       (X-band 9.4 GHz, S-band 3 GHz), and L-band satellite comms all
+       generate broadband RF noise. WiFi (2.4 GHz / 5 GHz) operates in
+       frequency ranges susceptible to interference from these systems and
+       from other nearby vessels' WiFi, cellular repeaters, and marine
+       navigation equipment.
+     - Saltwater is a severe RF attenuator. A wet deck, spray, or rain
+       significantly reduces WiFi range and increases packet loss.
+
+  2. UNRELIABILITY:
+     - WiFi latency varies from 1 ms to 100+ ms depending on conditions.
+     - Packet loss rates of 5-20% are common in marine environments.
+     - For autopilot control and winch operation, a single dropped packet
+       can be catastrophic. RS-422 has effectively 0% packet loss.
+
+  3. LATENCY:
+     - Autopilot corrections require <50 ms round-trip latency.
+     - WiFi with CSMA/CA contention, retransmissions, and interference
+       cannot guarantee this. Wired RS-422 at 115200 baud delivers
+       sub-millisecond serial latency plus a few ms for JSON parsing.
+
+  4. SECURITY:
+     - Wireless control of vessel systems is a safety hazard. Any device
+       within range could potentially interfere with WiFi signals.
+     - Wired connections require physical access, providing inherent
+       security through physical isolation.
+
+  5. DETERMINISM:
+     - Wired serial is deterministic: bytes arrive in order, at a known
+       rate, with no contention. WiFi is fundamentally non-deterministic
+       due to CSMA/CA, hidden node problems, and environmental variability.
+
+  Conclusion: WiFi is explicitly NOT used for any safety-critical control
+  path. It serves only as a monitoring convenience for tablet devices at
+  the helm.
+
+
+------------------------------------------------------------------------------
+2.6 WIFI AS BACKUP AND MONITORING ONLY
+------------------------------------------------------------------------------
+
+A WiFi access point is provided on the vessel network for monitoring purposes
+only. It operates in a strictly limited capacity:
+
+  Access Point:     Connected to Jetson-Alpha via Ethernet (10.0.0.200)
+  SSID:             VESSEL_ROBOTICS_MONITOR (WPA3-Enterprise if possible)
+  Frequency:        5 GHz preferred (less interference from marine VHF/RF)
+  Channel:          Fixed channel, not auto-select (avoid channel hopping)
+  Protocol:         MQTT only (pub/sub telemetry to tablets)
+
+  What WiFi carries:
+    - MQTT telemetry: JSON sensor readings, system status, GPS position,
+      autopilot mode, alarm notifications
+    - Dashboard web UI: Read-only status page served by Jetson-Alpha
+    - Video stream: Low-resolution camera preview (optional, H.264, ~2 Mbps)
+
+  What WiFi does NOT carry:
+    - Autopilot commands (these go Jetson-Alpha → RS-422 → Autopilot ESP32)
+    - Winch control commands
+    - Pump control commands
+    - Any actuator commands whatsoever
+
+  Tablet Interface:
+    - Crew tablets connect to WiFi, run an MQTT dashboard app
+    - Dashboard shows: GPS position, heading, speed, depth, wind,
+      autopilot status, winch tension, pump pressure, system health
+    - Dashboard is READ-ONLY — no control inputs via WiFi
+    - If WiFi fails, zero impact on vessel operations (all control is wired)
+
+
+================================================================================
+3. ESP32-TO-JETSON PHYSICAL WIRING
+================================================================================
+
+------------------------------------------------------------------------------
+3.1 RS-422 DIFFERENTIAL SERIAL — PRIMARY LINK
+------------------------------------------------------------------------------
+
+RS-422 (EIA-422) is the physical layer for all ESP32-to-Jetson communication.
+It uses differential voltage signaling on twisted-pair conductors, providing:
+
+  Electrical Characteristics:
+    - Differential voltage: ±2V to ±6V on TX pair
+    - Receiver threshold: ±200mV (high noise immunity)
+    - Common-mode rejection: 60 dB typical
+    - Max data rate: 10 Mbps (we use 115.2 kbps — enormous headroom)
+    - Max cable length: 1200m at low speed, ~300m at 115200 baud
+    - Max receivers per driver: 10 (star topology), 32 (low-speed)
+
+  Our Configuration:
+    - Baud rate: 115200 bps (8N1)
+    - Cable: 22 AWG or 24 AWG twisted pair, individually shielded
+    - Connectors: M12 8-pin (marine-rated, IP67 when mated)
+    - Termination: 120-ohm resistor at each end of daisy-chain (if used)
+
+  Why 115200 baud, not higher:
+    - ESP32 UART hardware supports 115200 reliably without overclocking
+    - USB-RS422 adapters (FTDI) support 115200 natively
+    - Bandwidth analysis (Section 2.2) shows 115200 is more than sufficient
+    - Higher baud rates reduce noise margin on long cable runs
+    - 115200 is the "sweet spot" of reliability vs. throughput
+
+
+------------------------------------------------------------------------------
+3.2 DAISY-CHAIN TOPOLOGY WITH STORE-AND-FORWARD
+------------------------------------------------------------------------------
+
+In the daisy-chain configuration, ESP32 nodes are connected in series along
+a single RS-422 bus segment. Each node has two RS-422 ports (IN and OUT):
+
+  Wiring:
+    Jetson TX+ → [ESP32-1 IN+] → [ESP32-1 OUT+] → [ESP32-2 IN+] → ...
+    Jetson TX- → [ESP32-1 IN-] → [ESP32-1 OUT-] → [ESP32-2 IN-] → ...
+
+  Each ESP32 contains:
+    - RS-422 receiver on IN port (listens for commands from upstream)
+    - RS-422 driver on OUT port (forwards to downstream nodes)
+    - RS-422 driver on IN port (sends responses back upstream)
+    - Store-and-forward buffer for messages addressed to downstream nodes
+
+  Store-and-Forward Protocol:
+    When Jetson sends {"target":"winch_monitor","cmd":"start"}, the first
+    ESP32 in the chain (e.g., "pump_control") receives the message, checks
+    the "target" field, sees it is NOT addressed to itself, and forwards
+    the complete JSON frame out its OUT port to the next node. This continues
+    until the message reaches "winch_monitor", which processes it and sends
+    a response back upstream through the chain.
+
+  Pros:
+    - Fewer cables: one continuous cable run instead of individual home-runs
+    - Fewer ports: only 1 RS-422 port on Jetson for the entire chain
+    - Easy to extend: add a node by breaking the chain and inserting
+
+  Cons:
+    - Single point of failure: if any node loses power, the chain breaks
+      and all downstream nodes are unreachable
+    - Latency accumulates: each hop adds ~1 ms (serial latency + processing)
+    - More complex firmware: each node must implement the relay logic
+    - Harder to debug: must check each link in the chain
+
+  When to use:
+    Daisy-chain is best for linear runs where nodes are physically in a line
+    (e.g., along the gunwale, down the mast, or along a keel). For most
+    vessel installations, star topology is preferred.
+
+
+------------------------------------------------------------------------------
+3.3 STAR TOPOLOGY FROM CENTRAL RS-422 HUB
+------------------------------------------------------------------------------
+
+The PREFERRED topology. Each ESP32 has a dedicated RS-422 home-run cable
+to a hub connected to the Jetson via USB.
+
+  Wiring:
+    Jetson → USB → [RS-422 Hub] → Port 1 → ESP32-1 (pump_control)
+                               → Port 2 → ESP32-2 (winch_monitor)
+                               → Port 3 → ESP32-3 (deck_camera_ptz)
+                               → Port 4 → ESP32-4 (tank_level)
+                               ...
+
+  Hub Hardware:
+    Each Jetson uses a 4-port or 8-port RS-422-to-USB hub:
+    - Option A: Multiple single-port USB-RS422 adapters (FTDI-based)
+    - Option B: Multi-port RS-422 hub (e.g., SeaLevel Systems 4-port RS-422)
+    - Option C: Custom DIN-rail mounted RS-422 breakout board
+
+  Pros:
+    - No single point of failure (each node is independent)
+    - Full bandwidth per node (no sharing)
+    - Simple firmware (no relay logic needed)
+    - Easy debugging (disconnect one node, others unaffected)
+    - Simple wiring (each cable goes A-to-B)
+
+  Cons:
+    - More cables: N nodes = N home-run cables
+    - Hub requires multiple USB ports or USB hub on Jetson
+    - More physical cable to route through the vessel
+
+  This is the recommended topology for all installations unless cable routing
+  constraints make daisy-chain necessary.
+
+
+------------------------------------------------------------------------------
+3.4 USB-RS422 ADAPTER SELECTION (FTDI FT4232H)
+------------------------------------------------------------------------------
+
+The USB-RS422 adapter is a critical component. We specify FTDI FT4232H-based
+adapters for the following reasons:
+
+  FT4232H Specifications:
+    - 4 UART channels per chip (quad-port)
+    - USB 2.0 Hi-Speed (480 Mbps)
+    - Per-channel baud rate: up to 12 Mbps
+    - 3.3V I/O (compatible with RS-422 transceivers)
+    - Industrial temperature range: -40°C to +85°C
+    - Linux driver: ftdi_sio (built into kernel, no installation needed)
+
+  Recommended Adapter Boards:
+    - FTDI US232R-4 (4-port RS-232/422/485 switchable)
+    - Custom board using FT4232H + SN75176 RS-422 transceivers
+    - Moxa Uport 1150 (industrial, DIN-rail mount, RS-422/485)
+
+  Driver Setup on Jetson (Ubuntu):
+    # Adapter appears as /dev/ttyUSB0 through /dev/ttyUSB3
+    # No driver installation needed — ftdi_sio is in the mainline kernel
+    # Set udev rules for persistent naming:
+    # /etc/udev/rules.d/99-serial.rules:
+    #   SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011",
+    #     SYMLINK+="rs422_port_%n"
+    # Result: /dev/rs422_port_0, /dev/rs422_port_1, etc.
+
+  Per-Jetson Adapter Count:
+    - Jetson-Alpha: 2 × FT4232H adapters = 8 RS-422 ports
+    - Jetson-Bravo: 1 × FT4232H adapter = 4 RS-422 ports
+    - Jetson-Charlie: 1 × FT4232H adapter = 4 RS-422 ports
+    Total: 16 RS-422 ports (8 used, 8 spare)
+
+
+------------------------------------------------------------------------------
+3.5 CONNECTOR STANDARDIZATION: M12 AND DE-9 MARINE-RATED
+------------------------------------------------------------------------------
+
+All ESP32 node boxes use M12 8-pin connectors as the primary connector type.
+M12 connectors are the marine and industrial standard for harsh environments.
+
+  M12 8-Pin Connector Specification:
+    - Code: M12 A-coded (sensor/DC) per IEC 61076-2-101
+    - Rating: IP67 when mated (dust-tight, temporary immersion to 1m)
+    - Current: 4A per pin
+    - Voltage: 60V DC
+    - Temperature: -40°C to +85°C
+    - Vibration: 10-2000 Hz (marine-grade vibration tested)
+    - Material: Stainless steel (316L) or nickel-plated brass
+    - Keying: A-coded (prevents incorrect mating)
+    - Cable entry: Straight or 90-degree, panel-mount or cable-mount
+
+  Alternative: DE-9 (DB9) Connector:
+    - Used where M12 is not available or cost is a concern
+    - IP67-rated DE-9 connectors exist (e.g., Amphenol industrial series)
+    - Must be marine-grade (gold-plated pins, stainless shell)
+    - Larger physical size than M12
+    - Same pinout assignment (see Section 8)
+
+  Every connector on every node box, cable, and Jetson adapter is either
+  M12 8-pin or DE-9. No bare wires, no screw terminals, no RJ45 for
+  serial connections. This ensures consistent, reliable, serviceable
+  connections throughout the vessel.
+
+
+------------------------------------------------------------------------------
+3.6 GALVANIC ISOLATION: ADuM1201 OPTOISOLATORS
+------------------------------------------------------------------------------
+
+Galvanic isolation is REQUIRED on every ESP32 serial input to prevent ground
+loops, which are a major reliability hazard in marine environments.
+
+  The Problem:
+    In a vessel, different pieces of equipment may have slightly different
+    ground potentials due to the resistance of the hull, wiring runs, and
+    saltwater corrosion. Without isolation, these ground potential differences
+    cause current to flow through serial data lines, corrupting data and
+    potentially damaging electronics. This is exacerbated by:
+    - The vessel's steel or aluminum hull acting as a ground reference
+    - Batteries and alternators creating transient ground shifts
+    - Saltwater corrosion increasing contact resistance over time
+
+  The Solution: ADuM1201 Digital Isolator
+    - Manufacturer: Analog Devices
+    - Channels: 2-channel (1 TX direction + 1 RX direction)
+    - Isolation voltage: 3 kV (rms)
+    - Data rate: up to 25 Mbps (far exceeds our 115200 bps)
+    - Supply current: 2.3 mA per side (negligible for ESP32)
+    - Package: SOIC-8 (small footprint, easy PCB layout)
+    - Temperature: -40°C to +125°C
+
+  Implementation:
+    Every ESP32 node board includes an ADuM1201 on its RS-422 receiver input.
+    The isolation barrier separates the ESP32's 3.3V domain from the RS-422
+    transceiver's 5V domain. Power for the RS-422 side is derived from the
+    incoming cable's +12V via an isolated DC-DC converter (e.g., B0505S-1WR3).
+
+    Schematic concept:
+      Cable → [RS-422 Transceiver] → [ADuM1201 Ch.A] → [ESP32 UART RX]
+      Cable ← [RS-422 Transceiver] ← [ADuM1201 Ch.B] ← [ESP32 UART TX]
+                                                    ↑
+                                              Isolated 3.3V
+                                              (from isolated DC-DC)
+
+  On the Jetson side, the USB-RS422 adapters are inherently isolated by the
+  USB bus isolation. However, for maximum robustness, industrial adapters
+  (Moxa, SeaLevel) include additional optoisolation on the RS-422 side.
+
+  Total isolation budget:
+    - ESP32 input: 3 kV galvanic isolation (ADuM1201)
+    - USB-RS422 adapter: 500V-2.5 kV isolation (depending on model)
+    - Combined: sufficient for any conceivable ground potential difference
+      on a 12V vessel electrical system
+
+
+================================================================================
+4. NMEA 0183 BUS DESIGN
+================================================================================
+
+------------------------------------------------------------------------------
+4.1 LISTENER TOPOLOGY: TALKERS → LISTENER TEES → LISTENERS
+------------------------------------------------------------------------------
+
+NMEA 0183 uses a single-talker, multi-listener topology. Each bus segment has
+exactly one talker (transmitter) and multiple listeners (receivers) connected
+in parallel via listener tee connectors.
+
+  Topology Diagram:
+
+      +---------+        +----------+        +----------+
+      | GPS     |  TX+---+----------+---+----+----------+---+
+      | Talker  |        |  NMEA    |   |    |  NMEA    |   |
+      | 4800bd  |  TX----+  Tee     |---+----+  Tee     |   |
+      +---------+        +----------+   |    +----------+   |
+                                      |    |              |
+                                      |    |              |
+                                 +---------+  +---------+ +---------+
+                                 | Compass |  | Depth   | | Wind    |
+                                 | Listener |  | Listener| | Listener|
+                                 +---------+  +---------+ +---------+
+                                    (chart plotter, AIS, etc. also tee in)
+
+  NMEA 0183 Electrical Specification:
+    - EIA-422 (differential, same as RS-422)
+    - TX pair: Talker drives TX+ and TX-
+    - RX pair: Each listener has RX+ and RX- connected to the bus
+    - All RX+ tied together, all RX- tied together
+    - Termination: 120-ohm resistor at each end of bus segment
+    - Max cable length: depends on baud rate (typically <100m at 4800)
+
+  Listener Tee:
+    - Standard NMEA 0183 tee connector (2-in, 1-out or 1-in, 2-out)
+    - Provides parallel connection of multiple listeners
+    - No active electronics (passive connection)
+    - Available from marine electronics suppliers (Garmin, Actisense, etc.)
+
+  IMPORTANT RULE: Only one talker per bus segment. If multiple devices need
+  to transmit, each requires its own separate bus segment, and a multiplexer
+  combines them.
+
+
+------------------------------------------------------------------------------
+4.2 TALKER DEVICES AND BAUD RATES
+------------------------------------------------------------------------------
+
+  Bus Segment 1 — Standard NMEA (4800 baud):
+    Talker: GPS Receiver
+    Listeners: Compass, Chart Plotter, Autopilot ESP32 (via mux),
+              Jetson-Alpha (via USB GPS adapter)
+    Sentences: GGA, GSA, GSV, GLL, RMC, VTG, ZDA
+
+  Bus Segment 2 — Compass (4800 baud):
+    Talker: Magnetic Compass (NMEA output)
+    Listeners: Chart Plotter, Autopilot ESP32, Jetson-Alpha
+    Sentences: HDG, HDM, HDT, VHW
+
+  Bus Segment 3 — Depth Sounder (4800 baud):
+    Talker: Depth Sounder
+    Listeners: Chart Plotter, Jetson-Alpha
+    Sentences: DBT, DBK, DBS
+
+  Bus Segment 4 — Wind Sensor (4800 baud):
+    Talker: Wind Sensor (masthead)
+    Listeners: Chart Plotter, Jetson-Alpha
+    Sentences: MWV, MWD
+
+  Bus Segment 5 — AIS Receiver (38400 baud):
+    Talker: AIS Receiver
+    Listeners: Chart Plotter, Jetson-Alpha
+    Sentences: VDM, VDO
+    NOTE: AIS uses 38400 baud on a SEPARATE bus segment. Do not mix
+    38400 baud devices with 4800 baud devices on the same bus.
+
+  Bus Segment 6 — Autopilot Output (4800 baud):
+    Talker: Autopilot ESP32 (dedicated talker port)
+    Listeners: Chart Plotter ONLY
+    Sentences: $APHDM (heading magnetic), $APRSA (rudder angle)
+    NOTE: This is a separate bus. The autopilot ESP32 NEVER talks on
+    any of the instrument bus segments (1-5).
+
+
+------------------------------------------------------------------------------
+4.3 AUTOPILOT ESP32 NMEA INTEGRATION
+------------------------------------------------------------------------------
+
+The autopilot ESP32 is a critical node that interfaces with the NMEA 0183
+bus in two directions:
+
+  INBOUND (Listening):
+    - The autopilot ESP32 listens to Bus Segments 1 and 2 (GPS and Compass)
+    - It extracts $GPRMC (position/speed) and $HCHDM (heading) for
+      autopilot calculations
+    - It is a PASSIVE listener — it never transmits on these bus segments
+    - If the ESP32 malfunctions, it cannot corrupt the instrument bus
+
+  OUTBOUND (Talking):
+    - The autopilot ESP32 has a DEDICATED RS-422 talker port
+    - This port connects to the chart plotter on Bus Segment 6
+    - It outputs:
+      - $APHDM: Autopilot-computed heading magnetic (for chart plotter display)
+      - $APRSA: Rudder sensor angle (for chart plotter rudder indicator)
+      - $APAPB: Autopilot status (B=bearing, X=cross-track error, A=arrival)
+    - The talker uses the talker ID "AP" (AutoPilot)
+
+  Physical Connection:
+    The autopilot ESP32 has TWO RS-422 ports:
+      Port 1 (RS-422 RX only): Connected to NMEA listener tee (GPS + Compass)
+      Port 2 (RS-422 TX only): Connected to chart plotter input (dedicated)
+
+    This dual-port design physically prevents the ESP32 from transmitting
+    on the instrument bus. Port 1 is wired as receive-only (no driver chip
+    on that pair), and Port 2 is wired as transmit-only (no receiver on
+    that pair).
+
+
+------------------------------------------------------------------------------
+4.4 NMEA MULTIPLEXER DAEMON ON JETSON-ALPHA
+------------------------------------------------------------------------------
+
+Jetson-Alpha runs an NMEA multiplexer daemon that aggregates all NMEA data
+sources and distributes them to consumers:
+
+  Software: kplex (open-source NMEA multiplexer) or custom Python daemon
+
+  Architecture:
+    +------------------+
+    | USB GPS Adapter  |--------+
+    +------------------+        |
+    +------------------+        |     +---------------------------+
+    | USB Compass      |--------+---->| NMEA Mux Daemon (kplex)   |
+    +------------------+        |     | on Jetson-Alpha           |
+    +------------------+        |     |                           |
+    | USB AIS Receiver |--------+     | Input:  5 serial ports    |
+    +------------------+              | Output: TCP/UDP server,    |
+    +------------------+              |         serial ports,      |
+    | USB Depth Sounder|--------+     |         file logging       |
+    +------------------+        |     +---------------------------+
+                                |        |           |
+                                |        v           v
+    +------------------+   +---------+  +-----------+
+    | OpenCPN          |   | ESP32   |  | MQTT      |
+    | (Chart Plotter)  |   | Autopilot| | Bridge    |
+    +------------------+   +---------+  +-----------+
+
+  Configuration (kplex.conf):
+    # Input sources (USB serial ports)
+    [serial]
+    device=/dev/ttyUSB0     # GPS
+    speed=4800
+    direction=in
+
+    [serial]
+    device=/dev/ttyUSB1     # Compass
+    speed=4800
+    direction=in
+
+    [serial]
+    device=/dev/ttyUSB2     # AIS
+    speed=38400
+    direction=in
+
+    [serial]
+    device=/dev/ttyUSB3     # Depth
+    speed=4800
+    direction=in
+
+    # Output: TCP server for OpenCPN
+    [tcp]
+    port=10110
+    direction=out
+
+    # Output: UDP for ESP32 autopilot
+    [udp]
+    address=10.0.0.1
+    port=10111
+    direction=out
+
+    # Output: Log file
+    [file]
+    file=/var/log/nmea/nmea_%Y%m%d.log
+    direction=out
+    mode=append
+    timestamp=true
+
+  Benefits:
+    - Single point of NMEA data aggregation
+    - OpenCPN can connect to one TCP port for all NMEA data
+    - ESP32 autopilot receives GPS + compass + wind data via one UDP stream
+    - All NMEA data is logged for post-voyage analysis and debugging
+    - Adding a new NMEA source requires only adding one serial input to kplex
+
+
+================================================================================
+5. POWER DISTRIBUTION ARCHITECTURE
+================================================================================
+
+------------------------------------------------------------------------------
+5.1 CENTRAL 12V DC BUS
+------------------------------------------------------------------------------
+
+All robotics equipment is powered from the vessel's 12V DC electrical system,
+which is typically a lead-acid or LiFePO4 house battery bank charged by the
+engine alternator(s).
+
+  Power Source:
+    - Vessel house battery bank: 12V nominal (11.5V-14.4V operating range)
+    - Charging: Engine alternator(s) with standard marine voltage regulator
+    - Capacity: Typically 200-400 Ah (vessel's existing bank)
+
+  Main Distribution:
+    Battery Bank (+) → [Main Battery Switch] → [50A DC Breaker] →
+        [Robotics Distribution Block] → individual fuses per device
+
+    Battery Bank (-) → [Main Battery Switch] → [Robotics Ground Bus] →
+        bonded to vessel ground bus
+
+  Distribution Block:
+    - Blue Sea Systems ST Blade fuse block or equivalent marine-grade block
+    - 12 positions, each with individual ATC/ATO fuse holder
+    - LED fuse blown indicator (optional but recommended)
+    - Mounted in IP54+ enclosure at navigation station
+    - Tin-plated copper bus (corrosion resistant)
+
+  Wire Gauges:
+    - Main feed (battery to distribution): 8 AWG (40A capacity)
+    - Jetson feeds (15-25W each): 16 AWG
+    - ESP32 feeds (5W max each): 20 AWG minimum, 18 AWG recommended
+    - RS-422 cable power conductors (see Section 8): 20 AWG
+
+
+------------------------------------------------------------------------------
+5.2 ESP32 NODE POWER CONDITIONING
+------------------------------------------------------------------------------
+
+Each ESP32 node receives +12V from the distribution block and conditions it
+locally through a three-stage protection and regulation circuit:
+
+  Stage 1 — Overcurrent Protection:
+    Device: 5A automotive blade fuse (ATO/ATC)
+    Purpose: Protects wiring and upstream distribution block from short circuit
+    Location: At the distribution block (before the cable to the node)
+
+  Stage 2 — Transient Voltage Suppression:
+    Device: bidirectional TVS diode (e.g., SMBJ33A, 33V clamp, 600W peak)
+    Purpose: Absorbs voltage spikes from alternator load dumps, solenoid
+             flyback, starter motor transients, and lightning-induced surges
+    Location: On the ESP32 node PCB, at the power input connector
+
+  Stage 3 — DC-DC Regulation (12V → 5V → 3.3V):
+    Stage 3a: LM2596 (or equivalent) switching buck converter
+      - Input: 12V (11.5V-14.4V)
+      - Output: 5V, up to 3A
+      - Efficiency: ~80%
+      - Purpose: Powers RS-422 transceivers (5V), relay drivers, sensors
+      - Protection: Current limit, thermal shutdown, short-circuit protection
+
+    Stage 3b: LM1117-3.3 (or AMS1117-3.3) linear LDO regulator
+      - Input: 5V (from LM2596 output)
+      - Output: 3.3V, up to 800mA
+      - Purpose: Powers ESP32 module, ADuM1201 isolator (ESP32 side)
+      - Decoupling: 10µF tantalum + 100nF ceramic at input and output
+
+  Power Budget per ESP32 Node:
+    ESP32-S3 (active, WiFi off):   ~240 mA × 3.3V = 0.8W
+    RS-422 transceiver (2x):       ~40 mA × 5V = 0.2W
+    ADuM1201 isolator:             ~5 mA × 3.3V = 0.02W
+    Sensors (varies):              ~50 mA × 5V = 0.25W
+    Relays (when energized):       ~100 mA × 5V = 0.5W per relay
+    LEDs, misc:                    ~20 mA × 5V = 0.1W
+    ─────────────────────────────────────────
+    Total typical:                 ~2W
+    Total worst case (3 relays):   ~3.5W
+    Margin (5A fuse at 12V = 60W): 17x — extremely conservative
+
+  The 5A fuse is deliberately oversized relative to the ESP32's actual draw
+  to prevent nuisance blowing from inrush currents and to allow for future
+  expansion (additional sensors, relays, etc.).
+
+
+------------------------------------------------------------------------------
+5.3 JETSON ORIN NANO POWER REQUIREMENTS
+------------------------------------------------------------------------------
+
+  NVIDIA Jetson Orin Nano Super Specifications:
+    - Input voltage: 19V DC (via barrel jack or carrier board DC input)
+    - Power consumption: 15W typical, 25W max (with full GPU load)
+    - Current at 19V: ~0.8A typical, ~1.3A max
+
+  Power Supply:
+    Each Jetson requires a dedicated 12V → 19V DC-DC step-up converter.
+
+    Recommended: Traco Power TBL 50-2419WI or equivalent
+    - Input: 9-18V DC (wide input range for battery voltage variations)
+    - Output: 19V DC, 2.63A (50W), adjustable
+    - Efficiency: ~90%
+    - Protection: Short circuit, overcurrent, overtemperature
+    - Isolation: 1500V galvanic isolation
+    - Mounting: PCB mount or DIN-rail (industrial version)
+    - MTBF: >500,000 hours
+
+  Wiring per Jetson:
+    Battery (+) → 5A fuse → 16 AWG wire → [19V DC-DC converter] →
+        16 AWG wire → Jetson 19V input
+
+  Power Budget per Jetson:
+    Jetson Orin Nano (full load):   25W
+    USB-RS422 adapters (2 × 0.5W):  1W
+    Ethernet switch port:            0.5W
+    ─────────────────────────────────
+    Total:                           ~27W at 19V = ~1.4A at 19V
+    From 12V bus: ~33W (accounting for DC-DC efficiency)
+    From 12V bus: ~2.75A at 12V
+
+
+------------------------------------------------------------------------------
+5.4 UPS / BATTERY BACKUP: LiFePO4 12V 20Ah
+------------------------------------------------------------------------------
+
+A dedicated LiFePO4 (Lithium Iron Phosphate) battery provides backup power
+for the entire robotics system in case of engine/alternator failure.
+
+  Battery Specification:
+    Chemistry:    LiFePO4 (Lithium Iron Phosphate)
+    Nominal:      12V, 20Ah
+    Voltage range: 10V-14.6V
+    Cycle life:   3000+ cycles at 80% DOD
+    Weight:       ~6 kg (13 lbs)
+    Form factor:  Compact box, IP65 rated (or mounted inside IP54 enclosure)
+    BMS:          Built-in battery management system (overcharge, overdischarge,
+                  overcurrent, thermal protection)
+    Self-discharge: <3% per month
+
+  Runtime Calculation:
+    Total robotics power draw:
+      3 × Jetson Orin Nano:     3 × 27W = 81W
+      8 × ESP32 nodes:          8 × 3.5W = 28W
+      Ethernet switch:           5W
+      Misc (indicators, etc.):   5W
+      ─────────────────────────────────
+      Total:                    ~119W (worst case, all systems active)
+
+    Battery capacity (usable): 20Ah × 12V × 0.80 DOD = 192 Wh
+
+    Runtime (worst case): 192 Wh / 119W = 1.6 hours = 97 minutes
+
+    Runtime (typical, partial load): 192 Wh / 80W = 2.4 hours = 144 minutes
+
+    Runtime (minimal, autopilot only): 192 Wh / 30W = 6.4 hours
+
+  Switchover Circuit — Diode OR (Zero-Delay):
+    The switchover from vessel power to battery backup uses a diode OR circuit,
+    which provides INSTANT switchover with zero delay (unlike a relay-based
+    transfer switch which has a 5-50 ms interruption).
+
+    Schematic:
+      Vessel 12V (+) ──→ [Schottky Diode D1] ──→┐
+                                                  ├──→ [Robotics Load]
+      LiFePO4 12V (+) ──→ [Schottky Diode D2] ──→┘
+
+    Diode Selection: STPS30L60CT or equivalent
+    - Type: Schottky barrier (low forward voltage drop)
+    - Current: 30A per diode (paralleled pair for 60A total)
+    - Vf: 0.55V typical (low power loss)
+    - Reverse voltage: 60V (surge protection)
+    - Heat dissipation: 30A × 0.55V = 16.5W (heatsinked)
+
+    Normal Operation:
+      Vessel voltage (14.4V charging) > LiFePO4 voltage (13.8V charged)
+      D1 is forward biased, D2 is reverse biased
+      Load draws from vessel power
+
+    Engine Failure:
+      Vessel voltage drops (12.6V → 11V → 10V as battery discharges)
+      When vessel voltage drops below LiFePO4 voltage (~13.2V)
+      D1 becomes reverse biased, D2 becomes forward biased
+      Load seamlessly draws from LiFePO4 battery
+      Switchover time: ZERO (diode transition is continuous, not discrete)
+
+    Charging:
+      LiFePO4 charges from vessel power through D1 (when vessel voltage
+      exceeds LiFePO4 voltage). The built-in BMS manages charge current
+      and voltage limits. No separate charger needed for backup top-up.
+
+  Battery Installation:
+    - Mounted in navigation station, adjacent to Jetson-Alpha
+    - Inside ventilated IP54 enclosure (LiFePO4 does not offgas like
+      lead-acid, but ventilation is still good practice)
+    - Connected via 8 AWG wires with marine-grade crimp terminals
+    - Fused: 50A ANL fuse at battery positive terminal
+
+
+------------------------------------------------------------------------------
+5.5 KILL SWITCH HIERARCHY
+------------------------------------------------------------------------------
+
+The kill switch system provides a means to immediately disable the autopilot
+and other actuation systems without cutting power to the electronics.
+
+  Level 1 — Physical Kill Switch (Red Mushroom Head):
+    Location: Helm station, within arm's reach of the helmsman
+    Type: Latching mushroom-head push button, IP67 rated
+    Action: Opens the solenoid power circuit
+    Result:
+      - Autopilot solenoid de-energizes → hydraulic steering disengages
+        → vessel returns to manual steering (helm has full control)
+      - Winch motor contactors de-energize → winches stop
+      - Pump motor contactors de-energize → pumps stop
+    DOES NOT:
+      - Cut power to Jetsons (they continue running)
+      - Cut power to ESP32s (they continue monitoring)
+      - Cut NMEA bus (navigation instruments continue working)
+      - Cut GPS/compass/depth (navigation data continues flowing)
+
+  Level 2 — Software Emergency Stop:
+    Triggered by: Touchscreen button on helm monitor, or voice command
+    Action: Jetson-Alpha sends emergency stop command via RS-422 to all
+            ESP32 nodes
+    Result: All ESP32s enter safe state (de-energize relays, stop actuators)
+    Advantage: Graceful shutdown (logs event, sounds alarm, displays message)
+    Disadvantage: Depends on Jetson and RS-422 being operational
+
+  Level 3 — Watchdog Timer:
+    If Jetson-Alpha stops sending heartbeat messages for 5 seconds,
+    all ESP32 nodes autonomously de-energize their actuators.
+    This provides a fail-safe even if both the physical kill switch and
+    the software E-stop fail.
+
+  Kill Switch Wiring:
+
+    Battery (+) → [Main Breaker] → [Kill Switch] → [Solenoid Bus (+)]
+                                                → [Autopilot Solenoid]
+                                                → [Winch Contactor]
+                                                → [Pump Contactor]
+
+    [Solenoid Bus (-)] → Ground
+
+  The kill switch is in SERIES with the solenoid power bus. Opening the
+  switch immediately removes power from ALL solenoids and motor contactors,
+  stopping all autonomous actuation. The electronics (Jetsons, ESP32s,
+  navigation instruments) are wired BEFORE the kill switch and are
+  unaffected by it.
+
+
+================================================================================
+6. PHYSICAL PLACEMENT AND ENCLOSURES
+================================================================================
+
+------------------------------------------------------------------------------
+6.1 JETSON-ALPHA — NAVIGATION STATION (IP54 MINIMUM)
+------------------------------------------------------------------------------
+
+  Location: Navigation station at helm, dry area, protected from direct
+            weather exposure and spray
+  Enclosure: IP54 minimum (dust-protected, splash-proof)
+    - Rugged plastic or aluminum enclosure with hinged lid
+    - DIN rail mounted inside for switch and DC-DC converters
+    - Cable entries from bottom (gravity prevents water ingress)
+    - Ventilation: Passive (no fans — IP54 means no forced air needed)
+  Contents:
+    - Jetson Orin Nano Super on carrier board
+    - Gigabit Ethernet switch (DIN rail)
+    - 2 × FT4232H USB-RS422 adapters (4-port each)
+    - 12V → 19V DC-DC converter for Jetson
+    - LiFePO4 battery (12V, 20Ah) in ventilated compartment
+    - Diode OR switchover circuit
+    - 5-port USB hub (for RS-422 adapters and GPS)
+    - Raspberry Pi USB GPS receiver (if no existing GPS NMEA output)
+    - Distribution fuse block
+  Access: Hinged lid with captive screws (tool access in <30 seconds)
+  Labeling: "JETSON-ALPHA — PRIMARY COMPUTE NODE" engraved plate on lid
+
+
+------------------------------------------------------------------------------
+6.2 JETSON-BRAVO — WHEELHOUSE / BACK DECK (IP65 WITH HEATER)
+------------------------------------------------------------------------------
+
+  Location: Wheelhouse or back deck area, near camera mounting points
+  Enclosure: IP65 (dust-tight, water jet protected) + internal heater
+    - Polycarbonate or fiberglass enclosure
+    - Internal thermostatic heater (maintains >5°C inside in winter)
+    - Heater: 10W PTC self-regulating heater element
+    - Power: From robotics 12V bus (fused separately)
+    - Cable glands: IP65 rated, on bottom of enclosure
+  Contents:
+    - Jetson Orin Nano Super on carrier board
+    - 1 × FT4232H USB-RS422 adapter (4-port)
+    - 12V → 19V DC-DC converter for Jetson
+    - Camera interface cables (to deck cameras)
+  Why heater: Wheelhouse and back deck areas can reach -10°C or lower in
+    winter fishing conditions. The Jetson Orin Nano is rated to 0°C minimum
+    operating temperature. The internal heater prevents condensation and
+    keeps the electronics above their minimum temperature rating.
+
+
+------------------------------------------------------------------------------
+6.3 JETSON-CHARLIE — ENGINE ROOM / ELECTRONICS BAY (IP67)
+------------------------------------------------------------------------------
+
+  Location: Engine room or dedicated electronics bay
+  Enclosure: IP67 (dust-tight, immersion-proof to 1m)
+    - Stainless steel (316L) or marine-grade aluminum enclosure
+    - All cable entries via IP67 cable glands (from bottom)
+    - No ventilation openings (fully sealed)
+    - Heat dissipation: Enclosure acts as heatsink; internal temperature
+      monitored by ESP32 node; alarm if >60°C
+  Contents:
+    - Jetson Orin Nano Super on carrier board (thermal pad to enclosure)
+    - 1 × FT4232H USB-RS422 adapter (4-port)
+    - 12V → 19V DC-DC converter for Jetson
+    - Engine sensor interface cables
+    - Pump control cables
+  Environmental Concerns: Engine rooms reach 50°C+ ambient, with high
+    humidity, vibration, and oil mist. The IP67 enclosure protects against
+    all of these. The Jetson's 25W heat output must be managed through
+    thermal conduction to the enclosure body. Thermal paste and a heatsink
+    plate on the carrier board are mandatory.
+
+
+------------------------------------------------------------------------------
+6.4 ESP32 NODE BOXES — STANDARDIZED IP67 ENCLOSURES
+------------------------------------------------------------------------------
+
+Every ESP32 node uses an identical physical enclosure, regardless of its
+functional role. This standardization enables:
+
+  - Any spare ESP32 can replace any failed node
+  - Only the internal wiring (sensor connections, relay outputs) differs
+  - The Jetson identifies each node by its software-reported role, not by
+    physical location or hardware configuration
+  - Inventory is simplified: one enclosure type, one PCB type, one spare kit
+
+  Enclosure Specification:
+    Material:     ABS plastic or polycarbonate (UV-stabilized, marine-grade)
+    Rating:       IP67 (immersion-proof to 1m for 30 minutes)
+    Size:         120mm × 80mm × 50mm (approximate, fits standard DIN rail)
+    Mounting:     DIN rail clips or M4 bolt holes (4 corners)
+    Connectors:   1 × M12 8-pin (power + RS-422 + NMEA — see Section 8)
+                  Optional: 2 × M12 4-pin (sensor inputs/relay outputs)
+    Cable glands: 2-4 × IP67 cable glands (for sensor/actuator wires)
+    LED window:   Polycarbonate window (8mm × 40mm) for status LEDs
+    Label slot:   Engraved label holder on front face (slide-in label)
+
+  Standard Node Box Contents:
+    - ESP32-S3 module on custom PCB
+    - RS-422 transceiver (SN75176 or MAX488)
+    - ADuM1201 galvanic isolator
+    - LM2596 5V switching regulator
+    - LM1117-3.3V LDO regulator
+    - TVS diode (SMBJ33A) on power input
+    - Status LEDs (power, RS-422 activity, fault)
+    - Optional: relay board (for pump/winch control nodes)
+    - Optional: sensor interface circuitry (for specific roles)
+
+  Node Box Roles (same enclosure, different internal wiring and firmware):
+    1. autopilot_ctrl   — Autopilot control (NMEA listener, rudder output)
+    2. winch_monitor    — Winch tension/temperature monitoring
+    3. winch_ctrl       — Winch motor control (relays)
+    4. pump_ctrl        — Pump motor control (relays)
+    5. tank_level       — Tank level sensor reading (ultrasonic)
+    6. deck_camera_ptz  — Camera pan/tilt/zoom control
+    7. engine_monitor   — Engine RPM, temp, oil pressure
+    8. system_monitor   — System health, temperatures, voltages
+
+
+------------------------------------------------------------------------------
+6.5 WATERPROOF SPARE PARTS KIT
+------------------------------------------------------------------------------
+
+A waterproof spare parts kit is maintained on board at all times:
+
+  Container: Pelican case or equivalent (IP67), clearly labeled
+  Location:  Navigation station, accessible within 60 seconds
+
+  Contents:
+    - 3 × Pre-programmed ESP32 node boxes (firmware flashed, labeled by role):
+        • Spare A: "AUTOPILOT_CTRL" — ready to replace autopilot ESP32
+        • Spare B: "PUMP_CTRL" — ready to replace pump control ESP32
+        • Spare C: "GENERIC" — universal spare (Jetson assigns role via RS-422)
+    - 3 × M12 8-pin cable assemblies (2m, 5m, 10m lengths)
+    - 3 × M12 8-pin straight connectors (for field repair)
+    - 2 × FT4232H USB-RS422 adapters (pre-tested)
+    - 5 × Assorted automotive fuses (5A, 10A, 15A, 20A, 30A)
+    - 1 × Spare LiFePO4 battery (12V, 20Ah) — sealed in vacuum bag
+    - 1 × Spare 12V → 19V DC-DC converter
+    - 1 × Multimeter (Fluke or equivalent, marine-rated)
+    - 1 × RS-422 loopback plug (M12 connector with TX+ → RX+, TX- → RX-)
+    - 1 × USB serial debug cable (USB to RS-422 with terminal block ends)
+
+  The "GENERIC" spare ESP32 is the key innovation: it contains a universal
+  firmware that, when connected to any Jetson RS-422 port, receives a
+  "role assignment" command from the Jetson. The Jetson tells it what role
+  to assume, and the ESP32 loads the appropriate configuration. This means
+  ONE spare ESP32 can replace ANY failed node — the system is self-healing
+  from a hardware perspective.
+
+  Vacuum-sealed bags:
+    All spare electronics are in vacuum-sealed bags with silica gel packets.
+    This prevents corrosion during long-term storage in the marine environment.
+    Each bag is labeled with the contents, firmware version, and date packed.
+
+
+================================================================================
+7. CABLE ROUTING AND ELECTROMAGNETIC COMPATIBILITY (EMC)
+================================================================================
+
+------------------------------------------------------------------------------
+7.1 POWER-SIGNAL SEPARATION
+------------------------------------------------------------------------------
+
+The single most important cable routing rule on a vessel:
+
+  MINIMUM SEPARATION: 150mm (6 inches) between power cables and signal cables
+
+  Routing Rules:
+    1. Power cables (12V DC, motor cables, solenoid cables) run in one
+       cable tray or conduit.
+    2. Signal cables (RS-422, NMEA, Ethernet) run in a SEPARATE cable tray
+       or conduit.
+    3. Where power and signal cables must cross (inevitable on a vessel),
+       they cross at 90° (perpendicular). Never run them parallel for more
+       than 300mm.
+    4. RS-422 and NMEA cables should be separated from each other by at
+       least 50mm to prevent crosstalk between serial links.
+    5. Ethernet (Cat6) should be in its own conduit or tray.
+
+  Why 150mm:
+    At 150mm separation, the magnetic field coupling from a 10A power cable
+    into an adjacent signal cable is below the RS-422 common-mode rejection
+    threshold. This has been empirically validated in marine EMC testing
+    (IEC 60945 — maritime navigation and radio communication equipment).
+
+  Cable Tray Specification:
+    - Material: Stainless steel (316L) or UV-stabilized PVC
+    - Size: 50mm × 50mm minimum (for cable fill ratio <40%)
+    - Mounting: Stainless steel clips or cable ties to bulkheads
+    - Labeling: Cable tray labeled at each end (e.g., "POWER TRAY — NAV STATION")
+    - Cable ties: UV-resistant nylon cable ties (Panduit or equivalent)
+    - NO ZIP TIES: Cable ties only. Zip ties degrade in UV and salt spray.
+
+
+------------------------------------------------------------------------------
+7.2 RS-422 CABLE SPECIFICATIONS
+------------------------------------------------------------------------------
+
+  Cable Type: RS-422 rated, twisted pair, shielded
+    - Conductor: 22 AWG (0.32 mm²) or 24 AWG (0.20 mm²) tinned copper
+    - Twisted pair: At least 6 twists per foot (18 twists per meter)
+    - Shield: Aluminum foil (100% coverage) + braided shield (80% coverage)
+    - Drain wire: Bare copper, 22 AWG, in contact with foil shield
+    - Jacket: UV-resistant PVC or polyurethane (marine-rated, anti-corrosion)
+    - Temperature rating: -40°C to +80°C
+    - Voltage rating: 300V RMS
+
+  Recommended Cable:
+    - Belden 9842 (22 AWG, 2-pair, individually shielded, overall shielded)
+    - Alpha Wire 2274C (22 AWG, single pair, foil + braid)
+    - L-Com CAA022FBSLD (22 AWG, foil + braid, UV-resistant)
+
+  Shield Grounding — CRITICAL:
+    The drain wire (bare copper) is connected to the shield at both ends
+    of the cable, but GROUNDED AT ONE END ONLY:
+
+    [Jetson end]  →  Drain wire connected to chassis ground (via cable gland)
+    [ESP32 end]   →  Drain wire NOT connected (left floating)
+
+    This prevents ground loops (the primary cause of RS-422 noise issues)
+    while still providing electrostatic shielding.
+
+    Exception: If the cable exceeds 100 meters, ground the shield at both
+    ends BUT through a 0.1µF / 50V ceramic capacitor at the far end
+    (provides RF shielding without DC ground loop).
+
+
+------------------------------------------------------------------------------
+7.3 NMEA CABLE ROUTING
+------------------------------------------------------------------------------
+
+NMEA 0183 cables follow the same routing rules as RS-422 cables, with
+additional requirements:
+
+  - NMEA cables must NOT share conduit with power cables
+  - NMEA cables must NOT share conduit with RS-422 cables (different serial
+    links, risk of crosstalk)
+  - NMEA cables have their own dedicated conduit or tray
+  - Listener tee connections should be made with marine-grade butt splices
+    or solder joints, sealed with adhesive-lined heat-shrink tubing (3M
+    or equivalent)
+  - NMEA bus segments must be terminated with 120-ohm resistors at each end
+    (across TX+ and TX-)
+
+  NMEA Cable Specification:
+    - Same as RS-422 cable (twisted pair, shielded) — NMEA 0183 IS EIA-422
+    - Many marine electronics use proprietary round cables with molded
+      connectors — these are acceptable if rated for marine use
+
+
+------------------------------------------------------------------------------
+7.4 FERRITE CHOKE AND CABLE GLAND SPECIFICATIONS
+------------------------------------------------------------------------------
+
+  Ferrite Chokes:
+    Every cable entering or leaving an enclosure passes through a ferrite
+    choke (common-mode choke). This suppresses high-frequency EMI and
+    prevents the enclosure from radiating or receiving interference.
+
+    Specification:
+      - Type: Snap-on ferrite core (cable passes through the center)
+      - Impedance: 100-500 ohm at 100 MHz (depending on cable type)
+      - Material: NiZn ferrite (high frequency suppression)
+      - Size: Matches cable diameter (typically 8-13mm for M12 cables)
+      - Mounting: Snap-on (no cable cutting required for installation)
+      - Location: Within 100mm of the cable entry point to the enclosure
+
+    Required on:
+      - All RS-422 cables (both ends)
+      - All NMEA cables (both ends)
+      - All Ethernet cables (both ends)
+      - All power cables entering enclosures
+
+  Cable Glands:
+    Every cable entry into every enclosure uses an IP67-rated cable gland.
+
+    Specification:
+      - Type: Single compression gland (one cable per gland)
+      - Rating: IP67 (minimum), IP68 preferred
+      - Material: Polyamide (nylon) or nickel-plated brass
+      - Temperature: -40°C to +100°C
+      - Clamping range: Matches cable outer diameter
+      - Thread: Metric (M12, M16, M20, M25, M32 — matched to enclosure)
+
+    Installation:
+      - Cable gland threads into enclosure
+      - Cable passes through gland
+      - Gland nut tightens onto cable jacket, creating seal
+      - Excess cable braid/shield is trimmed, drain wire connected
+      - Ferrite choke is between gland and connector
+
+
+------------------------------------------------------------------------------
+7.5 CABLE LABELING STANDARDS
+================================================================================
+
+Every cable is labeled at BOTH ends with heat-shrink labels. Labels are
+machine-printed (not handwritten) on UV-resistant, marine-grade heat-shrink
+tubing (e.g., Brady BMP21 or equivalent).
+
+  Label Format:
+    [SOURCE] → [DESTINATION] | [FUNCTION] | [CABLE ID]
+
+  Examples:
+    "JETSON-ALPHA → AUTOPILOT_ESP32 | RS-422 | C-001"
+    "JETSON-BRAVO → WINCH_MONITOR | RS-422 | C-002"
+    "PWR_DIST → JETSON-ALPHA | 12V DC | P-001"
+    "GPS → NMEA_TEE | NMEA 4800 | N-001"
+    "KILL_SWITCH → SOLENOID_BUS | 12V CTRL | K-001"
+
+  Label Placement:
+    - Within 100mm of each cable termination (connector or terminal)
+    - Oriented for readability (text facing outward, not against bulkhead)
+    - Protected by clear heat-shrink overlay (additional UV/salt protection)
+
+  Cable ID System:
+    - Power cables: P-001, P-002, ... (sequential)
+    - RS-422 cables: C-001, C-002, ... (sequential)
+    - NMEA cables: N-001, N-002, ... (sequential)
+    - Ethernet cables: E-001, E-002, ... (sequential)
+    - Kill switch cables: K-001, K-002, ... (sequential)
+
+  Cable Schedule:
+    A cable schedule document is maintained on board and updated whenever
+    cables are added or modified. It lists every cable ID, source, destination,
+    function, length, and gauge. This document is laminated and stored in
+    the spare parts kit.
+
+
+================================================================================
+8. CONNECTOR STANDARDIZATION — UNIVERSAL PINOUT
+================================================================================
+
+All ESP32 node boxes use the SAME M12 8-pin connector with the SAME pinout.
+This is the most critical standardization decision in the architecture.
+
+  M12 8-Pin A-Coded Universal Pinout:
+
+    Pin  | Signal          | Description
+    ─────┼─────────────────┼────────────────────────────────────────────
+    1    | +12V DC         | Power input from vessel bus (fused upstream)
+    2    | GND             | Power ground (bonded to vessel ground)
+    3    | RS-422 A (TX+)  | RS-422 differential pair A (non-inverting)
+    4    | RS-422 B (TX-)  | RS-422 differential pair B (inverting)
+    5    | NMEA RX+        | NMEA 0183 receive (+) — listener input
+    6    | NMEA RX-        | NMEA 0183 receive (-) — listener input
+    7    | SHIELD          | Cable shield/drain wire connection
+    8    | SPARE           | Reserved for future use (e.g., 1-Wire, CAN)
+
+  Pinout Rationale:
+    - Pins 1-2: Power is on the dedicated power pins, not shared with signal
+    - Pins 3-4: RS-422 uses a dedicated twisted pair
+    - Pins 5-6: NMEA uses a dedicated twisted pair
+    - Pin 7: Shield is on the shell/pin 7 (standard M12 shield connection)
+    - Pin 8: Spare for future expansion (keeps the pinout extensible)
+
+  Cable Wiring (M12 8-pin to M12 8-pin straight cable):
+    Pin 1 → Pin 1 (12V through)
+    Pin 2 → Pin 2 (GND through)
+    Pin 3 → Pin 3 (RS-422 A through)
+    Pin 4 → Pin 4 (RS-422 B through)
+    Pin 5 → Pin 5 (NMEA RX+ through)
+    Pin 6 → Pin 6 (NMEA RX- through)
+    Pin 7 → Pin 7 (Shield through)
+    Pin 8 → Pin 8 (Spare through)
+
+  UNIVERSAL INTERCHANGEABILITY:
+    Because every ESP32 node box uses the same connector and pinout, ANY
+    ESP32 can physically plug into ANY cable location. The Jetson determines
+    the node's role through software negotiation:
+
+    1. Jetson sends: {"cmd":"identify"} on RS-422
+    2. ESP32 responds: {"node_id":"pump_ctrl","fw_ver":"1.2.3","serial":"ESP-0042"}
+    3. Jetson looks up the cable ID (from cable schedule) to determine what
+       role SHOULD be at this port
+    4. If the ESP32's reported role matches the expected role → OK
+    5. If the ESP32 is the GENERIC spare → Jetson sends role assignment command:
+       {"cmd":"assign_role","role":"pump_ctrl","config":{...}}
+    6. ESP32 loads the new role configuration and begins operating
+
+  This means a crew member can replace a failed ESP32 with the generic spare
+  by simply unplugging the failed unit and plugging in the spare — no tools,
+  no firmware flashing, no configuration changes. The Jetson handles
+  everything automatically.
+
+
+================================================================================
+9. NETWORK TOPOLOGY ASCII DIAGRAMS
+================================================================================
+
+------------------------------------------------------------------------------
+DIAGRAM 1: COMPLETE VESSEL NETWORK — THREE-TIER ARCHITECTURE
+------------------------------------------------------------------------------
+
+  ╔══════════════════════════════════════════════════════════════════════╗
+  ║                    COMMERCIAL FISHING VESSEL                        ║
+  ║                    NETWORK ARCHITECTURE                             ║
+  ╚══════════════════════════════════════════════════════════════════════╝
+
+  ┌─────────────────────── TIER 1: GIGABIT ETHERNET ───────────────────┐
+  │  10.0.0.0/24                                                          │
+  │                                                                       │
+  │   ┌─────────────┐     Cat6 STP      ┌──────────────────┐              │
+  │   │ Jetson-Alpha│◄──────────────────│ Gigabit Switch   │              │
+  │   │ 10.0.0.1    │  Nav Station      │ (DIN-rail, 8pt)  │              │
+  │   │ PRIMARY     │                    └────────┬─────────┘              │
+  │   └─────────────┘                             │                        │
+  │        ▲                                     │                        │
+  │        │ Cat6                                │                        │
+  │        │                                     │ Cat6                    │
+  │        │                                     │                        │
+  │   ┌────┴──────────┐                    ┌─────┴──────────┐            │
+  │   │ Jetson-Bravo  │                    │ Jetson-Charlie  │            │
+  │   │ 10.0.0.2      │                    │ 10.0.0.3        │            │
+  │   │ SECONDARY     │                    │ TERTIARY        │            │
+  │   └───────────────┘                    └─────────────────┘            │
+  │                                                                       │
+  │   ┌─────────────┐                                                     │
+  │   │ WiFi AP     │  Monitoring only (MQTT to tablets)                  │
+  │   │ 10.0.0.200  │  NO control commands over WiFi                      │
+  │   └─────────────┘                                                     │
+  └───────────────────────────────────────────────────────────────────────┘
+                              │
+                    ┌─────────┴─────────┐
+                    │  RS-422 USB       │
+                    │  Adapters         │
+                    │  (FTDI FT4232H)   │
+                    └─────────┬─────────┘
+                              │
+  ┌─────────────────── TIER 2: RS-422 SERIAL (115200 BAUD) ─────────────┐
+  │                                                                       │
+  │  Jetson-Alpha Ports:                                                 │
+  │   Port 0 ──RS422──▶ ┌──────────────────┐                             │
+  │   Port 1 ──RS422──▶ │ Autopilot ESP32  │  NMEA listener + rudder     │
+  │   Port 2 ──RS422──▶ │ Compass ESP32    │  Heading sensor             │
+  │   Port 3 ──RS422──▶ │ System Monitor   │  Health, temps, voltages    │
+  │   Port 4-7          │ SPARE            │  Future expansion            │
+  │                                                                       │
+  │  Jetson-Bravo Ports:                                                 │
+  │   Port 0 ──RS422──▶ ┌──────────────────┐                             │
+  │   Port 1 ──RS422──▶ │ Winch Monitor    │  Tension, speed, temp        │
+  │   Port 2 ──RS422──▶ │ Deck Camera PTZ  │  Pan/tilt/zoom control      │
+  │   Port 3 ──RS422──▶ │ Deck Sensor      │  Proximity, weather          │
+  │                                                                       │
+  │  Jetson-Charlie Ports:                                               │
+  │   Port 0 ──RS422──▶ ┌──────────────────┐                             │
+  │   Port 1 ──RS422──▶ │ Pump Control     │  Pump motor relays          │
+  │   Port 2 ──RS422──▶ │ Engine Monitor   │  RPM, temp, oil pressure    │
+  │   Port 3 ──RS422──▶ │ Tank Level       │  Ultrasonic level sensors   │
+  │                                                                       │
+  │  Topology: STAR (each node has dedicated home-run to Jetson)          │
+  │  Alternative: DAISY-CHAIN (see Diagram 2)                             │
+  └───────────────────────────────────────────────────────────────────────┘
+                              │
+                    ┌─────────┴─────────┐
+                    │  NMEA USB         │
+                    │  Adapters         │
+                    └─────────┬─────────┘
+                              │
+  ┌─────────────────── TIER 3: NMEA 0183 (4800 BAUD) ──────────────────┐
+  │                                                                       │
+  │  GPS Receiver (4800 baud)                                            │
+  │       │                                                               │
+  │       ▼                                                               │
+  │   ┌───────┐  ┌──────────┐  ┌───────────┐  ┌──────────────┐          │
+  │   │ Tee 1 │──│ Tee 2    │──│ Tee 3     │──│ Tee 4        │          │
+  │   └───────┘  └──────────┘  └───────────┘  └──────────────┘          │
+  │       │           │              │                │                   │
+  │       ▼           ▼              ▼                ▼                   │
+  │   ┌────────┐  ┌────────┐    ┌────────┐     ┌──────────┐             │
+  │   │ Compass│  │ Depth  │    │ Wind   │     │ Autopilot│             │
+  │   │ ESP32  │  │ Sounder│    │ Sensor │     │ ESP32    │             │
+  │   │(listen)│  │        │    │        │     │ (listen) │             │
+  │   └────────┘  └────────┘    └────────┘     └──────────┘             │
+  │                                                │                     │
+  │  AIS Receiver (38400 baud, SEPARATE bus)       │                     │
+  │       │                                        │                     │
+  │       ▼                                        │                     │
+  │   ┌────────┐                                   │                     │
+  │   │ Jetson │                                   │                     │
+  │   │ Alpha  │◄────── NMEA Mux Daemon ◄──────────┘                     │
+  │   │ USB    │   (kplex: aggregates all NMEA sources)                   │
+  │   └────────┘                                                          │
+  │                                                                       │
+  │  Autopilot ESP32 → Dedicated TALKER port → Chart Plotter             │
+  │  (NEVER talks on instrument bus segments)                             │
+  └───────────────────────────────────────────────────────────────────────┘
+
+
+------------------------------------------------------------------------------
+DIAGRAM 2: RS-422 TOPOLOGY OPTIONS — STAR vs. DAISY-CHAIN
+------------------------------------------------------------------------------
+
+  OPTION A: STAR TOPOLOGY (PREFERRED)
+  ═════════════════════════════════════
+
+                       ┌─────────────────────┐
+                       │    Jetson-Alpha     │
+                       │  + RS-422 Hub       │
+                       │  (2× FT4232H)       │
+                       └──┬──┬──┬──┬──┬──┬──┬┘
+                          │  │  │  │  │  │  │
+                     RS422│  │  │  │  │  │  │RS422
+                     cable│  │  │  │  │  │  │cable
+                          │  │  │  │  │  │  │
+                      ┌───┘  │  │  │  │  │  └───┐
+                      │      │  │  │  │  │      │
+                   ┌──▼──┐ ┌─▼──┐ │  │ ┌─▼──┐ ┌─▼──┐
+                   │ESP32│ │ESP32│ │  │ │ESP32│ │ESP32│
+                   │ #1  │ │ #2  │ │  │ │ #7  │ │ #8  │
+                   │Autop│ │Comp │ │  │ │EngM │ │Tank │
+                   └─────┘ └─────┘ │  │ └─────┘ └─────┘
+                                 ┌──┘  └──┐
+                              ┌─▼──┐   ┌─▼──┐
+                              │ESP32│   │ESP32│
+                              │ #3  │   │ #4  │
+                              │SysM │   │SPARE│
+                              └─────┘   └─────┘
+
+  Pros: Independent links, no single point of failure, full bandwidth
+  Cons: More cables, more hub ports needed
+
+
+  OPTION B: DAISY-CHAIN TOPOLOGY (ALTERNATIVE)
+  ══════════════════════════════════════════════
+
+    ┌───────────────┐
+    │ Jetson-Alpha  │
+    │ RS-422 Port 0 │
+    └───┬───────┬───┘
+        │TX     │RX
+        │       │
+   ┌────▼───┐   │
+   │ ESP32  ├───┘  (relay: forwards messages to next node)
+   │ #1     │
+   │Auto-   │
+   │pilot   │
+   └───┬┬───┘
+      ││ IN/OUT
+      ││
+   ┌──▼▼────┐
+   │ ESP32  │
+   │ #2     │
+   │Compass │
+   └───┬┬───┘
+      ││
+   ┌──▼▼────┐
+   │ ESP32  │
+   │ #3     │
+   │SysMon  │
+   └───┬┬───┘
+      ││
+   ┌──▼▼────┐
+   │ ESP32  │
+   │ #4     │
+   │Engine  │
+   └────────┘
+
+  Pros: Fewer cables, single port on Jetson, easy to extend
+  Cons: Single point of failure, latency accumulates, more complex firmware
+
+
+------------------------------------------------------------------------------
+DIAGRAM 3: POWER DISTRIBUTION WITH UPS BACKUP
+------------------------------------------------------------------------------
+
+                    VESSEL BATTERY BANK
+                    (12V, 200-400Ah)
+                          │
+                    [Main Battery Switch]
+                          │
+                    [50A DC Breaker]
+                          │
+            ┌─────────────┴──────────────┐
+            │                            │
+            │  ╔══════════════════════╗  │
+            │  ║ DIODE OR SWITCHOVER ║  │
+            │  ║                     ║  │
+            │  ║ Vessel ──[D1]──┐   ║  │
+            │  ║                 ├──▶║──┼──▶ [Robotics 12V Bus]
+            │  ║ LiFePO4─[D2]──┘   ║  │         │
+            │  ╚══════════════════════╝  │         │
+            │                            │         │
+            ▼                            ▼         ▼
+     [Normal loads:       [LiFePO4 Battery]   [Robotics Distribution]
+      lights, radios,     12V, 20Ah           Block (Blue Sea Systems)
+      etc.]               UPS Backup          │
+                          30+ min runtime     │
+                          for robotics        ├── [5A fuse]──▶ Jetson-Alpha
+                                              │    (16 AWG)
+                                              ├── [5A fuse]──▶ Jetson-Bravo
+                                              │    (16 AWG)
+                                              ├── [5A fuse]──▶ Jetson-Charlie
+                                              │    (16 AWG)
+                                              ├── [5A fuse]──▶ Autopilot ESP32
+                                              │    (18 AWG)
+                                              ├── [5A fuse]──▶ Winch Monitor ESP32
+                                              │    (18 AWG)
+                                              ├── [5A fuse]──▶ Pump Control ESP32
+                                              │    (18 AWG)
+                                              ├── [5A fuse]──▶ [remaining ESP32s]
+                                              │    (18 AWG)
+                                              └── [5A fuse]──▶ Ethernet Switch
+                                                   (18 AWG)
+
+
+------------------------------------------------------------------------------
+DIAGRAM 4: KILL SWITCH WIRING
+------------------------------------------------------------------------------
+
+    Battery (+) ──▶ [Main Breaker] ──▶ [KILL SWITCH] ──▶ [Solenoid Bus (+)]
+         │                                                          │
+         │                                            ┌─────────────┼──────────────┐
+         │                                            │             │              │
+         │                                            ▼             ▼              ▼
+         │                                     [Autopilot    [Winch        [Pump
+         │                                      Solenoid]    Contactors]   Contactors]
+         │                                            │             │              │
+         │                                     (hydraulic     (motor       (motor
+         │                                      clutch        stop)        stop)
+         │                                      disengages)
+         │
+         ├──▶ [Electronics Bus — BEFORE kill switch]
+         │       │
+         │       ├──▶ Jetson-Alpha (continues running)
+         │       ├──▶ Jetson-Bravo (continues running)
+         │       ├──▶ Jetson-Charlie (continues running)
+         │       ├──▶ All ESP32 nodes (continue running, monitoring)
+         │       ├──▶ NMEA instruments (GPS, compass, etc. continue)
+         │       └──── WiFi AP (continues running)
+         │
+    Battery (-) ──▶ [Ground Bus]
+
+    RESULT: Kill switch ONLY stops actuators. All electronics and navigation
+    continue operating. Helmsman has full manual steering within 100ms.
+
+
+------------------------------------------------------------------------------
+DIAGRAM 5: ESP32 NODE BOX — INTERNAL BLOCK DIAGRAM
+------------------------------------------------------------------------------
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                    ESP32 NODE BOX (IP67)                        │
+    │                                                                 │
+    │  M12 8-pin Connector                                           │
+    │  ┌──────────────────────────────────────┐                       │
+    │  │ Pin 1: +12V ──────┐                 │                       │
+    │  │ Pin 2: GND  ──────┤                 │                       │
+    │  │ Pin 3: RS422 A ───┤  ┌────────────┐ │                       │
+    │  │ Pin 4: RS422 B ───┼──│ ADuM1201   │ │    ┌──────────────┐  │
+    │  │ Pin 5: NMEA RX+ ──┤  │ Galvanic   │─┼───▶│ ESP32-S3     │  │
+    │  │ Pin 6: NMEA RX- ──┤  │ Isolator  │ │    │ UART0: RS422 │  │
+    │  │ Pin 7: SHIELD ────┤  └────────────┘ │    │ UART1: NMEA  │  │
+    │  │ Pin 8: SPARE ─────┘                  │    │ GPIO: Relays │  │
+    │  └──────────────────────────────────────┘    │ ADC: Sensors │  │
+    │                                             └──────┬───────┘  │
+    │  Power Conditioning:                               │          │
+    │  ┌──────────────────────────────────────────────────┘          │
+    │  │                                                             │
+    │  │  +12V ──▶ [TVS: SMBJ33A] ──▶ [LM2596: 12V→5V] ──▶         │
+    │  │                                                    │        │
+    │  │                                            [LM1117: 5V→3.3V]│
+    │  │                                                    │        │
+    │  │                                              3.3V to ESP32  │
+    │  │                                                             │
+    │  └─────────────────────────────────────────────────────────────┘
+    │                                                                 │
+    │  LED Window (visible through polycarbonate window):             │
+    │  ● PWR  (green) — 3.3V regulator OK                             │
+    │  ● RX   (yellow) — RS-422 data received                         │
+    │  ● TX   (yellow) — RS-422 data transmitted                     │
+    │  ● FAULT (red) — watchdog timeout, config error, etc.          │
+    │                                                                 │
+    │  Label Slot: "AUTOPILOT_CTRL" (engraved, slide-in)             │
+    │  M12 Cable Glands: 1-4 (for sensor/relay cables)               │
+    └─────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+10. BILL OF MATERIALS — NETWORK AND WIRING SUMMARY
+================================================================================
+
+  Category                | Qty | Part / Description
+  ────────────────────────┼─────┼─────────────────────────────────────────────
+  COMPUTE NODES
+  Jetson Orin Nano Super  |  3  | NVIDIA Jetson Orin Nano Super dev kit
+  Carrier boards          |  3  | Compatible carrier board with 19V input
+  MicroSD cards           |  6  | 128GB, high endurance (spare set)
+  Heatsink kit            |  3  | Aluminum heatsink + thermal pad
+
+  NETWORK — TIER 1 (Ethernet)
+  Gigabit switch          |  1  | 8-port unmanaged, DIN-rail (Moxa EDS-205A)
+  Cat6 STP cable          | 50m | Marine-grade, UV-rated, shielded
+  RJ45 connectors         | 10  | IP67 rated (or panel-mount RJ45)
+  WiFi AP                 |  1  | Marine-grade 5GHz (optional, monitoring)
+
+  NETWORK — TIER 2 (RS-422)
+  USB-RS422 adapters      |  4  | FTDI FT4232H-based, 4-port each
+  RS-422 cable (M12)      | 80m | 22 AWG, twisted pair, shielded
+  M12 8-pin connectors    | 30  | A-coded, IP67, stainless steel
+  M12 8-pin cables        |  8  | Pre-made, 2m/5m/10m (various lengths)
+  ADuM1201 isolators      | 12  | On ESP32 PCBs (included in PCB BOM)
+
+  NETWORK — TIER 3 (NMEA)
+  USB-NMEA adapters       |  5  | Serial USB for GPS/compass/AIS/depth/wind
+  NMEA listener tees      |  8  | Standard marine NMEA tees
+  NMEA cable              | 40m | RS-422 rated, marine-grade
+  120-ohm termination     |  6  | Axial resistors (NMEA bus terminators)
+
+  POWER DISTRIBUTION
+  Blue Sea fuse block     |  2  | 12-position ST Blade
+  Automotive fuses        | 20  | 5A (×10), 10A (×5), 15A (×3), 30A (×2)
+  TVS diodes (SMBJ33A)    | 12  | On ESP32 PCBs
+  LM2596 DC-DC            | 12  | On ESP32 PCBs
+  LM1117-3.3 LDO          | 12  | On ESP32 PCBs
+  19V DC-DC converters    |  3  | 12V→19V, 50W (Traco TBL 50-2419WI)
+  LiFePO4 battery         |  2  | 12V, 20Ah (1 installed + 1 spare)
+  Schottky diodes         |  4  | STPS30L60CT (diode OR switchover)
+  8 AWG power cable       | 20m | Marine-grade, tinned copper
+  16 AWG power cable      | 30m | Marine-grade, tinned copper
+  18 AWG power cable      | 30m | Marine-grade, tinned copper
+
+  ENCLOSURES
+  IP54 enclosure          |  1  | For Jetson-Alpha (nav station)
+  IP65 enclosure + heater |  1  | For Jetson-Bravo (wheelhouse)
+  IP67 enclosure (steel)  |  1  | For Jetson-Charlie (engine room)
+  IP67 enclosure (plastic)| 12  | For ESP32 node boxes (8 installed + 4 spare)
+  DIN rail                |  3m | 35mm DIN rail for mounting
+
+  CABLE MANAGEMENT
+  Cable trays             | 20m | Stainless steel or PVC
+  UV cable ties           | 200 | Marine-grade, assorted sizes
+  Ferrite chokes          | 30  | Snap-on, various sizes
+  Cable glands            | 40  | IP67, M12/M16/M20 assorted
+  Heat-shrink labels      | 100 | Brady BMP21 marine-grade
+  Heat-shrink tubing      | 5m  | Adhesive-lined, 3:1 ratio, assorted sizes
+
+  SPARE PARTS KIT
+  Pre-programmed ESP32    |  3  | In vacuum-sealed bags (labeled by role)
+  M12 cable assemblies    |  3  | 2m, 5m, 10m
+  FT4232H adapters        |  2  | Pre-tested
+  Fuses (assorted)        |  5  | 5A/10A/15A/20A/30A
+  DC-DC converter spare   |  1  | 12V→19V
+  Multimeter              |  1  | Fluke or equivalent
+  RS-422 loopback plug    |  1  | M12, TX+→RX+, TX-→RX-
+  USB serial debug cable  |  1  | USB to RS-422
+  Pelican case            |  1  | IP67, for spare parts storage
+
+
+================================================================================
+11. TESTING AND COMMISSIONING PROCEDURES
+================================================================================
+
+  11.1 PRE-INSTALLATION TESTING (Shore-Based):
+    - Power up each Jetson on bench supply, verify boot and network config
+    - Flash each ESP32 with role-specific firmware
+    - Test each RS-422 link with loopback plug: Jetson sends test frame,
+      verifies echo
+    - Test NMEA multiplexer on Jetson-Alpha with simulated GPS input
+    - Verify LiFePO4 backup: disconnect main power, verify seamless switchover
+    - Run all ESP32s through 24-hour burn-in test (temperature cycling)
+    - Verify kill switch operation: confirm actuators de-energize,
+      electronics continue
+
+  11.2 INSTALLATION TESTING (On Vessel, At Dock):
+    - Install all enclosures, route cables, connect M12 connectors
+    - Verify cable continuity: use multimeter to check every conductor
+    - Verify cable labeling: every cable labeled at both ends
+    - Power on from vessel battery: verify all nodes boot correctly
+    - Verify RS-422 communication: Jetson pings each ESP32, all respond
+    - Verify NMEA data flow: GPS → multiplexer → OpenCPN (position displays)
+    - Verify Ethernet: all three Jetsons visible on 10.0.0.0/24 network
+    - Test kill switch: press kill switch, verify actuators stop, electronics
+      continue, verify reset restores operation
+    - Run system for 24 hours at dock: monitor for errors, heat, noise
+
+  11.3 SEA TRIAL TESTING (Underway):
+    - All dock tests pass before departure
+    - Monitor RS-422 error rates (Jetson logs frame errors, parity errors)
+    - Monitor NMEA data quality (position jumps, missing sentences)
+    - Verify autopilot ESP32 receives GPS and compass data
+    - Verify autopilot output to chart plotter ($APHDM, $RSA)
+    - Test UPS: shut down engine, verify 30+ minutes of operation
+    - Test kill switch under way (brief test, safe conditions)
+    - Monitor WiFi performance (MQTT telemetry to tablet)
+    - Log all results for commissioning report
+
+  11.4 ONGOING MAINTENANCE:
+    - Monthly: Visual inspection of all enclosures, connectors, cables
+    - Monthly: Verify LiFePO4 battery voltage (should be 13.2-13.8V)
+    - Quarterly: Test kill switch operation
+    - Quarterly: Verify cable label legibility (replace faded labels)
+    - Annually: Full system test (equivalent to sea trial)
+    - Annually: Replace ferrite chokes (degradation over time)
+    - As needed: Replace ESP32 nodes from spare kit (plug-and-play)
+
+
+================================================================================
+12. RISK ASSESSMENT AND MITIGATION
+================================================================================
+
+  Risk                              | Impact | Probability | Mitigation
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  Saltwater corrosion on connectors | High   | Medium     | M12 IP67 connectors,
+                                    |        |            | galvanic isolation,
+                                    |        |            | regular inspection
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  RS-422 cable damage (chafing)     | Medium | Medium     | Marine-grade cable,
+                                    |        |            | proper conduit, cable
+                                    |        |            | glands at all entries
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  Ground loop causing data corruption| High  | Medium     | ADuM1201 isolation on
+                                    |        |            | every ESP32, shield
+                                    |        |            | grounded at one end
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  Lightning-induced surge           | High   | Low        | TVS diodes on all
+                                    |        |            | power inputs, ferrite
+                                    |        |            | chokes on all cables
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  Engine/alternator failure         | High   | Low        | LiFePO4 UPS with
+                                    |        |            | diode-OR switchover,
+                                    |        |            | 30+ min runtime
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  ESP32 node failure                | Medium | Low-Medium | Standardized node
+                                    |        |            | boxes, universal spare
+                                    |        |            | with auto role assign
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  Jetson failure                    | High   | Low        | Triple redundancy
+                                    |        |            | (Alpha/Bravo/Charlie),
+                                    |        |            | watchdog failover
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  NMEA bus failure                  | Medium | Low        | NMEA multiplexer on
+                                    |        |            | Jetson-Alpha with USB
+                                    │        │            │ GPS backup
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  Autopilot malfunction             | Critical| Low       | Kill switch (physical),
+                                    |        |            | watchdog timer (5s),
+                                    |        |            | separate actuator bus
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  Fire in electronics enclosure     | Critical| Very Low   | Fused power inputs,
+                                    |        |            | thermal fuses on DC-DC
+                                    │        │            │ converters, IP67 enclosures
+  ──────────────────────────────────┼────────┼────────────┼─────────────────────
+  WiFi interference from marine     | Low    | High       | WiFi is monitoring-only,
+   RF sources                       |        |            | no safety impact if lost
+
+
+================================================================================
+13. CONCLUSION
+================================================================================
+
+This technical brief defines a robust, serviceable, and marine-grade physical
+networking architecture for the vessel robotics platform. The three-tier
+network (Gigabit Ethernet, RS-422 serial, NMEA 0183) provides clear separation
+of concerns, with each tier optimized for its specific role.
+
+Key architectural decisions and their rationale:
+
+  1. RS-422 over CAN bus: Simpler implementation on Jetson, longer cable runs,
+     full-duplex, human-debuggable JSON payloads, zero custom kernel modules.
+
+  2. Wired over wireless for control: Marine RF environment is hostile to WiFi.
+     RS-422 provides deterministic, lossless, low-latency communication.
+     WiFi exists for monitoring convenience only.
+
+  3. Universal M12 connector pinout: Any ESP32 can plug into any location.
+     Generic spare nodes receive role assignment from Jetson automatically.
+     This reduces spare parts inventory and enables rapid field repair.
+
+  4. Galvanic isolation everywhere: ADuM1201 on every ESP32 input prevents
+     ground loops, the primary cause of serial communication failure in
+     marine environments.
+
+  5. LiFePO4 UPS with diode-OR switchover: Zero-delay transition to backup
+     power ensures the robotics system survives engine failure without any
+     interruption to control or navigation.
+
+  6. Kill switch hierarchy: Physical kill switch stops all actuators without
+     cutting power to electronics. Combined with software E-stop and watchdog
+     timer, this provides three independent layers of safety.
+
+  7. Standardized IP67 node boxes: Every ESP32 is in an identical enclosure
+     with standardized connectors, labeling, and LED indicators. This reduces
+     training requirements, simplifies maintenance, and enables rapid
+     troubleshooting by any crew member.
+
+The total bill of materials for the networking and wiring subsystem is
+estimated at $3,500-$5,000 USD (excluding Jetson compute nodes), which is
+a small investment relative to the reliability and serviceability it provides.
+
+This architecture is designed to operate reliably for years in the harsh
+marine environment, with planned maintenance intervals of one month (visual
+inspection) to one year (full system test). The standardized components,
+plug-and-play spare nodes, and comprehensive labeling ensure that any crew
+member can diagnose and repair most faults without specialized training or
+equipment.
+
+================================================================================
+END OF TECHNICAL BRIEF NO. 12
+Network and Physical Architecture for Vessel Robotics Platform
+================================================================================

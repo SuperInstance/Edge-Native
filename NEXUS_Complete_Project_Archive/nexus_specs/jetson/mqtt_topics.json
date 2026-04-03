@@ -1,0 +1,668 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "_meta": {
+    "platform": "NEXUS",
+    "layer": "Jetson Cognitive Layer",
+    "version": "1.0.0",
+    "description": "Complete MQTT topic hierarchy for the NEXUS platform pub/sub telemetry bus. Every topic includes QoS, retain policy, payload schema reference, publisher/subscriber roles, and expected message rate.",
+    "conventions": {
+      "site_id": "Alpha-numeric site identifier (e.g. 'site-hq-01')",
+      "node_id": "ESP32 node identifier (e.g. 'esp32-cam-03')",
+      "reflex_id": "Reflex identifier (e.g. 'reflex-door-proximity-v2')",
+      "subsystem_id": "INCREMENTS subsystem identifier (e.g. 'door-control')",
+      "test_id": "A/B test UUID",
+      "topic_prefix": "nexus/{site_id}",
+      "topic_separator": "/",
+      "wildcard_single": "+",
+      "wildcard_multi": "#"
+    }
+  },
+  "topics": [
+    {
+      "topic_pattern": "nexus/{site_id}/nodes/{node_id}/telemetry",
+      "description": "High-frequency telemetry stream from an ESP32 node. Includes sensor readings (temperature, humidity, motion, light), CPU/GPU utilization, battery level, and network RSSI.",
+      "qos": 0,
+      "retain": false,
+      "payload_schema": "TelemetryEvent",
+      "payload_schema_ref": "#/definitions/TelemetryEvent",
+      "publisher": "ESP32 node (edge device)",
+      "subscriber": "Jetson cognitive layer, ReflexOrchestrator, LearningPipeline, dashboard consumers",
+      "message_rate_estimate": "10–50 msg/s per node (depends on sensor count and sample rate)",
+      "mqtt_wildcard_subscribe": "nexus/{site_id}/nodes/+/telemetry",
+      "notes": "QoS 0 acceptable for telemetry – individual dropped readings are tolerable. Use QoS 1 if exact counts matter (e.g. motion event counting)."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/nodes/{node_id}/status",
+      "description": "Node lifecycle status transitions: online, offline, degraded, maintenance mode, firmware update progress. Used by the cluster to track membership.",
+      "qos": 1,
+      "retain": true,
+      "payload_schema": "NodeStatusEvent",
+      "payload_schema_ref": "#/definitions/NodeStatusEvent",
+      "publisher": "ESP32 node (self-reported), Jetson NodeManager (probing)",
+      "subscriber": "NodeDiscovery service, dashboard, alerting system, NodeManager",
+      "message_rate_estimate": "0.01–0.1 msg/s per node (event-driven, bursts on boot/reboot)",
+      "mqtt_wildcard_subscribe": "nexus/{site_id}/nodes/+/status",
+      "notes": "Retained so new subscribers immediately see current state. QoS 1 ensures no missed offline events."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/nodes/{node_id}/safety",
+      "description": "Safety-critical events from a node: emergency stops, proximity alerts, tamper detection, actuator faults, sensor failures. Highest priority topic in the system.",
+      "qos": 1,
+      "retain": false,
+      "payload_schema": "SafetyEvent",
+      "payload_schema_ref": "#/definitions/SafetyEvent",
+      "publisher": "ESP32 node, Jetson SafetyMonitor module, any reflex with safety_critical=true",
+      "subscriber": "AutonomyManager, all reflexes with safety_critical=true, dashboard, alerting system, audit logger",
+      "message_rate_estimate": "0–0.5 msg/s per node (event-driven, may spike during anomalies)",
+      "mqtt_wildcard_subscribe": "nexus/{site_id}/nodes/+/safety",
+      "notes": "Never QoS 0 – safety events MUST be delivered. Broker must persist to disk. Consider dedicated broker or topic isolation."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/nodes/{node_id}/reflex/{reflex_id}",
+      "description": "Per-reflex execution status, results, and lifecycle events. Includes trigger counts, execution latency, error details, and output values.",
+      "qos": 1,
+      "retain": true,
+      "payload_schema": "ReflexStatusEvent",
+      "payload_schema_ref": "#/definitions/ReflexStatusEvent",
+      "publisher": "ReflexOrchestrator, ESP32 node (reflex runtime)",
+      "subscriber": "LearningPipeline, A/B test collector, dashboard, audit logger",
+      "message_rate_estimate": "0.1–5 msg/s per reflex (depends on trigger frequency and reporting interval)",
+      "mqtt_wildcard_subscribe": "nexus/{site_id}/nodes/+/reflex/+",
+      "notes": "Retained so subscribers get the latest state on connect. QoS 1 to avoid missing state transitions."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/cluster/health",
+      "description": "Aggregated cluster health summary published periodically by the cluster leader. Includes node counts, aggregate resource utilization, and any active alerts.",
+      "qos": 1,
+      "retain": true,
+      "payload_schema": "ClusterHealthSummary",
+      "payload_schema_ref": "#/definitions/ClusterHealthSummary",
+      "publisher": "Jetson cluster leader (NodeDiscovery service)",
+      "subscriber": "Dashboard, monitoring system, external integrations, parent orchestrator",
+      "message_rate_estimate": "0.1–1 msg/s (typically 1 msg every 5–10 seconds)",
+      "mqtt_wildcard_subscribe": "nexus/+/cluster/health",
+      "notes": "Retained for instant visibility. Rate limited by the publisher to avoid storming the broker."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/cluster/discovery",
+      "description": "New node announcements broadcast when an ESP32 or Jetson node joins the cluster. Other nodes listen to update their peer tables.",
+      "qos": 1,
+      "retain": false,
+      "payload_schema": "DiscoveryAnnouncement",
+      "payload_schema_ref": "#/definitions/DiscoveryAnnouncement",
+      "publisher": "NodeDiscovery service (on behalf of joining node)",
+      "subscriber": "All Jetson nodes, all ESP32 nodes with gateway role, dashboard",
+      "message_rate_estimate": "0–0.05 msg/s (only on node join events)",
+      "mqtt_wildcard_subscribe": "nexus/+/cluster/discovery",
+      "notes": "Transient messages – no retention needed. QoS 1 to ensure all peers see the announcement."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/learning/patterns",
+      "description": "Discovered patterns published by the LearningPipeline. Other subsystems subscribe to react to new patterns (e.g. auto-generate reflexes).",
+      "qos": 1,
+      "retain": false,
+      "payload_schema": "DiscoveredPatternEvent",
+      "payload_schema_ref": "#/definitions/DiscoveredPatternEvent",
+      "publisher": "LearningPipeline service",
+      "subscriber": "ReflexOrchestrator, AutonomyManager, dashboard, human reviewer (via chat)",
+      "message_rate_estimate": "0.001–0.1 msg/s (batch-discovered periodically, not real-time)",
+      "mqtt_wildcard_subscribe": "nexus/+/learning/patterns",
+      "notes": "Low frequency but high value. QoS 1 ensures no patterns are silently dropped."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/learning/narration",
+      "description": "Narration events published when a human provides a verbal or textual narration. Triggers rule extraction in the LearningPipeline.",
+      "qos": 1,
+      "retain": false,
+      "payload_schema": "NarrationEvent",
+      "payload_schema_ref": "#/definitions/NarrationEvent",
+      "publisher": "ChatInterface (human input), voice pipeline (STT output)",
+      "subscriber": "LearningPipeline, audit logger, dashboard",
+      "message_rate_estimate": "0.01–0.1 msg/s (human-paced input)",
+      "mqtt_wildcard_subscribe": "nexus/+/learning/narration",
+      "notes": "QoS 1 because narrations are high-value data that must not be lost."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/autonomy/{subsystem_id}/state",
+      "description": "Autonomy state change events published whenever a subsystem's autonomy level changes. Includes trust score deltas and the reason for the change.",
+      "qos": 1,
+      "retain": true,
+      "payload_schema": "AutonomyStateEvent",
+      "payload_schema_ref": "#/definitions/AutonomyStateEvent",
+      "publisher": "AutonomyManager service",
+      "subscriber": "All reflexes on the subsystem, dashboard, alerting system, audit logger",
+      "message_rate_estimate": "0.001–0.01 msg/s (state changes are infrequent)",
+      "mqtt_wildcard_subscribe": "nexus/+/autonomy/+/state",
+      "notes": "Retained so new subscribers immediately see current autonomy state. Critical for safety coordination."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/autonomy/{subsystem_id}/trust",
+      "description": "Trust score update stream. Published periodically or on significant trust changes. Used by reflexes to self-regulate and by the dashboard to display trust trends.",
+      "qos": 0,
+      "retain": true,
+      "payload_schema": "TrustScoreUpdate",
+      "payload_schema_ref": "#/definitions/TrustScoreUpdate",
+      "publisher": "AutonomyManager service (trust evaluator)",
+      "subscriber": "ReflexOrchestrator, dashboard, LearningPipeline (uses trust as feature), alerting system",
+      "message_rate_estimate": "0.1–1 msg/s per subsystem (periodic updates, bursts on significant changes)",
+      "mqtt_wildcard_subscribe": "nexus/+/autonomy/+/trust",
+      "notes": "QoS 0 acceptable for periodic updates – next update will overwrite. Retained for latest value."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/autonomy/{subsystem_id}/override",
+      "description": "Override events when a human operator takes control of a subsystem. Includes the override action, reason, and duration. Highest authority events in the system.",
+      "qos": 2,
+      "retain": true,
+      "payload_schema": "OverrideEvent",
+      "payload_schema_ref": "#/definitions/OverrideEvent",
+      "publisher": "ChatInterface (human command), AutonomyManager (auto-override on safety)",
+      "subscriber": "All reflexes on the subsystem, AutonomyManager, dashboard, alerting system, audit logger, compliance system",
+      "message_rate_estimate": "0–0.05 msg/s (only on human override events)",
+      "mqtt_wildcard_subscribe": "nexus/+/autonomy/+/override",
+      "notes": "QoS 2 (exactly-once) because override events MUST be delivered exactly once. An undelivered override is a safety incident. Retained for audit trail."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/chat/history",
+      "description": "Audit log of all human-machine chat interactions. Used for compliance, debugging, and training data. Published after each exchange.",
+      "qos": 1,
+      "retain": false,
+      "payload_schema": "ChatHistoryEntry",
+      "payload_schema_ref": "#/definitions/ChatHistoryEntry",
+      "publisher": "ChatInterface service",
+      "subscriber": "Audit logger, compliance system, LearningPipeline (training data source), dashboard",
+      "message_rate_estimate": "0.01–0.1 msg/s (human-paced)",
+      "mqtt_wildcard_subscribe": "nexus/+/chat/history",
+      "notes": "QoS 1 for reliable audit logging. Not retained – historical data should be persisted to a database, not the broker."
+    },
+    {
+      "topic_pattern": "nexus/{site_id}/abtest/{test_id}/metrics",
+      "description": "Real-time A/B test metric stream. Published by the test runner as metrics are collected from both versions. Subscribers can compute live statistics.",
+      "qos": 1,
+      "retain": false,
+      "payload_schema": "ABTestMetricEvent",
+      "payload_schema_ref": "#/definitions/ABTestMetricEvent",
+      "publisher": "ReflexOrchestrator (A/B test runner)",
+      "subscriber": "Dashboard (live A/B test visualization), ReflexOrchestrator (collector), alerting system",
+      "message_rate_estimate": "1–100 msg/s per active test (depends on trigger frequency and metric cardinality)",
+      "mqtt_wildcard_subscribe": "nexus/+/abtest/+/metrics",
+      "notes": "High throughput topic. Consider a dedicated MQTT broker or topic partitioning for large-scale tests. QoS 1 for metric completeness."
+    }
+  ],
+  "definitions": {
+    "TelemetryEvent": {
+      "type": "object",
+      "required": ["node_id", "timestamp", "readings"],
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "description": "Source ESP32 node identifier",
+          "minLength": 1
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of measurement"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonically increasing sequence number for gap detection"
+        },
+        "readings": {
+          "type": "object",
+          "description": "Sensor name to value mapping",
+          "additionalProperties": {
+            "oneOf": [
+              {"type": "number"},
+              {"type": "boolean"},
+              {"type": "string"}
+            ]
+          },
+          "examples": {
+            "temperature_c": 23.5,
+            "humidity_pct": 45.2,
+            "motion_detected": true,
+            "light_lux": 320.1,
+            "battery_pct": 87.3,
+            "rssi_dbm": -42,
+            "cpu_pct": 12.0,
+            "free_heap_bytes": 45056,
+            "voltage_mv": 3280
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Optional key-value metadata",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "NodeStatusEvent": {
+      "type": "object",
+      "required": ["node_id", "status", "timestamp"],
+      "properties": {
+        "node_id": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "status": {
+          "type": "string",
+          "enum": ["online", "offline", "degraded", "maintenance", "updating", "error"],
+          "description": "Current node status"
+        },
+        "previous_status": {
+          "type": "string",
+          "enum": ["online", "offline", "degraded", "maintenance", "updating", "error"],
+          "description": "Previous status (for transition tracking)"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Human-readable reason for the status change"
+        },
+        "firmware_version": {
+          "type": "string",
+          "description": "Current firmware version (if applicable)"
+        },
+        "uptime_seconds": {
+          "type": "integer",
+          "description": "Node uptime in seconds"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "List of node capabilities"
+        }
+      }
+    },
+    "SafetyEvent": {
+      "type": "object",
+      "required": ["event_id", "node_id", "severity", "timestamp", "description"],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "description": "Unique event identifier (UUID)"
+        },
+        "node_id": {"type": "string"},
+        "source": {
+          "type": "string",
+          "description": "Origin of the event: 'node', 'reflex', 'system', 'human'"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "warning", "caution", "critical", "emergency"],
+          "description": "Safety severity level per SafetySeverity enum"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["tamper", "proximity", "actuator_fault", "sensor_failure", "communication_loss", "power", "thermal", "environmental", "other"],
+          "description": "Safety event category"
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the safety event"
+        },
+        "timestamp": {"type": "string", "format": "date-time"},
+        "resolved": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the event has been resolved"
+        },
+        "resolution": {
+          "type": "string",
+          "description": "How the event was resolved (if resolved)"
+        },
+        "affected_subsystems": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "INCREMENTS subsystems affected by this event"
+        },
+        "reflex_id": {
+          "type": "string",
+          "description": "Reflex that triggered or was affected (if applicable)"
+        },
+        "sensor_id": {
+          "type": "string",
+          "description": "Sensor that detected the event (if applicable)"
+        },
+        "actions_taken": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Automatic actions taken in response"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "ReflexStatusEvent": {
+      "type": "object",
+      "required": ["reflex_id", "node_id", "status", "timestamp"],
+      "properties": {
+        "reflex_id": {"type": "string"},
+        "node_id": {"type": "string"},
+        "version": {"type": "integer"},
+        "status": {
+          "type": "string",
+          "enum": ["created", "deploying", "active", "paused", "error", "stopped", "rollback", "promotion"],
+          "description": "Current lifecycle status of the reflex"
+        },
+        "timestamp": {"type": "string", "format": "date-time"},
+        "execution_count": {
+          "type": "integer",
+          "description": "Total number of times this reflex has fired"
+        },
+        "error_count": {
+          "type": "integer",
+          "description": "Total errors encountered"
+        },
+        "last_execution_ms": {
+          "type": "number",
+          "description": "Execution time of the most recent run in milliseconds"
+        },
+        "avg_execution_ms": {
+          "type": "number",
+          "description": "Rolling average execution time in milliseconds"
+        },
+        "last_output": {
+          "type": "object",
+          "description": "Output from the most recent execution",
+          "additionalProperties": {}
+        },
+        "last_error": {
+          "type": "string",
+          "description": "Most recent error message (if any)"
+        },
+        "ab_test_id": {
+          "type": "string",
+          "description": "A/B test this reflex is participating in (if any)"
+        },
+        "ab_variant": {
+          "type": "string",
+          "enum": ["A", "B"],
+          "description": "A/B test variant assignment"
+        },
+        "resource_usage": {
+          "type": "object",
+          "properties": {
+            "cpu_pct": {"type": "number"},
+            "ram_mb": {"type": "number"},
+            "gpu_pct": {"type": "number"}
+          }
+        }
+      }
+    },
+    "ClusterHealthSummary": {
+      "type": "object",
+      "required": ["cluster_id", "timestamp", "total_nodes", "healthy_nodes"],
+      "properties": {
+        "cluster_id": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "leader_node_id": {"type": "string"},
+        "total_nodes": {"type": "integer"},
+        "healthy_nodes": {"type": "integer"},
+        "degraded_nodes": {"type": "integer"},
+        "unhealthy_nodes": {"type": "integer"},
+        "overall_health": {
+          "type": "string",
+          "enum": ["healthy", "degraded", "unhealthy", "unknown"]
+        },
+        "aggregate_cpu_pct": {"type": "number"},
+        "aggregate_gpu_pct": {"type": "number"},
+        "aggregate_ram_pct": {"type": "number"},
+        "active_reflex_count": {"type": "integer"},
+        "active_ab_tests": {"type": "integer"},
+        "uptime_seconds": {"type": "integer"},
+        "alerts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": {"type": "string"},
+              "message": {"type": "string"},
+              "node_id": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "DiscoveryAnnouncement": {
+      "type": "object",
+      "required": ["node_id", "timestamp", "hardware_model", "capabilities"],
+      "properties": {
+        "node_id": {"type": "string"},
+        "hostname": {"type": "string"},
+        "ip_address": {"type": "string"},
+        "grpc_port": {"type": "integer"},
+        "hardware_model": {"type": "string"},
+        "serial_number": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "capabilities": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "role": {
+          "type": "string",
+          "enum": ["sensor", "actuator", "gateway", "edge_processor", "coordinator", "safety_monitor"]
+        }
+      }
+    },
+    "DiscoveredPatternEvent": {
+      "type": "object",
+      "required": ["pattern_id", "name", "confidence", "timestamp"],
+      "properties": {
+        "pattern_id": {"type": "string"},
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "category": {
+          "type": "string",
+          "enum": ["temporal", "spatial", "correlation", "anomaly", "behavioral"]
+        },
+        "frequency_per_hour": {"type": "number"},
+        "conditions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "node_ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Nodes where this pattern was observed"
+        },
+        "timestamp": {"type": "string", "format": "date-time"},
+        "requires_validation": {"type": "boolean"},
+        "suggested_reflex_name": {"type": "string"}
+      }
+    },
+    "NarrationEvent": {
+      "type": "object",
+      "required": ["narration_id", "text", "timestamp", "source"],
+      "properties": {
+        "narration_id": {"type": "string"},
+        "text": {"type": "string"},
+        "source": {"type": "string", "description": "'voice', 'text', 'api'"},
+        "session_id": {"type": "string"},
+        "speaker": {"type": "string"},
+        "language": {"type": "string"},
+        "confidence": {"type": "number", "description": "STT confidence if from voice"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "context": {
+          "type": "object",
+          "description": "Context at time of narration",
+          "properties": {
+            "location": {"type": "string"},
+            "active_reflexes": {"type": "array", "items": {"type": "string"}},
+            "autonomy_levels": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        },
+        "tags": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "observation_session_id": {
+          "type": "string",
+          "description": "Linked observation session if narration refers to observed behavior"
+        }
+      }
+    },
+    "AutonomyStateEvent": {
+      "type": "object",
+      "required": ["subsystem_id", "previous_level", "new_level", "timestamp", "reason"],
+      "properties": {
+        "subsystem_id": {"type": "string"},
+        "previous_level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "description": "Autonomy level before change (0=Manual, 4=Full)"
+        },
+        "new_level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "max_allowed_level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "trust_score": {"type": "number"},
+        "reason": {"type": "string"},
+        "triggered_by": {
+          "type": "string",
+          "enum": ["auto", "human", "safety", "schedule"]
+        },
+        "timestamp": {"type": "string", "format": "date-time"},
+        "is_locked": {"type": "boolean"},
+        "lock_reason": {"type": "string"},
+        "affected_reflexes": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "TrustScoreUpdate": {
+      "type": "object",
+      "required": ["subsystem_id", "timestamp", "overall_score"],
+      "properties": {
+        "subsystem_id": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "overall_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "confidence_score": {"type": "number"},
+        "safety_score": {"type": "number"},
+        "reliability_score": {"type": "number"},
+        "dimensions": {
+          "type": "object",
+          "description": "Named trust dimensions with 0..1 scores",
+          "additionalProperties": {"type": "number"}
+        },
+        "actions_since_last": {"type": "integer"},
+        "errors_since_last": {"type": "integer"},
+        "significant_change": {
+          "type": "boolean",
+          "description": "True if the score changed by more than the threshold"
+        },
+        "change_delta": {"type": "number"}
+      }
+    },
+    "OverrideEvent": {
+      "type": "object",
+      "required": ["override_id", "subsystem_id", "action", "timestamp", "requested_by"],
+      "properties": {
+        "override_id": {"type": "string", "description": "Unique override identifier (UUID)"},
+        "subsystem_id": {"type": "string"},
+        "action": {
+          "type": "string",
+          "enum": ["pause", "resume", "lock", "unlock", "force-action"]
+        },
+        "previous_level": {"type": "integer"},
+        "current_level": {"type": "integer"},
+        "reason": {"type": "string"},
+        "requested_by": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "duration_seconds": {
+          "type": "integer",
+          "description": "0 for indefinite overrides"
+        },
+        "expires_at": {"type": "string", "format": "date-time"},
+        "target_state": {
+          "type": "object",
+          "description": "Target state for force-action overrides",
+          "additionalProperties": {}
+        },
+        "affected_reflexes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "confirmed": {"type": "boolean"}
+      }
+    },
+    "ChatHistoryEntry": {
+      "type": "object",
+      "required": ["message_id", "session_id", "timestamp"],
+      "properties": {
+        "message_id": {"type": "string"},
+        "session_id": {"type": "string"},
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant", "system"]
+        },
+        "content": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "user_id": {"type": "string"},
+        "model_used": {"type": "string"},
+        "actions_suggested": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {"type": "string"},
+              "action_type": {"type": "string"},
+              "target": {"type": "string"},
+              "executed": {"type": "boolean"}
+            }
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "ABTestMetricEvent": {
+      "type": "object",
+      "required": ["test_id", "reflex_id", "variant", "timestamp"],
+      "properties": {
+        "test_id": {"type": "string"},
+        "reflex_id": {"type": "string"},
+        "variant": {
+          "type": "string",
+          "enum": ["A", "B"]
+        },
+        "node_id": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "sequence": {"type": "integer"},
+        "metrics": {
+          "type": "object",
+          "description": "Metric name to value mapping",
+          "additionalProperties": {"type": "number"},
+          "examples": {
+            "latency_ms": 12.5,
+            "accuracy": 0.94,
+            "energy_mJ": 3.2,
+            "cpu_pct": 8.1,
+            "error_count": 0
+          }
+        },
+        "execution_success": {"type": "boolean"},
+        "error_message": {"type": "string"}
+      }
+    }
+  }
+}

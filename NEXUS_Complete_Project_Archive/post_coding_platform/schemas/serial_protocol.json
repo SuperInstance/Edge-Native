@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus-platform.org/schemas/serial_protocol.json",
+  "title": "NEXUS Platform - Serial Wire Protocol",
+  "description": "Defines the COBS-framed binary protocol for Jetson-ESP32 communication. All messages use this framing regardless of payload type.",
+  "type": "object",
+  "definitions": {
+    "frame_header": {
+      "type": "object",
+      "description": "6-byte frame header preceding every message.",
+      "properties": {
+        "msg_type": {
+          "type": "integer",
+          "description": "Message type identifier (1-50 reserved).",
+          "enum": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+        },
+        "length": { "type": "integer", "description": "Payload length in bytes (excluding header and CRC)." },
+        "seq_num": { "type": "integer", "description": "Monotonically increasing sequence number, wraps at 65535." },
+        "crc16": { "type": "integer", "description": "CRC-16/CCITT of header + payload." }
+      }
+    },
+    "message_types": {
+      "type": "array",
+      "description": "Complete list of defined message types.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "direction", "payload_type"],
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "direction": { "type": "string", "enum": ["esp_to_jetson", "jetson_to_esp", "both"] },
+          "payload_type": { "type": "string", "enum": ["json", "binary", "none"] },
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}
