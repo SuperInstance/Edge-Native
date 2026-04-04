@@ -1,0 +1,54 @@
+name: ESP32 Unit Tests
+
+on:
+  push:
+    paths:
+      - 'firmware/**'
+      - 'shared/**'
+      - 'tests/unit/firmware/**'
+      - 'CMakeLists.txt'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - 'shared/**'
+      - 'tests/unit/firmware/**'
+      - 'CMakeLists.txt'
+
+jobs:
+  host-tests:
+    name: VM Unit Tests (Host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Setup Unity test framework
+        run: |
+          mkdir -p third_party/unity/src
+          if [ ! -f third_party/unity/src/unity.c ]; then
+            echo "Unity framework not vendored — downloading"
+            curl -sL https://raw.githubusercontent.com/ThrowTheSwitch/Unity/master/src/unity.c \
+              -o third_party/unity/src/unity.c
+            curl -sL https://raw.githubusercontent.com/ThrowTheSwitch/Unity/master/src/unity.h \
+              -o third_party/unity/src/unity.h
+            curl -sL https://raw.githubusercontent.com/ThrowTheSwitch/Unity/master/src/unity_internals.h \
+              -o third_party/unity/src/unity_internals.h
+          fi
+
+      - name: Build host tests
+        run: |
+          mkdir -p build
+          cd build
+          cmake -DNEXUS_HOST_TEST=ON ..
+          make -j$(nproc)
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc)

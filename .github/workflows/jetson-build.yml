@@ -1,0 +1,44 @@
+name: Jetson Build & Lint
+
+on:
+  push:
+    paths:
+      - 'jetson/**'
+      - 'shared/bytecode/opcodes.py'
+  pull_request:
+    paths:
+      - 'jetson/**'
+      - 'shared/bytecode/opcodes.py'
+
+jobs:
+  lint:
+    name: Python Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install ruff mypy
+          pip install -r jetson/requirements.txt || true
+
+      - name: Ruff check
+        run: ruff check jetson/ shared/bytecode/opcodes.py
+
+      - name: Ruff format check
+        run: ruff format --check jetson/ shared/bytecode/opcodes.py
+
+      - name: Mypy type check
+        run: mypy jetson/ shared/bytecode/opcodes.py --ignore-missing-imports
+
+      - name: Import validation
+        run: |
+          python -c "import jetson.nexus_sdk; print(f'SDK version: {jetson.nexus_sdk.__version__}')"
+          python -c "from shared.bytecode.opcodes import Opcode, Instruction; print(f'Opcodes: {len(Opcode)}')"
+        env:
+          PYTHONPATH: .
