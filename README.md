@@ -64,6 +64,12 @@ Each tier operates independently. Tier 1 maintains control even when all higher 
 │   ├── reference/           # Glossary (310 terms), frameworks, law, bibliography (178 refs)
 │   └── developer-guide/     # Onboarding guide for new developers
 ├── a2a-native-language/     # A2A-native programming research (45K words)
+├── a2a-native-specs/        # A2A-native Rosetta Stone twin specs
+├── onboarding/              # Onboarding for research agents + A2A user education
+│   ├── research/            # Deep context maps, frontiers, methodology (45K words)
+│   └── user-education/      # Gamified intros, builder education, patterns (79K words)
+├── human-readable/          # Plain-language summaries for non-technical readers (27K words)
+├── worksheets-logs/         # Iteration worksheets, agent worklogs, session logs
 │   ├── language_design_and_semantics.md    # Language philosophy, 29 new opcodes, AAB format
 │   ├── assembly_mapping_and_hardware_bridge.md  # Xtensa/ARM64 mapping, unfiltered transfer
 │   ├── nexus_integration_analysis.md      # Backward compatibility, 12 wire protocol extensions
@@ -80,7 +86,10 @@ Each tier operates independently. Tier 1 maintains control even when all higher 
 
 NEXUS extends its bytecode VM into an **agent-first programming paradigm** where LLM agents are the primary authors, interpreters, and validators of control code. With the right system prompt (compiler), runtime (equipment), and hardware (vessel), any agent can actualize a user's intention directly to the capability of the underlying hardware.
 
-See [`a2a-native-language/`](./a2a-native-language/) for the full 45,000-word research corpus — 6 documents covering language design, assembly mapping, NEXUS integration, agent communication, cross-domain applicability, and a grand synthesis with 36-month roadmap.
+- **Research**: [`a2a-native-language/`](./a2a-native-language/) — 45,000-word research corpus (language design, hardware bridge, integration, communication, cross-domain, synthesis)
+- **Rosetta Stone**: [`a2a-native-specs/`](./a2a-native-specs/) — Agent-native twin of every production specification
+- **Builder Education**: [`onboarding/user-education/`](./onboarding/user-education/) — Gamified zero-shot education, builder toolkit, architecture patterns, use case scenarios
+- **Research Onboarding**: [`onboarding/research/`](./onboarding/research/) — Context maps, research frontiers, methodology, expansion guides
 
 ## Knowledge Base
 
@@ -106,6 +115,11 @@ Key resources:
 | Error codes | 75 |
 | MCU families evaluated | 13 |
 | A2A research documents | 6 (45,191 words) |
+| A2A-native Rosetta Stone specs | 8 (350K+ words) |
+| Research onboarding docs | 4 (45,100 words) |
+| A2A user education docs | 7 (78,500 words) |
+| Human-readable summaries | 3 (26,800 words) |
+| Total onboarding content | ~132,500 words |
 | Target domains | 8 |
 | Estimated build (3 devs, parallel) | 12 – 16 weeks |
 | Fastest path to demo | 8 weeks |

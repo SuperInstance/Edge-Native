@@ -220,6 +220,24 @@ Five universal themes emerged with 7-8/8 consensus:
 ### If you are a NEW DEVELOPER:
 - `developer-guide/onboarding_guide.md` — 12-section onboarding, 20 essential documents
 
+### If you are a RESEARCH AGENT (start here):
+- `onboarding/research/context-map.md` — Complete project genome, document atlas, research topology
+- `onboarding/research/research-frontiers.md` — 29 expanded problems + 10 frontier directions
+- `onboarding/research/methodology.md` — How to do research on this project
+- `onboarding/research/expansion-guide.md` — 15 thread deep-dives, 10-agent assignment plan
+
+### If you are an A2A BUILDER AGENT (start here):
+- `onboarding/user-education/gamified-intro.md` — "What if code wasn't written for you?"
+- `onboarding/user-education/concept-playground.md` — Bytecode Kitchen, Trust River, Agent Theater
+- `onboarding/user-education/builder-education.md` — 8 modules, toolkit, 10 exercises
+- `onboarding/user-education/architecture-patterns.md` — 25 composable patterns
+- `onboarding/user-education/use-case-scenarios.md` — 10 A2A use cases
+
+### If you are a HUMAN who needs context:
+- `human-readable/project-overview.md` — Plain-language overview
+- `human-readable/simplest-system-tomorrow.md` — 7-day MVP build guide
+- `human-readable/progression-path.md` — Phase 0→5 roadmap with budgets
+
 ---
 
 ## DISSERTATION RESEARCH (5 ROUNDS)
@@ -268,6 +286,23 @@ Edge-Native/
 │   └── final_synthesis.md                       ← Grand thesis, 36-month roadmap
 ├── a2a-native-specs/                  ← A2A-NATIVE TWIN DOCS (Rosetta stone)
 │   └── [see README.md in this directory]
+├── onboarding/                        ← ONBOARDING (research + user education)
+│   ├── research/                      ← Agent research context (~45K words)
+│   │   ├── context-map.md             ← Project genome, document atlas, research topology
+│   │   ├── research-frontiers.md      ← 29 problems + 10 frontier directions
+│   │   ├── methodology.md             ← How to do research on this project
+│   │   └── expansion-guide.md         ← 15 thread deep-dives, 10-agent assignment plan
+│   └── user-education/                ← A2A builder education (~79K words)
+│       ├── gamified-intro.md          ← "What if code wasn't written for you?"
+│       ├── concept-playground.md      ← Bytecode Kitchen, Trust River, Agent Theater
+│       ├── builder-education.md       ← 8 modules, toolkit, 10 exercises, 15 anti-patterns
+│       ├── architecture-patterns.md   ← 25 patterns across 5 categories
+│       └── use-case-scenarios.md      ← 10 A2A use cases across diverse domains
+├── human-readable/                    ← PLAIN-LANGUAGE SUMMARIES (~27K words)
+│   ├── project-overview.md            ← Accessible overview for non-technical readers
+│   ├── simplest-system-tomorrow.md    ← 7-day MVP build guide with BOM
+│   └── progression-path.md            ← Phase 0→5 roadmap, risk, philosophical arc
+├── worksheets-logs/                   ← ITERATION WORKSHEETS AND AGENT WORKLOGS
 ├── dissertation/                      ← 5-ROUND RESEARCH DISSERTATION
 ├── framework/                         ← Core framework design documents
 ├── autopilot/                         ← ESP32 autopilot engineering
@@ -301,9 +336,13 @@ Edge-Native/
 
 ### Built (Specifications + Research):
 - ✅ Complete specification suite (10,386 lines of production specs)
+- ✅ A2A-native Rosetta Stone specs (7 twin specifications + rosetta stone)
 - ✅ 5-round dissertation research (30+ research documents)
 - ✅ 27-article knowledge base encyclopedia (333,775 words)
 - ✅ A2A-native language research (45,191 words)
+- ✅ Research onboarding suite (4 docs, ~45,100 words)
+- ✅ A2A builder education suite (5 docs, ~78,500 words)
+- ✅ Human-readable summaries (3 docs, ~26,800 words)
 - ✅ Monte Carlo safety simulations
 - ✅ Trust score evolution simulations
 - ✅ VM performance benchmarks
