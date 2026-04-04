@@ -1,0 +1,68 @@
+{
+  "human_input": "When wind exceeds 25 knots, reduce throttle to 40%",
+  "phase1_nlp": {
+    "intent": "conditional_throttle",
+    "confidence": 0.94,
+    "entities_count": 5,
+    "parse_time_ms": 783.1093418954555
+  },
+  "phase2_safety": {
+    "passed": true,
+    "rules_checked": 10,
+    "violations_caught": 0,
+    "catch_rate": 0.95,
+    "validation_time_ms": 435.80904623802843
+  },
+  "phase3_ab_test": {
+    "baseline_mean": 0.6501684808129293,
+    "treatment_mean": 0.7183152296701112,
+    "n_baseline": 18000,
+    "n_treatment": 18000,
+    "bayes_factor": 10000000000.0,
+    "posterior_prob": 1.0,
+    "p_value": 0.0,
+    "power": 1.0,
+    "significant": true,
+    "total_time_s": 3600.0
+  },
+  "phase4_deploy": {
+    "bytecode_size": 56,
+    "instructions": 7,
+    "total_cycles": 12,
+    "cycle_budget_pct": 0.12,
+    "cobs_overhead_bytes": 2,
+    "wire_frame_size": 74,
+    "uart_tx_ms": 6.423611111111111,
+    "esp32_verified": true
+  },
+  "phase5_execution": {
+    "duration_s": 120.0,
+    "wind_events": 504,
+    "accuracy": 1.0,
+    "mean_latency_us": 44.070654723431666,
+    "p99_latency_us": 117.37019109469148,
+    "control_mse": 3.448715249420354,
+    "cpu_utilization_pct": 0.003966666666666666,
+    "memory_utilization_pct": 0.022536057692307692
+  },
+  "phase6_trust": {
+    "trust_before": 0.65,
+    "trust_after": 0.9583,
+    "trust_delta": 0.3083,
+    "level_before": 3,
+    "level_after": 5,
+    "level_changed": true
+  },
+  "latency_budget": {
+    "phase1_ms": 783.11,
+    "phase2_ms": 435.81,
+    "phase3_baseline_s": 1800.0,
+    "phase3_test_s": 1800.0,
+    "phase4_compile_ms": 6.83,
+    "phase4_uart_ms": 6.424,
+    "phase5_latency_us": 44.1,
+    "phase6_ms": 8.85,
+    "one_shot_ms": 1232.18,
+    "wall_clock_min": 60.0
+  }
+}

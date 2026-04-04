@@ -1,0 +1,24 @@
+# Dependencies and build artifacts
+node_modules/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.log
+coredump
+
+# Large binary caches (keep archives/)
+*.zip~

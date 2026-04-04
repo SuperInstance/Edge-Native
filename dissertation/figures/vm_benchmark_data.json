@@ -1,0 +1,239 @@
+{
+  "patterns": {
+    "PID Controller (1x)": {
+      "cycles": 95,
+      "instructions": 10,
+      "max_stack_depth": 3,
+      "error": null,
+      "icache_hits": 9,
+      "icache_misses": 1,
+      "time_us": 0.3958333333333333,
+      "memory_accesses": {
+        "stack_reads": 10,
+        "stack_writes": 10,
+        "variable_reads": 0,
+        "variable_writes": 0,
+        "sensor_reads": 1,
+        "actuator_writes": 1,
+        "instruction_reads": 10
+      }
+    },
+    "PID Controller (4x)": {
+      "cycles": 368,
+      "instructions": 37,
+      "max_stack_depth": 3,
+      "error": null,
+      "icache_hits": 33,
+      "icache_misses": 4,
+      "time_us": 1.5333333333333334,
+      "memory_accesses": {
+        "stack_reads": 40,
+        "stack_writes": 40,
+        "variable_reads": 0,
+        "variable_writes": 0,
+        "sensor_reads": 4,
+        "actuator_writes": 4,
+        "instruction_reads": 37
+      }
+    },
+    "State Machine (3 states)": {
+      "cycles": 64,
+      "instructions": 11,
+      "max_stack_depth": 3,
+      "error": null,
+      "icache_hits": 7,
+      "icache_misses": 4,
+      "time_us": 0.26666666666666666,
+      "memory_accesses": {
+        "stack_reads": 8,
+        "stack_writes": 7,
+        "variable_reads": 1,
+        "variable_writes": 0,
+        "sensor_reads": 1,
+        "actuator_writes": 0,
+        "instruction_reads": 11
+      }
+    },
+    "Threshold Detector (5)": {
+      "cycles": 160,
+      "instructions": 33,
+      "max_stack_depth": 3,
+      "error": null,
+      "icache_hits": 29,
+      "icache_misses": 4,
+      "time_us": 0.6666666666666666,
+      "memory_accesses": {
+        "stack_reads": 26,
+        "stack_writes": 21,
+        "variable_reads": 0,
+        "variable_writes": 0,
+        "sensor_reads": 1,
+        "actuator_writes": 5,
+        "instruction_reads": 33
+      }
+    },
+    "Rate Limiter (4 ch)": {
+      "cycles": 357,
+      "instructions": 65,
+      "max_stack_depth": 4,
+      "error": null,
+      "icache_hits": 58,
+      "icache_misses": 7,
+      "time_us": 1.4875,
+      "memory_accesses": {
+        "stack_reads": 60,
+        "stack_writes": 56,
+        "variable_reads": 16,
+        "variable_writes": 4,
+        "sensor_reads": 4,
+        "actuator_writes": 4,
+        "instruction_reads": 65
+      }
+    },
+    "Signal Filter (4 tap)": {
+      "cycles": 137,
+      "instructions": 26,
+      "max_stack_depth": 3,
+      "error": null,
+      "icache_hits": 23,
+      "icache_misses": 3,
+      "time_us": 0.5708333333333333,
+      "memory_accesses": {
+        "stack_reads": 24,
+        "stack_writes": 24,
+        "variable_reads": 6,
+        "variable_writes": 4,
+        "sensor_reads": 2,
+        "actuator_writes": 1,
+        "instruction_reads": 26
+      }
+    }
+  },
+  "scaling": {
+    "sizes": [
+      10,
+      50,
+      100,
+      200,
+      500
+    ],
+    "bytecode": [
+      47,
+      251,
+      501,
+      1014,
+      2558
+    ],
+    "native": [
+      40,
+      200,
+      400,
+      800,
+      2000
+    ],
+    "json": [
+      13900,
+      49500,
+      94000,
+      183000,
+      450000
+    ],
+    "bytecode_us": [
+      0.19583333333333333,
+      1.0458333333333334,
+      2.0875,
+      4.225,
+      10.658333333333333
+    ],
+    "native_us": [
+      0.16666666666666666,
+      0.8333333333333334,
+      1.6666666666666667,
+      3.3333333333333335,
+      8.333333333333334
+    ],
+    "json_us": [
+      57.916666666666664,
+      206.25,
+      391.6666666666667,
+      762.5,
+      1875.0
+    ]
+  },
+  "boundary": {
+    "Stack Overflow": {
+      "cycles": 1102,
+      "instructions": 257,
+      "max_stack_depth": 256,
+      "error": "ERR_STACK_OVERFLOW",
+      "memory_accesses": {
+        "stack_reads": 0,
+        "stack_writes": 256,
+        "variable_reads": 0,
+        "variable_writes": 0,
+        "sensor_reads": 0,
+        "actuator_writes": 0,
+        "instruction_reads": 257
+      },
+      "icache_hits": 231,
+      "icache_misses": 26,
+      "time_us": 4.591666666666667
+    },
+    "Cycle Budget Exceeded": {
+      "cycles": 7,
+      "instructions": 2,
+      "max_stack_depth": 1,
+      "error": "ERR_STACK_UNDERFLOW",
+      "memory_accesses": {
+        "stack_reads": 1,
+        "stack_writes": 1,
+        "variable_reads": 0,
+        "variable_writes": 0,
+        "sensor_reads": 0,
+        "actuator_writes": 0,
+        "instruction_reads": 2
+      },
+      "icache_hits": 1,
+      "icache_misses": 1,
+      "time_us": 0.029166666666666667
+    },
+    "Division by Zero": {
+      "cycles": 27,
+      "instructions": 5,
+      "max_stack_depth": 2,
+      "error": null,
+      "memory_accesses": {
+        "stack_reads": 3,
+        "stack_writes": 3,
+        "variable_reads": 0,
+        "variable_writes": 0,
+        "sensor_reads": 0,
+        "actuator_writes": 1,
+        "instruction_reads": 5
+      },
+      "icache_hits": 4,
+      "icache_misses": 1,
+      "time_us": 0.1125,
+      "actuator_output": 0.0,
+      "div_by_zero_safe": true
+    },
+    "Call Depth Exceeded": {
+      "cycles": 112,
+      "instructions": 17,
+      "max_stack_depth": 0,
+      "error": "ERR_CALL_DEPTH_EXCEEDED",
+      "memory_accesses": {
+        "stack_reads": 0,
+        "stack_writes": 0,
+        "variable_reads": 0,
+        "variable_writes": 0,
+        "sensor_reads": 0,
+        "actuator_writes": 0,
+        "instruction_reads": 17
+      },
+      "icache_hits": 0,
+      "icache_misses": 17,
+      "time_us": 0.4666666666666667
+    }
+  }
+}

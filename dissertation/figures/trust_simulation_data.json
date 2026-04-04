@@ -1,0 +1,61 @@
+{
+  "subsystem_results": {
+    "steering": {
+      "final_trust": 1.0,
+      "final_level": 5,
+      "max_trust": 1.0,
+      "alpha_multiplier": 0.8,
+      "risk_category": "critical"
+    },
+    "engine": {
+      "final_trust": 1.0,
+      "final_level": 5,
+      "max_trust": 1.0,
+      "alpha_multiplier": 1.2,
+      "risk_category": "medium"
+    },
+    "navigation": {
+      "final_trust": 0.979,
+      "final_level": 5,
+      "max_trust": 1.0,
+      "alpha_multiplier": 0.6,
+      "risk_category": "high"
+    },
+    "lights": {
+      "final_trust": 1.0,
+      "final_level": 5,
+      "max_trust": 1.0,
+      "alpha_multiplier": 2.0,
+      "risk_category": "low"
+    },
+    "communications": {
+      "final_trust": 1.0,
+      "final_level": 5,
+      "max_trust": 1.0,
+      "alpha_multiplier": 0.7,
+      "risk_category": "high"
+    }
+  },
+  "parameter_summary": {
+    "alpha_gain": 0.002,
+    "alpha_loss": 0.05,
+    "alpha_decay": 0.0001,
+    "t_floor": 0.2,
+    "quality_cap": 10,
+    "evaluation_window_hours": 1.0,
+    "severity_exponent": 1.0,
+    "streak_bonus": 5e-05,
+    "min_events_for_gain": 1,
+    "reset_grace_hours": 24.0,
+    "promotion_cooldown_hours": 72.0,
+    "n_penalty_slope": 0.1
+  },
+  "level_thresholds": {
+    "0": 0.0,
+    "1": 0.2,
+    "2": 0.4,
+    "3": 0.6,
+    "4": 0.8,
+    "5": 0.95
+  }
+}

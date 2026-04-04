@@ -1,0 +1,95 @@
+{
+  "config": {
+    "n_iterations": 1000,
+    "duration_s": 60.0,
+    "dt_ms": 10,
+    "spec_version": "NEXUS-SS-001 v2.0.0"
+  },
+  "scenarios": {
+    "Low Stress (0.5x)": {
+      "config": {
+        "heartbeat_drop_prob": 0.005,
+        "kill_switch_press_rate": 5e-05,
+        "overcurrent_fault_rate": 2.5e-05,
+        "task_hang_rate": 0.0001,
+        "supervisor_hang_rate": 1e-05
+      },
+      "results": {
+        "mean_availability_pct": 98.53463333333333,
+        "std_availability_pct": 2.755598841752309,
+        "fault_count": 0,
+        "fault_rate_pct": 0.0,
+        "mean_hb_safe_state_ms": null,
+        "mean_kill_switch_ms": 0.9272457024805368
+      }
+    },
+    "Nominal (1.0x)": {
+      "config": {
+        "heartbeat_drop_prob": 0.01,
+        "kill_switch_press_rate": 0.0001,
+        "overcurrent_fault_rate": 5e-05,
+        "task_hang_rate": 0.0002,
+        "supervisor_hang_rate": 2e-05
+      },
+      "results": {
+        "mean_availability_pct": 97.05971666666666,
+        "std_availability_pct": 3.8174450120102876,
+        "fault_count": 0,
+        "fault_rate_pct": 0.0,
+        "mean_hb_safe_state_ms": null,
+        "mean_kill_switch_ms": 0.954235031831419
+      }
+    },
+    "High Stress (2.0x)": {
+      "config": {
+        "heartbeat_drop_prob": 0.02,
+        "kill_switch_press_rate": 0.0002,
+        "overcurrent_fault_rate": 0.0001,
+        "task_hang_rate": 0.0004,
+        "supervisor_hang_rate": 4e-05
+      },
+      "results": {
+        "mean_availability_pct": 94.41011666666665,
+        "std_availability_pct": 4.982880708290693,
+        "fault_count": 0,
+        "fault_rate_pct": 0.0,
+        "mean_hb_safe_state_ms": null,
+        "mean_kill_switch_ms": 0.9695182550864512
+      }
+    },
+    "Extreme (5.0x)": {
+      "config": {
+        "heartbeat_drop_prob": 0.05,
+        "kill_switch_press_rate": 0.0005,
+        "overcurrent_fault_rate": 0.00025,
+        "task_hang_rate": 0.001,
+        "supervisor_hang_rate": 0.0001
+      },
+      "results": {
+        "mean_availability_pct": 87.31446666666668,
+        "std_availability_pct": 6.777101325952137,
+        "fault_count": 0,
+        "fault_rate_pct": 0.0,
+        "mean_hb_safe_state_ms": null,
+        "mean_kill_switch_ms": 1.0015723080479688
+      }
+    },
+    "Heartbeat Storm": {
+      "config": {
+        "heartbeat_drop_prob": 0.1,
+        "kill_switch_press_rate": 0.0001,
+        "overcurrent_fault_rate": 5e-05,
+        "task_hang_rate": 0.0002,
+        "supervisor_hang_rate": 2e-05
+      },
+      "results": {
+        "mean_availability_pct": 97.05518333333332,
+        "std_availability_pct": 3.8182951503619758,
+        "fault_count": 0,
+        "fault_rate_pct": 0.0,
+        "mean_hb_safe_state_ms": null,
+        "mean_kill_switch_ms": 0.9576271721024635
+      }
+    }
+  }
+}
