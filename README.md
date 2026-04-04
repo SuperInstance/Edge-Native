@@ -55,11 +55,24 @@ Each tier operates independently. Tier 1 maintains control even when all higher 
 │   ├── round1-4/            # Iterative research rounds
 │   ├── final/               # Final synthesis documents
 │   └── phase2_discussions/  # Deep-dive discussions
+├── a2a-native-language/     # A2A-native programming research (45K words)
+│   ├── language_design_and_semantics.md    # Language philosophy, 29 new opcodes, AAB format
+│   ├── assembly_mapping_and_hardware_bridge.md  # Xtensa/ARM64 mapping, unfiltered transfer
+│   ├── nexus_integration_analysis.md      # Backward compatibility, 12 wire protocol extensions
+│   ├── agent_communication_and_runtime_model.md  # Agent protocol, equipment runtime, vessel model
+│   ├── cross_domain_a2a_applicability.md  # 8-domain analysis, regulatory, trust calibration
+│   └── final_synthesis.md                 # Grand thesis, Three Pillars, 36-month roadmap
 ├── v31-docs/                # v3.1 documentation set
 ├── addenda/                 # Engineering addenda (pitfalls, checklists, playbooks)
 ├── schemas/                 # JSON schemas for configuration
 └── archives/                # Complete project zip archives
 ```
+
+## A2A-Native Programming
+
+NEXUS extends its bytecode VM into an **agent-first programming paradigm** where LLM agents are the primary authors, interpreters, and validators of control code. With the right system prompt (compiler), runtime (equipment), and hardware (vessel), any agent can actualize a user's intention directly to the capability of the underlying hardware.
+
+See [`a2a-native-language/`](./a2a-native-language/) for the full 45,000-word research corpus — 6 documents covering language design, assembly mapping, NEXUS integration, agent communication, cross-domain applicability, and a grand synthesis with 36-month roadmap.
 
 ## Key Numbers
 
@@ -68,12 +81,15 @@ Each tier operates independently. Tier 1 maintains control even when all higher 
 | Specification files | 21 |
 | Total specification lines | ~19,200 |
 | Architecture decision records | 28 |
-| VM opcodes | 32 |
-| Wire protocol message types | 28 |
+| VM opcodes | 32 (+ 29 proposed A2A extensions) |
+| Wire protocol message types | 28 (+ 12 proposed A2A extensions) |
 | Error codes | 75 |
 | MCU families evaluated | 13 |
+| A2A research documents | 6 (45,191 words) |
+| Target domains | 8 |
 | Estimated build (3 devs, parallel) | 12 – 16 weeks |
 | Fastest path to demo | 8 weeks |
+| A2A migration path | 32 weeks (3 phases) |
 
 ## Compliance Targets
 
