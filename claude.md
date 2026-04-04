@@ -10,6 +10,42 @@ NEXUS is a distributed intelligence platform for industrial robotics where LLM a
 
 ---
 
+## IF YOU ARE CLAUDE CODE AND YOU ARE HERE TO BUILD
+
+Stop. Read these three files in this exact order before writing any code:
+
+1. **`roadmap.md`** — The master build plan. 6 phases, 20 sprints, 5 milestones. Tells you WHAT to build and WHEN. Read the whole thing.
+
+2. **`claude-build/build-specification.md`** — The component-by-component build manual. Tells you HOW to build each piece: exact C struct definitions, opcode implementations, wire protocol byte layouts, trust algorithm formulas, test vectors. This is your day-to-day reference while coding.
+
+3. **`specs/00_MASTER_INDEX.md`** — The index into all production specifications. These are the SOURCE OF TRUTH. When your code disagrees with a spec, the spec wins.
+
+Then, for the component you're currently building, read the corresponding spec file:
+- Building the VM? → `specs/firmware/reflex_bytecode_vm_spec.md`
+- Building the wire protocol? → `specs/protocol/wire_protocol_spec.md`
+- Building safety? → `specs/safety/safety_system_spec.md`
+- Building trust? → `specs/safety/trust_score_algorithm_spec.md`
+- Building the compiler? → `specs/jetson/learning_pipeline_spec.md`
+- Building A2A-native features? → `a2a-native-specs/bytecode_vm_a2a_native.md`
+
+**The build order is:** Dev Environment → VM Core → Wire Protocol → Reflex Compiler → Safety Layer → Trust Engine → Validation Framework → LLM Pipeline → Pattern Discovery → A/B Testing → Marine Domain → AAB Format → A2A Opcodes → Agent Comms → Fleet Protocol → Cloud Services.
+
+**10 rules you must never break:**
+1. Zero heap on ESP32. No malloc. No free. Static allocation only.
+2. Trust score gates all deployments. No exceptions.
+3. All actuator writes must pass through CLAMP_F.
+4. All jumps must be bounds-checked.
+5. Safety is architecture, not a feature. Four tiers, always.
+6. Specs are truth. Code matches specs. Not the other way.
+7. Deterministic execution. Same input → same output in same cycles.
+8. No compiler warnings. `-Wall -Wextra -Werror`.
+9. Every component has unit tests that pass before integration.
+10. Every PR preserves all four-tier safety invariants.
+
+If you need philosophical context, read `incubator/manifesto.md`. If you need to understand the research behind a decision, read `knowledge-base/`. If you need to understand the A2A paradigm deeply, read `a2a-native-language/final_synthesis.md`. But for building — `roadmap.md` + `claude-build/build-specification.md` + `specs/` is all you need.
+
+---
+
 ## THE CORE IDEA (THE RIBOSOME, NOT THE BRAIN)
 
 Most robotics platforms put intelligence in the center (the "brain") and the limbs are dumb actuators. NEXUS inverts this: intelligence is distributed to the periphery. Each limb runs a bytecode virtual machine on an ESP32-S3 microcontroller that executes reflex programs at 1ms ticks. The Jetson Orin Nano provides AI cognition (pattern discovery, natural language, reflex synthesis) but the ESP32 maintains control even when ALL higher tiers fail. Like a biological ribosome, which translates mRNA into proteins WITHOUT understanding — the ESP32 executes bytecode without any comprehension. Like the brain, which plans and learns — the Jetson synthesizes new reflexes and improves existing ones.
@@ -256,7 +292,11 @@ In `dissertation/`:
 ```
 Edge-Native/
 ├── claude.md                          ← YOU ARE HERE
+├── roadmap.md                        ← MASTER BUILD PLAN (read first to build)
 ├── README.md                          ← Project overview
+├── claude-build/                      ← BUILD SPECIFICATIONS FOR CLAUDE CODE
+│   ├── README.md                      ← Start here if you're building
+│   └── build-specification.md         ← Component-by-component build manual
 ├── specs/                             ← PRODUCTION SPECIFICATIONS (read these for engineering)
 │   ├── 00_MASTER_INDEX.md             ← Start here for specs
 │   ├── firmware/reflex_bytecode_vm_spec.md      ← 32-opcode VM (2,487 lines)
@@ -303,6 +343,9 @@ Edge-Native/
 │   ├── simplest-system-tomorrow.md    ← 7-day MVP build guide with BOM
 │   └── progression-path.md            ← Phase 0→5 roadmap, risk, philosophical arc
 ├── worksheets-logs/                   ← ITERATION WORKSHEETS AND AGENT WORKLOGS
+├── incubator/                         ← EDGEWARE INCUBATOR (philosophy + framework)
+│   ├── README.md                      ← What is the incubator, how to contribute
+│   └── manifesto.md                   ← The 10 principles of edge-native intelligence
 ├── dissertation/                      ← 5-ROUND RESEARCH DISSERTATION
 ├── framework/                         ← Core framework design documents
 ├── autopilot/                         ← ESP32 autopilot engineering

@@ -70,6 +70,9 @@ Each tier operates independently. Tier 1 maintains control even when all higher 
 │   └── user-education/      # Gamified intros, builder education, patterns (79K words)
 ├── human-readable/          # Plain-language summaries for non-technical readers (27K words)
 ├── worksheets-logs/         # Iteration worksheets, agent worklogs, session logs
+├── claude-build/             # Build specifications for Claude Code (Claude Code starts here)
+├── incubator/               # Edgeware Incubator — philosophy, manifesto, contribution guide
+├── a2a-native-language/     # A2A-native programming research (45K words)
 │   ├── language_design_and_semantics.md    # Language philosophy, 29 new opcodes, AAB format
 │   ├── assembly_mapping_and_hardware_bridge.md  # Xtensa/ARM64 mapping, unfiltered transfer
 │   ├── nexus_integration_analysis.md      # Backward compatibility, 12 wire protocol extensions
@@ -81,6 +84,20 @@ Each tier operates independently. Tier 1 maintains control even when all higher 
 ├── schemas/                 # JSON schemas for configuration
 └── archives/                # Complete project zip archives
 ```
+
+## Build the System
+
+[**roadmap.md**](./roadmap.md) — Master build plan: 6 phases, 20 sprints, 5 milestones, $2.6M over 36 months.
+
+[**claude-build/**](./claude-build/) — Component-by-component build specification for Claude Code. Struct definitions, opcode implementations, test vectors, the works.
+
+**Quick start for Claude Code:** Read `claude.md` → `roadmap.md` → `claude-build/build-specification.md` → start with Phase 0 Sprint 0.1.
+
+## Edgeware Incubator
+
+NEXUS is the reference implementation for the [Edge-Native Edgeware Incubator](./incubator/) — a framework for designing, building, and evolving edge-native AI systems. Read the [manifesto](./incubator/manifesto.md) for the 10 principles.
+
+---
 
 ## A2A-Native Programming
 
