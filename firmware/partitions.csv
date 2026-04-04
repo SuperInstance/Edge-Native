@@ -1,0 +1,9 @@
+# NEXUS ESP32-S3 Partition Table
+# Per specs/firmware/memory_map_and_partitions.md
+# Name,     Type, SubType, Offset,   Size,    Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+ota_0,      app,  ota_0,   0x10000,  0x1C0000,
+ota_1,      app,  ota_1,   0x1D0000, 0x1C0000,
+nvs_keys,   data, nvs_keys,0x390000, 0x1000,
+nexus_data, data, fat,     0x391000, 0x46F000,

@@ -1,0 +1,29 @@
+# NEXUS Jetson SDK Dependencies
+# Per claude-build/build-specification.md
+
+# Wire protocol
+pyserial>=3.5
+
+# LLM inference
+llama-cpp-python>=0.2.0
+
+# Fleet communication
+grpcio>=1.66
+grpcio-tools>=1.66
+protobuf>=4.25
+
+# MQTT
+paho-mqtt>=2.1
+
+# Scientific computing
+numpy>=1.26
+scipy>=1.12
+
+# Visualization (dev/test only)
+matplotlib>=3.8
+
+# Code quality
+ruff>=0.3.0
+mypy>=1.9.0
+pytest>=8.0
+pytest-cov>=4.1

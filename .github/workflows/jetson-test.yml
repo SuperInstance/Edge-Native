@@ -1,0 +1,37 @@
+name: Jetson Tests
+
+on:
+  push:
+    paths:
+      - 'jetson/**'
+      - 'shared/**'
+      - 'tests/unit/jetson/**'
+  pull_request:
+    paths:
+      - 'jetson/**'
+      - 'shared/**'
+      - 'tests/unit/jetson/**'
+
+jobs:
+  test:
+    name: Pytest Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pytest-cov numpy scipy
+          pip install -r jetson/requirements.txt || true
+
+      - name: Run tests
+        run: |
+          pytest tests/unit/jetson/ -v --cov=jetson --cov=shared \
+            --cov-report=term-missing --cov-fail-under=80
+        env:
+          PYTHONPATH: .

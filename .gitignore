@@ -22,3 +22,24 @@ coredump
 
 # Large binary caches (keep archives/)
 *.zip~
+
+# Build artifacts
+build/
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# ESP-IDF
+firmware/managed_components/
+
+# Python
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+
+# Environment
+.env
+*.env.local
