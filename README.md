@@ -55,6 +55,14 @@ Each tier operates independently. Tier 1 maintains control even when all higher 
 │   ├── round1-4/            # Iterative research rounds
 │   ├── final/               # Final synthesis documents
 │   └── phase2_discussions/  # Deep-dive discussions
+├── knowledge-base/          # Encyclopedic knowledge base (333K words)
+│   ├── foundations/         # History, VMs, biology, culture, paradigms
+│   ├── theory/              # Agents, evolution, verification, synthesis, self-org, types
+│   ├── philosophy/          # AI consciousness, trust psychology, post-coding
+│   ├── systems/             # Embedded, distributed, robotics, edge AI, HW/SW co-design
+│   ├── domains/             # Marine systems, maritime navigation history
+│   ├── reference/           # Glossary (310 terms), frameworks, law, bibliography (178 refs)
+│   └── developer-guide/     # Onboarding guide for new developers
 ├── a2a-native-language/     # A2A-native programming research (45K words)
 │   ├── language_design_and_semantics.md    # Language philosophy, 29 new opcodes, AAB format
 │   ├── assembly_mapping_and_hardware_bridge.md  # Xtensa/ARM64 mapping, unfiltered transfer
@@ -74,6 +82,18 @@ NEXUS extends its bytecode VM into an **agent-first programming paradigm** where
 
 See [`a2a-native-language/`](./a2a-native-language/) for the full 45,000-word research corpus — 6 documents covering language design, assembly mapping, NEXUS integration, agent communication, cross-domain applicability, and a grand synthesis with 36-month roadmap.
 
+## Knowledge Base
+
+A Wikipedia-grade encyclopedia of 27 articles (333,775 words) covering the full breadth of knowledge a NEXUS developer needs — from the history of programming languages to maritime navigation law, from the philosophy of consciousness to the specifications of the ESP32-S3.
+
+**Start here**: [`knowledge-base/developer-guide/onboarding_guide.md`](./knowledge-base/developer-guide/onboarding_guide.md)
+
+Key resources:
+- [`knowledge-base/reference/nexus_glossary.md`](./knowledge-base/reference/nexus_glossary.md) — 310 terms with NEXUS context
+- [`knowledge-base/reference/open_problems_catalog.md`](./knowledge-base/reference/open_problems_catalog.md) — 29 unsolved problems
+- [`knowledge-base/reference/annotated_bibliography.md`](./knowledge-base/reference/annotated_bibliography.md) — 178 references
+- [`knowledge-base/README.md`](./knowledge-base/README.md) — Full article index
+
 ## Key Numbers
 
 | Metric | Value |
@@ -90,6 +110,11 @@ See [`a2a-native-language/`](./a2a-native-language/) for the full 45,000-word re
 | Estimated build (3 devs, parallel) | 12 – 16 weeks |
 | Fastest path to demo | 8 weeks |
 | A2A migration path | 32 weeks (3 phases) |
+| Knowledge base articles | 27 |
+| Knowledge base words | ~334,000 |
+| Glossary terms | 310 |
+| Annotated references | 178 |
+| Open problems cataloged | 29 |
 
 ## Compliance Targets
 
