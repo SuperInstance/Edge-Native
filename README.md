@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/specs-21%20production-brightgreen" alt="Specs">
+  <img src="https://img.shields.io/badge/specs-10%20production-brightgreen" alt="Specs">
   <img src="https://img.shields.io/badge/specs-19.2K%20lines-blue" alt="Spec Lines">
   <img src="https://img.shields.io/badge/ADRs-28-purple" alt="ADRs">
   <img src="https://img.shields.io/badge/opcodes-32%20core%20%2B%2029%20A2A-orange" alt="Opcodes">
@@ -17,9 +17,9 @@
 
 ## Overview
 
-NEXUS Edge-Native is the **definitive specification and knowledge repository** for the NEXUS distributed intelligence platform — a system where LLM agents, not humans, are the primary authors of control code. This repository contains everything needed to understand, specify, build, and deploy edge-native AI systems: 21 production specification files (~19,200 lines), 28 architecture decision records, a 333,775-word knowledge base encyclopedia, a 5-round research dissertation with Monte Carlo simulations, A2A-native programming language research, and a complete build roadmap spanning 6 phases, 20 sprints, and $2.6M over 36 months.
+NEXUS Edge-Native is the **definitive specification and knowledge repository** for the NEXUS distributed intelligence platform — a system where LLM agents, not humans, are the primary authors of control code. This repository contains everything needed to understand, specify, build, and deploy edge-native AI systems: 10 production specification files (~19,200 lines), 28 architecture decision records, a 333,775-word knowledge base encyclopedia, a 5-round research dissertation with Monte Carlo simulations, A2A-native programming language research, and a complete build roadmap spanning 6 phases, 20 sprints, and $2.6M over 36 months.
 
-Where the companion [nexus-runtime](https://github.com/nexus-platform/nexus-runtime) repository contains the *executable code*, Edge-Native contains the *authoritative specifications* — every opcode, every wire frame, every trust parameter, every safety rule. If code disagrees with these specs, the specs win.
+Where the companion [nexus-runtime](https://github.com/SuperInstance/nexus-runtime) repository contains the *executable code*, Edge-Native contains the *authoritative specifications* — every opcode, every wire frame, every trust parameter, every safety rule. If code disagrees with these specs, the specs win.
 
 The platform inverts the conventional robotics paradigm. Rather than centralizing intelligence in a "brain" with dumb actuators, NEXUS distributes cognition to the periphery. Each limb runs a bytecode VM on an ESP32-S3 that executes reflex programs at 1ms ticks. The Jetson provides AI cognition — pattern discovery, natural language reflex synthesis, A/B testing — but the ESP32 maintains safe control even when ALL higher tiers fail. Like a biological ribosome translating mRNA into proteins without understanding, the ESP32 executes bytecode without comprehension.
 
@@ -157,7 +157,7 @@ cat roadmap.md
 
 ```bash
 # Explore specifications
-ls specs/                          # 21 production specs
+ls specs/                          # 10 production specs
 ls specs/firmware/                 # VM, drivers, memory map
 ls specs/protocol/                 # Wire protocol, payloads
 ls specs/safety/                   # Trust algorithm, safety policy
@@ -188,7 +188,7 @@ cat a2a-native-language/final_synthesis.md
 ## Repository Structure
 
 ```
-├── specs/                   # ★ 21 production specifications (~19,200 lines)
+├── specs/                   # ★ 10 production specifications (~19,200 lines)
 │   ├── protocol/            # Wire protocol spec, message payloads (JSON)
 │   ├── safety/              # Safety system, trust scores, safety policy (JSON)
 │   ├── firmware/            # Bytecode VM, I/O drivers, memory map
@@ -364,7 +364,7 @@ Key resources:
 
 | Metric | Value |
 |--------|-------|
-| Specification files | 21 |
+| Specification files | 10 |
 | Total specification lines | ~19,200 |
 | Architecture decision records | 28 |
 | VM opcodes | 32 (+ 29 proposed A2A extensions) |
