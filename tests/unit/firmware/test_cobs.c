@@ -121,6 +121,73 @@ void test_cobs_dst_too_small(void)
     TEST_ASSERT_EQUAL(0, len);
 }
 
+void test_cobs_encode_exact_buffer(void)
+{
+    /* Encoding must succeed when dst is exactly the minimum required size.
+     * Previously, the buffer-fullness check fired one byte early, rejecting
+     * valid output that filled the buffer exactly. */
+
+    /* 1 non-zero byte -> encoded len 2, dst_max = 2 */
+    {
+        uint8_t src[] = { 0x42 };
+        uint8_t enc[2];
+        uint8_t dec[2];
+        size_t enc_len = cobs_encode(src, 1, enc, sizeof(enc));
+        TEST_ASSERT_EQUAL(2, enc_len);
+        size_t dec_len = cobs_decode(enc, enc_len, dec, sizeof(dec));
+        TEST_ASSERT_EQUAL(1, dec_len);
+        TEST_ASSERT_EQUAL_UINT8(0x42, dec[0]);
+    }
+
+    /* 3 non-zero bytes -> encoded len 4, dst_max = 4 */
+    {
+        uint8_t src[] = { 0x01, 0x02, 0x03 };
+        uint8_t enc[4];
+        uint8_t dec[4];
+        size_t enc_len = cobs_encode(src, 3, enc, sizeof(enc));
+        TEST_ASSERT_EQUAL(4, enc_len);
+        size_t dec_len = cobs_decode(enc, enc_len, dec, sizeof(dec));
+        TEST_ASSERT_EQUAL(3, dec_len);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(src, dec, 3);
+    }
+
+    /* 1 zero byte -> encoded len 2, dst_max = 2 */
+    {
+        uint8_t src[] = { 0x00 };
+        uint8_t enc[2];
+        uint8_t dec[2];
+        size_t enc_len = cobs_encode(src, 1, enc, sizeof(enc));
+        TEST_ASSERT_EQUAL(2, enc_len);
+        size_t dec_len = cobs_decode(enc, enc_len, dec, sizeof(dec));
+        TEST_ASSERT_EQUAL(1, dec_len);
+        TEST_ASSERT_EQUAL_UINT8(0x00, dec[0]);
+    }
+
+    /* Mixed with zeros: 5 bytes -> encoded len 6, dst_max = 6 */
+    {
+        uint8_t src[] = { 0x01, 0x00, 0x02, 0x00, 0x03 };
+        uint8_t enc[6];
+        uint8_t dec[6];
+        size_t enc_len = cobs_encode(src, 5, enc, sizeof(enc));
+        TEST_ASSERT_EQUAL(6, enc_len);
+        size_t dec_len = cobs_decode(enc, enc_len, dec, sizeof(dec));
+        TEST_ASSERT_EQUAL(5, dec_len);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(src, dec, 5);
+    }
+
+    /* All zeros: 3 bytes -> encoded len 4, dst_max = 4 */
+    {
+        uint8_t src[] = { 0x00, 0x00, 0x00 };
+        uint8_t enc[4];
+        uint8_t dec[4];
+        size_t enc_len = cobs_encode(src, 3, enc, sizeof(enc));
+        TEST_ASSERT_EQUAL(4, enc_len);
+        size_t dec_len = cobs_decode(enc, enc_len, dec, sizeof(dec));
+        TEST_ASSERT_EQUAL(3, dec_len);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(src, dec, 3);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -133,6 +200,7 @@ int main(void)
     RUN_TEST(test_cobs_single_zero);
     RUN_TEST(test_cobs_single_nonzero);
     RUN_TEST(test_cobs_dst_too_small);
+    RUN_TEST(test_cobs_encode_exact_buffer);
 
     return UNITY_END();
 }

@@ -25,16 +25,16 @@ size_t cobs_encode(const uint8_t *src, size_t src_len,
             dst[code_idx] = code;
             code = 0x01;
             code_idx = dst_idx++;
-            if (dst_idx >= dst_max) return 0;
+            if (dst_idx >= dst_max && src_idx + 1 < src_len) return 0;
         } else {
             dst[dst_idx++] = src[src_idx];
-            if (dst_idx >= dst_max) return 0;
+            if (dst_idx >= dst_max && src_idx + 1 < src_len) return 0;
             code++;
             if (code == 0xFF) {
                 dst[code_idx] = code;
                 code = 0x01;
                 code_idx = dst_idx++;
-                if (dst_idx >= dst_max) return 0;
+                if (dst_idx >= dst_max && src_idx + 1 < src_len) return 0;
             }
         }
         src_idx++;
